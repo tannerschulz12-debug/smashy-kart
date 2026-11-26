@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Smashy Kart: Wanted</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- Fullscreen 3D WebGL Voxel World -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- Floating 3D->2D Player Nametags & Elimination Bubbles -->
+  <div id="world-labels" class="world-labels" aria-hidden="true"></div>
+
+  <!--Screen-edge Wanted Siren Vignette & Busted Danger Flash -->
+  <div id="danger-vignette" class="danger-vignette hidden"></div>
+
+  <!-- ======================== IN-GAME HUD ======================== -->
+  <div id="hud" class="hud hidden">
+    <div class="hud-top">
+      <div class="hud-left-stack">
+        <div class="wanted-box" id="wanted-stars" aria-label="Wanted level">
+          <span class="star active">★</span>
+          <span class="star">★</span>
+          <span class="star">★</span>
+          <span class="star">★</span>
+          <span class="star">★</span>
+        </div>
+        <div class="hp-pill">
+          <span class="hp-label">CAR</span>
+          <div class="hp-track"><div id="hp-fill" class="hp-fill"></div></div>
+        </div>
+        <div id="busted-alert" class="busted-alert hidden">
+          <div class="busted-title">BOXED IN! ESCAPE!</div>
+          <div class="busted-track"><div id="busted-fill" class="busted-fill"></div></div>
+        </div>
+      </div>
+
+      <!-- Mario Kart Item Roulette Slot (Top Center) -->
+      <div class="item-slot-wrap">
+        <button id="hud-item-slot" class="item-slot empty" type="button" aria-label="Held ability">
+          <div id="item-slot-icon" class="item-slot-icon">?</div>
+          <div id="item-slot-name" class="item-slot-name">GET A ? BOX</div>
+          <div id="item-slot-charges" class="item-slot-charges hidden">x3</div>
+        </button>
+        <div id="active-buffs" class="active-buffs"></div>
+      </div>
+
+      <div class="hud-right-stack">
+        <div class="score-card">
+          <div class="timer-readout" id="hud-timer">0:00.0</div>
+          <div class="score-readout"><span id="hud-score">0</span> PTS</div>
+        </div>
+        <button id="btn-pause" class="icon-btn" type="button" aria-label="Pause or Menu">✕</button>
+      </div>
+    </div>
+
+    <!-- Multiplayer "Who Lasts Longer" Live Survivor Strip -->
+    <div id="survivor-strip" class="survivor-strip hidden"></div>
+
+    <!-- Live Center Kill / Chaos Feed -->
+    <div id="chaos-toast" class="chaos-toast hidden"></div>
+
+    <!-- Countdown Banner (3.. 2.. 1.. SMASH!) -->
+    <div id="countdown-banner" class="countdown-banner hidden">3</div>
+
+    <!-- Spectator Bar (shown in Party Mode if you get Busted while friends are still running!) -->
+    <div id="spectator-bar" class="spectator-bar hidden">
+      <div class="spectator-info">
+        <strong id="spectator-status">YOU GOT BUSTED!</strong>
+        <span id="spectator-watching">Watching survivor...</span>
+      </div>
+      <button id="btn-next-spectate" class="arcade-btn small cyan" type="button">Switch Camera</button>
+    </div>
+
+    <!-- Mobile & Touch Controls -->
+    <div id="touch-controls" class="touch-controls">
+      <!-- Split-screen Smashy Road steering zones -->
+      <div id="split-steer" class="split-steer">
+        <div id="steer-left-zone" class="steer-zone left">
+          <span class="steer-hint">◀</span>
+        </div>
+        <div id="steer-right-zone" class="steer-zone right">
+          <span class="steer-hint">▶</span>
+        </div>
+      </div>
+
+      <!-- Optional Thumb Joystick -->
+      <div id="joystick-zone" class="joystick-zone hidden">
+        <div id="joystick-base" class="joystick-base">
+          <div id="joystick-stick" class="joystick-stick"></div>
+        </div>
+      </div>
+
+      <!-- Right-Thumb Action Buttons (Mario Kart Item + Horn/Brake) -->
+      <div class="action-cluster">
+        <button id="btn-use-item" class="use-item-btn disabled" type="button">
+          <span id="btn-use-item-icon" class="use-icon">?</span>
+          <span class="use-label">ITEM</span>
+        </button>
+        <div class="mini-actions">
+          <button id="btn-brake" class="mini-action-btn" type="button">BRAKE</button>
+          <button id="btn-horn" class="mini-action-btn horn" type="button">📢</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== HOME / TITLE SCREEN ======================== -->
+  <div id="home-screen" class="screen-overlay">
+    <div class="home-shell">
+      <header class="brand-header">
+        <div class="wanted-badge">★ 5-STAR PARTY CHASE ★</div>
+        <h1 class="game-title">SMASHY KART</h1>
+        <p class="game-subtitle">Put your own people on cars, grab rainbow <strong>?</strong> abilities, and outlast your friends.</p>
+      </header>
+
+      <!-- Live Character Preview Card -->
+      <div class="hero-loadout-card">
+        <div class="loadout-avatar-wrap">
+          <img id="home-avatar-img" class="loadout-avatar-img" alt="Selected character" />
+          <button id="btn-quick-photo" class="pill-edit-btn" type="button">Upload Photo</button>
+        </div>
+        <div class="loadout-details">
+          <input id="home-player-name" class="name-input" type="text" maxlength="16" placeholder="Your Name" value="Tanner" />
+          <div class="mode-pills" id="home-mode-pills">
+            <button type="button" class="mode-pill active" data-mode="car_driver">On a Car</button>
+            <button type="button" class="mode-pill" data-mode="photo_car">Look Like a Car</button>
+            <button type="button" class="mode-pill" data-mode="runner">Just Myself</button>
+          </div>
+          <div class="loadout-summary" id="home-loadout-summary">Getaway Coupe · Sunny Metro City · All 8 Items</div>
+        </div>
+      </div>
+
+      <!-- Primary Play Actions -->
+      <div class="primary-cta-row">
+        <button id="btn-open-lobby" class="arcade-btn giant gold" type="button">
+          <span class="btn-main-text">PLAY WITH FRIENDS</span>
+          <span class="btn-sub-text">Phone Party Lobby · QR Invite · Last One Standing</span>
+        </button>
+        <button id="btn-play-solo" class="arcade-btn giant red" type="button">
+          <span class="btn-main-text">PLAY SOLO NOW</span>
+          <span class="btn-sub-text">Instant 1-Player Smashy Chase</span>
+        </button>
+      </div>
+
+      <!-- 4 Workshop / Customizer Buttons -->
+      <div class="workshop-grid">
+        <button class="workshop-btn" type="button" data-open-modal="people-modal">
+          <span class="ws-icon">📸</span>
+          <span class="ws-title">People &amp; Cops</span>
+          <span class="ws-sub">Upload faces</span>
+        </button>
+        <button class="workshop-btn" type="button" data-open-modal="garage-modal">
+          <span class="ws-icon">🏎️</span>
+          <span class="ws-title">Garage</span>
+          <span class="ws-sub">12 cars &amp; stats</span>
+        </button>
+        <button class="workshop-btn" type="button" data-open-modal="world-modal">
+          <span class="ws-icon">🎁</span>
+          <span class="ws-title">World &amp; Items</span>
+          <span class="ws-sub">Maps &amp; ? boxes</span>
+        </button>
+        <button class="workshop-btn" type="button" data-open-modal="sound-modal">
+          <span class="ws-icon">🎙️</span>
+          <span class="ws-title">Custom Sounds</span>
+          <span class="ws-sub">Record voice</span>
+        </button>
+      </div>
+
+      <div id="solo-best-bar" class="solo-best-bar">Best Run: <strong id="best-time-label">0.0s</strong> · Top Score: <strong id="best-score-label">0</strong></div>
+    </div>
+  </div>
+
+  <!-- ======================== PARTY LOBBY MODAL ======================== -->
+  <div id="lobby-modal" class="modal-backdrop hidden">
+    <div class="modal-panel wide">
+      <div class="modal-header">
+        <h2>Party Chase Lobby</h2>
+        <button class="close-modal-btn" type="button" data-close-lobby="true">✕</button>
+      </div>
+
+      <!-- Step A: Create or Join Room -->
+      <div id="lobby-entry" class="lobby-entry">
+        <div class="lobby-split">
+          <div class="lobby-box highlight">
+            <h3>Start a Room</h3>
+            <p>Creates a 4-letter code and QR code your friends can scan on their phones.</p>
+            <button id="btn-create-room" class="arcade-btn gold full" type="button">Create Party Room</button>
+          </div>
+          <div class="lobby-box">
+            <h3>Join Friends' Room</h3>
+            <p>Type the 4-letter room code shown on the host's screen.</p>
+            <div class="join-code-row">
+              <input id="join-code-input" class="code-input" type="text" maxlength="6" placeholder="ABCD" autocapitalize="characters" />
+              <button id="btn-join-room" class="arcade-btn cyan" type="button">Join</button>
+            </div>
+          </div>
+        </div>
+        <div id="lobby-error" class="error-banner hidden"></div>
+      </div>
+
+      <!-- Step B: Inside Live Room -->
+      <div id="lobby-room" class="lobby-room hidden">
+        <div class="room-invite-strip">
+          <div id="room-qr-box" class="room-qr-box" aria-label="Scan with phone camera to join"></div>
+          <div class="room-invite-info">
+            <div class="room-code-pill">ROOM CODE: <strong id="room-code-display">----</strong></div>
+            <p class="invite-help">Point phone cameras at the QR code (same Wi-Fi) or share this link:</p>
+            <div class="invite-link-row">
+              <input id="room-share-url" class="share-url-input" type="text" readonly />
+              <button id="btn-copy-link" class="arcade-btn small cyan" type="button">Copy Link</button>
+              <button id="btn-native-share" class="arcade-btn small gold" type="button">Share</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quick Loadout Switcher right inside Lobby -->
+        <div class="lobby-self-strip">
+          <span>Your Mode:</span>
+          <div class="mode-pills compact" id="lobby-mode-pills">
+            <button type="button" class="mode-pill active" data-mode="car_driver">On a Car</button>
+            <button type="button" class="mode-pill" data-mode="photo_car">Look Like a Car</button>
+            <button type="button" class="mode-pill" data-mode="runner">Just Myself</button>
+          </div>
+          <button class="arcade-btn small" type="button" data-open-modal="people-modal">Change Photo</button>
+          <button class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Car</button>
+        </div>
+
+        <div class="roster-heading">Players Queued Up (<span id="lobby-player-count">1</span>) — Crash Into Each Other &amp; Last Longest!</div>
+        <div id="lobby-roster" class="lobby-roster"></div>
+
+        <div class="lobby-footer">
+          <button id="btn-leave-room" class="arcade-btn dark" type="button">Leave Lobby</button>
+          <button id="btn-toggle-ready" class="arcade-btn cyan" type="button">I'm Ready!</button>
+          <button id="btn-host-start" class="arcade-btn gold" type="button">START PARTY CHASE!</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== PEOPLE & PHOTO STUDIO MODAL ======================== -->
+  <div id="people-modal" class="modal-backdrop hidden">
+    <div class="modal-panel wide">
+      <div class="modal-header">
+        <h2>People &amp; Custom Photos</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="people-modal">Done</button>
+      </div>
+
+      <div class="people-layout">
+        <!-- Left: Saved Roster -->
+        <div class="people-roster-col">
+          <div class="section-bar">
+            <h3>Choose Who You Are</h3>
+            <label class="upload-cta-label arcade-btn small gold">
+              + Upload / Take Photo
+              <input id="photo-file-input" type="file" accept="image/*" hidden />
+            </label>
+          </div>
+          <div id="people-grid" class="people-grid"></div>
+
+          <div class="cop-toggle-row">
+            <label class="switch-row">
+              <input id="toggle-custom-cops" type="checkbox" checked />
+              <span><strong>Put Friends on the Police too!</strong> (Anyone marked "Cop" below drives the cop cars chasing you)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Right: Live Photo Cutout Editor (shown when uploading/editing) -->
+        <div id="photo-editor-box" class="photo-editor-box hidden">
+          <h3>Cut Out &amp; Save Person</h3>
+          <div class="crop-preview-stage">
+            <canvas id="photo-crop-canvas" width="256" height="256"></canvas>
+          </div>
+          <input id="photo-person-name" class="name-input full" type="text" maxlength="16" placeholder="Person's Name (e.g. Me, Jake)" />
+          <div class="control-group">
+            <label>Cutout Style</label>
+            <div class="seg-row" id="cutout-shape-btns">
+              <button type="button" class="seg-btn active" data-shape="cutout">Magic Cutout</button>
+              <button type="button" class="seg-btn" data-shape="circle">Head Bubble</button>
+              <button type="button" class="seg-btn" data-shape="full">Full Picture</button>
+            </div>
+          </div>
+          <div class="slider-row">
+            <label>Zoom <span id="val-photo-zoom">1.0x</span></label>
+            <input id="rng-photo-zoom" type="range" min="0.7" max="2.6" step="0.05" value="1.1" />
+          </div>
+          <div class="slider-row">
+            <label>Move Left / Right</label>
+            <input id="rng-photo-x" type="range" min="-100" max="100" step="1" value="0" />
+          </div>
+          <div class="slider-row">
+            <label>Move Up / Down</label>
+            <input id="rng-photo-y" type="range" min="-100" max="100" step="1" value="0" />
+          </div>
+          <div class="slider-row" id="tolerance-row">
+            <label>Background Erase Strength <span id="val-photo-tol">38</span></label>
+            <input id="rng-photo-tol" type="range" min="8" max="90" step="2" value="38" />
+          </div>
+          <label class="switch-row">
+            <input id="chk-person-cop" type="checkbox" checked />
+            <span>Also let police cars use this person's face</span>
+          </label>
+          <div class="editor-btn-row">
+            <button id="btn-cancel-photo" class="arcade-btn dark" type="button">Cancel</button>
+            <button id="btn-save-photo" class="arcade-btn gold" type="button">Save Person</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== GARAGE MODAL ======================== -->
+  <div id="garage-modal" class="modal-backdrop hidden">
+    <div class="modal-panel wide">
+      <div class="modal-header">
+        <h2>Custom Garage &amp; Tuning</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="garage-modal">Done</button>
+      </div>
+
+      <div class="garage-section">
+        <h3>Runner Style (Locked In When Round Starts)</h3>
+        <div class="mode-cards-row" id="garage-mode-cards">
+          <button type="button" class="mode-card active" data-mode="car_driver">
+            <strong>On a Car</strong>
+            <span>Your photo pops out the roof of any car below</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="photo_car">
+            <strong>Look Like a Car</strong>
+            <span>Your photo IS the 3D rolling car body on wheels</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="runner">
+            <strong>Just Myself</strong>
+            <span>Sprint away from police cars on your own two feet</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="garage-section">
+        <h3>12 Blocky Vehicles</h3>
+        <div id="vehicle-grid" class="vehicle-grid"></div>
+      </div>
+
+      <div class="garage-split">
+        <div class="garage-col">
+          <h3>Paint &amp; Colors</h3>
+          <div class="color-picker-row">
+            <label>Body Paint <input id="inp-primary-color" type="color" value="#ef4444" /></label>
+            <label>Racing Stripe <input id="inp-accent-color" type="color" value="#fef08a" /></label>
+          </div>
+          <div class="QuickSwatches" id="paint-swatches"></div>
+        </div>
+
+        <div class="garage-col">
+          <h3>Live Performance Sliders</h3>
+          <div class="slider-row">
+            <label>Top Speed <span id="val-speed-mult">100%</span></label>
+            <input id="rng-speed-mult" type="range" min="0.65" max="1.6" step="0.05" value="1.0" />
+          </div>
+          <div class="slider-row">
+            <label>Drift &amp; Turning <span id="val-drift-mult">100%</span></label>
+            <input id="rng-drift-mult" type="range" min="0.65" max="1.6" step="0.05" value="1.0" />
+          </div>
+          <div class="slider-row">
+            <label>Smash Weight <span id="val-mass-mult">100%</span></label>
+            <input id="rng-mass-mult" type="range" min="0.65" max="1.8" step="0.05" value="1.0" />
+          </div>
+          <div class="slider-row">
+            <label>Character / Car Size <span id="val-scale-mult">100%</span></label>
+            <input id="rng-scale-mult" type="range" min="0.7" max="1.65" step="0.05" value="1.0" />
+          </div>
+          <button id="btn-reset-garage" class="arcade-btn small dark" type="button">Reset Default Stats</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== WORLD & MARIO KART ITEMS MODAL ======================== -->
+  <div id="world-modal" class="modal-backdrop hidden">
+    <div class="modal-panel wide">
+      <div class="modal-header">
+        <h2>World Settings &amp; Mario Kart Item Mixer</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="world-modal">Done</button>
+      </div>
+
+      <div class="garage-split">
+        <div class="garage-col">
+          <h3>Map Theme (Huge 2,400x2,400 World)</h3>
+          <div class="seg-row" id="biome-btns">
+            <button type="button" class="seg-btn active" data-biome="city">🏙️ Metro City</button>
+            <button type="button" class="seg-btn" data-biome="desert">🌵 Desert Canyon</button>
+            <button type="button" class="seg-btn" data-biome="snow">❄️ Alpine Snow</button>
+          </div>
+
+          <div class="slider-row">
+            <label>Cop Craziness <span id="val-cop-intensity">Normal (100%)</span></label>
+            <input id="rng-cop-intensity" type="range" min="0.5" max="1.7" step="0.1" value="1.0" />
+          </div>
+          <div class="slider-row">
+            <label>Starting Wanted Stars <span id="val-start-stars">1 ★</span></label>
+            <input id="rng-start-stars" type="range" min="1" max="5" step="1" value="1" />
+          </div>
+          <div class="slider-row">
+            <label>Rainbow ? Box Frequency <span id="val-box-density">High (120%)</span></label>
+            <input id="rng-box-density" type="range" min="0.5" max="2.2" step="0.1" value="1.2" />
+          </div>
+          <div class="slider-row">
+            <label>Jump Gravity <span id="val-gravity">Normal</span></label>
+            <input id="rng-gravity" type="range" min="0.55" max="1.3" step="0.05" value="1.0" />
+          </div>
+
+          <div class="control-group">
+            <label>Camera View</label>
+            <div class="seg-row" id="camera-mode-btns">
+              <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
+              <button type="button" class="seg-btn" data-cam="chase">Behind Chase Cam</button>
+            </div>
+          </div>
+
+          <div class="control-group">
+            <label>Phone Steering Style</label>
+            <div class="seg-row" id="touch-style-btns">
+              <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap (Smashy)</button>
+              <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="garage-col">
+          <h3>Mario Kart ? Box Abilities (Tap to Toggle)</h3>
+          <div id="ability-mixer-grid" class="ability-mixer-grid"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== CUSTOM SOUND STUDIO MODAL ======================== -->
+  <div id="sound-modal" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2>Custom Voice &amp; Sound Studio</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="sound-modal">Done</button>
+      </div>
+      <p class="modal-lead">Record your own screams, laughs, or sirens (or upload a quick phone clip) for each game moment!</p>
+      <div class="slider-row">
+        <label>Master Game Volume <span id="val-volume">85%</span></label>
+        <input id="rng-volume" type="range" min="0" max="1" step="0.05" value="0.85" />
+      </div>
+      <div id="sound-slots-list" class="sound-slots-list"></div>
+    </div>
+  </div>
+
+  <!-- ======================== GAME OVER / PARTY WINNER SCREEN ======================== -->
+  <div id="gameover-modal" class="modal-backdrop hidden">
+    <div class="modal-panel center">
+      <div id="gameover-badge" class="wanted-badge">BUSTED!</div>
+      <h2 id="gameover-title" class="gameover-title">CHASE OVER</h2>
+      <p id="gameover-reason" class="gameover-reason">Surrounded by SWAT cruisers!</p>
+
+      <div class="stats-trio">
+        <div class="stat-tile">
+          <span class="stat-val" id="go-time">0.0s</span>
+          <span class="stat-lbl">Survived</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-val" id="go-score">0</span>
+          <span class="stat-lbl">Total Score</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-val" id="go-cops">0</span>
+          <span class="stat-lbl">Cops Wrecked</span>
+        </div>
+      </div>
+
+      <!-- Multiplayer "Who Lasted Longest" Leaderboard -->
+      <div id="go-standings-wrap" class="go-standings-wrap hidden">
+        <h3>Who Lasted Longest</h3>
+        <div id="go-standings-list" class="go-standings-list"></div>
+      </div>
+
+      <div class="gameover-actions">
+        <button id="btn-play-again" class="arcade-btn giant gold" type="button">PLAY AGAIN</button>
+        <button id="btn-back-lobby" class="arcade-btn cyan hidden" type="button">Back to Party Lobby</button>
+        <button id="btn-back-home" class="arcade-btn dark" type="button">Main Menu</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
