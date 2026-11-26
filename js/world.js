@@ -1217,13 +1217,13 @@ export class World {
   }
 
   findSpawnPoint(index = 0) {
-    // 12 clean starting-grid slots (4 columns x 3 rows) on the wide central plaza boulevard facing North (angle = 0)
-    const idx = ((Math.floor(index) % 12) + 12) % 12;
+    // 16 clean starting-grid slots (4 columns x 4 rows) on the wide central plaza boulevard facing North (angle = 0)
+    const idx = ((Math.floor(index) % 16) + 16) % 16;
     const col = idx % 4;
     const row = Math.floor(idx / 4);
-    const laneOffsets = [-10.5, -3.5, 3.5, 10.5];
+    const laneOffsets = [-9.9, -3.3, 3.3, 9.9];
     const x = laneOffsets[col];
-    const z = -6.0 - row * 9.0;
+    const z = -4.0 - row * 7.8;
     return { x, z, angle: 0 };
   }
 

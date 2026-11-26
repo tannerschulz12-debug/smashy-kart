@@ -230,11 +230,71 @@
             <button type="button" class="mode-pill" data-mode="photo_car">Look Like a Car</button>
             <button type="button" class="mode-pill" data-mode="runner">Just Myself</button>
           </div>
-          <button class="arcade-btn small" type="button" data-open-modal="people-modal">Change Photo</button>
-          <button class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Car</button>
+          <button id="btn-lobby-photo" class="arcade-btn small" type="button" data-open-modal="people-modal">Change Photo</button>
+          <button id="btn-lobby-car" class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Car</button>
         </div>
 
-        <div class="roster-heading">Players Queued Up (<span id="lobby-player-count">1</span>) — Crash Into Each Other &amp; Last Longest!</div>
+        <!-- Lobby Manager Full Control Panel (Host Only) -->
+        <div id="host-manager-panel" class="host-manager-panel hidden">
+          <div class="manager-header">
+            <strong>👑 Lobby Manager Controls (Applies to All Players)</strong>
+            <button class="arcade-btn small cyan" type="button" data-open-modal="world-modal">Edit ? Items &amp; Map</button>
+          </div>
+
+          <!-- One-Tap Universal Presets -->
+          <div class="preset-row" id="host-preset-btns">
+            <button type="button" class="preset-pill" data-preset="fair">⚖️ Fair Equal Stats</button>
+            <button type="button" class="preset-pill" data-preset="same_car">🚗 Same Car Race</button>
+            <button type="button" class="preset-pill" data-preset="all_foot">🏃 Everyone On Foot</button>
+            <button type="button" class="preset-pill" data-preset="turbo">🔥 135% Turbo Chaos</button>
+          </div>
+
+          <!-- Universal Speed & Map Quick Buttons -->
+          <div class="universal-quick-grid">
+            <div class="uq-group">
+              <span class="uq-label">Everyone's Speed</span>
+              <div class="seg-row tight" id="host-univ-speed">
+                <button type="button" class="seg-btn" data-uspeed="0.85">85%</button>
+                <button type="button" class="seg-btn active" data-uspeed="1">100%</button>
+                <button type="button" class="seg-btn" data-uspeed="1.25">125%</button>
+                <button type="button" class="seg-btn" data-uspeed="1.45">145%</button>
+              </div>
+            </div>
+            <div class="uq-group">
+              <span class="uq-label">Map &amp; Cops</span>
+              <div class="seg-row tight" id="host-univ-map">
+                <button type="button" class="seg-btn active" data-ubiome="city">🏙️ City</button>
+                <button type="button" class="seg-btn" data-ubiome="desert">🌵 Desert</button>
+                <button type="button" class="seg-btn" data-ubiome="snow">❄️ Snow</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Guest Permission Switches -->
+          <div class="perm-switches">
+            <label class="switch-row">
+              <input id="perm-lock-stats" type="checkbox" checked />
+              <span><strong>Lock Equal Speed &amp; Weight</strong> (Stops anyone from boosting their own car's speed or size)</span>
+            </label>
+            <label class="switch-row">
+              <input id="perm-allow-car" type="checkbox" checked />
+              <span>Allow guests to pick different cars (uncheck so everyone uses YOUR car)</span>
+            </label>
+            <label class="switch-row">
+              <input id="perm-allow-mode" type="checkbox" checked />
+              <span>Allow guests to pick runner style (uncheck so everyone uses YOUR mode)</span>
+            </label>
+            <label class="switch-row">
+              <input id="perm-allow-photos" type="checkbox" checked />
+              <span>Allow custom uploaded photos</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Read-only Rules Summary Banner (Shown to Guests joining Lobby) -->
+        <div id="guest-rules-banner" class="guest-rules-banner hidden"></div>
+
+        <div class="roster-heading">Players Queued Up (<span id="lobby-player-count">1</span>/16) — Crash Into Each Other &amp; Last Longest!</div>
         <div id="lobby-roster" class="lobby-roster"></div>
 
         <div class="lobby-footer">
