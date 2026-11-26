@@ -423,15 +423,302 @@ export function renderQrCodeSvg(text, options = {}) {
 }
 
 // ============================================================================
-// 2. Real-Time Phone/Desktop Party Multiplayer Client
+// 2. Zero-Dependency MQTT 3.1.1 over WSS Client (Works Anywhere: 5G + Wi-Fi!)
+// ============================================================================
+
+const CLOUD_MQTT_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://test.mosquitto.org:8081',
+];
+
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const SAFE_AVATAR_RE = /^data:image\/(?:png|webp|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function encodeMqttVarLen(len) {
+  const bytes = [];
+  let x = len >>> 0;
+  do {
+    let encoded = x & 0x7f;
+    x >>>= 7;
+    if (x > 0) encoded |= 0x80;
+    bytes.push(encoded);
+  } while (x > 0);
+  return bytes;
+}
+
+function decodeMqttVarLen(buf, startIdx) {
+  let multiplier = 1;
+  let value = 0;
+  let idx = startIdx;
+  while (idx < buf.length) {
+    const byte = buf[idx++];
+    value += (byte & 0x7f) * multiplier;
+    if ((byte & 0x80) === 0) {
+      return { value, bytesRead: idx - startIdx };
+    }
+    multiplier *= 128;
+    if (multiplier > 128 * 128 * 128) return null;
+  }
+  return null; // Incomplete header in stream buffer
+}
+
+function concatUint8(...arrays) {
+  let total = 0;
+  for (const a of arrays) total += a.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
+function sanitizeCloudProfile(raw = {}, fallbackName = 'Player') {
+  const out = {
+    name: String(raw.name || fallbackName).trim().slice(0, 16) || fallbackName,
+    characterMode:
+      raw.characterMode === 'photo_car' || raw.characterMode === 'runner'
+        ? raw.characterMode
+        : 'car_driver',
+    vehicleId: typeof raw.vehicleId === 'string' ? raw.vehicleId.slice(0, 24) : 'sedan',
+    primaryColor: typeof raw.primaryColor === 'string' ? raw.primaryColor.slice(0, 16) : '#ef4444',
+    accentColor: typeof raw.accentColor === 'string' ? raw.accentColor.slice(0, 16) : '#fef08a',
+    avatarId: typeof raw.avatarId === 'string' ? raw.avatarId.slice(0, 48) : 'default_hero',
+    avatarDataUrl:
+      typeof raw.avatarDataUrl === 'string' &&
+      raw.avatarDataUrl.length <= 240 * 1024 &&
+      SAFE_AVATAR_RE.test(raw.avatarDataUrl)
+        ? raw.avatarDataUrl
+        : null,
+    ready: raw.ready !== undefined ? Boolean(raw.ready) : true,
+  };
+  return out;
+}
+
+class MqttWssClient {
+  constructor(onTopicMessage, onDisconnect) {
+    this.onTopicMessage = onTopicMessage;
+    this.onDisconnect = onDisconnect;
+    this.ws = null;
+    this.connected = false;
+    this.brokerUrl = null;
+    this._rxBuf = new Uint8Array(0);
+    this._pingTimer = null;
+    this._pktId = 1;
+    this._subWaiters = new Map();
+  }
+
+  async connect(brokers = CLOUD_MQTT_BROKERS) {
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN) return this;
+    let lastErr = null;
+    for (const url of brokers) {
+      try {
+        await this._connectSingle(url);
+        return this;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('All internet party relays unreachable');
+  }
+
+  _connectSingle(url) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const ws = new WebSocket(url, 'mqtt');
+      ws.binaryType = 'arraybuffer';
+
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { ws.close(); } catch {}
+          reject(new Error(`MQTT timeout on ${url}`));
+        }
+      }, 4500);
+
+      ws.addEventListener('open', () => {
+        const cid = 'sk_' + Math.random().toString(36).slice(2, 12);
+        const cidBytes = textEncoder.encode(cid);
+        const varHdr = new Uint8Array([
+          0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, // "MQTT"
+          0x04, // Level 4 (MQTT 3.1.1)
+          0x02, // Clean Session
+          0x00, 0x2d, // KeepAlive 45s
+          (cidBytes.length >> 8) & 0xff, cidBytes.length & 0xff,
+        ]);
+        const body = concatUint8(varHdr, cidBytes);
+        const pkt = concatUint8(new Uint8Array([0x10, ...encodeMqttVarLen(body.length)]), body);
+        ws.send(pkt);
+      });
+
+      ws.addEventListener('message', (ev) => {
+        const chunk = new Uint8Array(ev.data);
+        this._rxBuf = this._rxBuf.length === 0 ? chunk : concatUint8(this._rxBuf, chunk);
+
+        while (this._rxBuf.length >= 2) {
+          const typeFlags = this._rxBuf[0];
+          const pktType = typeFlags & 0xf0;
+          const rem = decodeMqttVarLen(this._rxBuf, 1);
+          if (!rem) break;
+          const totalLen = 1 + rem.bytesRead + rem.value;
+          if (this._rxBuf.length < totalLen) break;
+
+          const bodyStart = 1 + rem.bytesRead;
+          const body = this._rxBuf.subarray(bodyStart, totalLen);
+          this._rxBuf = this._rxBuf.subarray(totalLen);
+
+          if (pktType === 0x20) {
+            // CONNACK
+            clearTimeout(timeout);
+            if (body[1] === 0) {
+              this.ws = ws;
+              this.connected = true;
+              this.brokerUrl = url;
+              this._startPing();
+              if (!settled) {
+                settled = true;
+                resolve(this);
+              }
+            } else if (!settled) {
+              settled = true;
+              reject(new Error(`CONNACK refused: ${body[1]}`));
+            }
+          } else if (pktType === 0x90) {
+            // SUBACK
+            const id = (body[0] << 8) | body[1];
+            const waiter = this._subWaiters.get(id);
+            if (waiter) {
+              this._subWaiters.delete(id);
+              waiter();
+            }
+          } else if (pktType === 0x30) {
+            // PUBLISH
+            const topicLen = (body[0] << 8) | body[1];
+            let pos = 2 + topicLen;
+            const topic = textDecoder.decode(body.subarray(2, pos));
+            const qos = (typeFlags >> 1) & 0x03;
+            if (qos > 0) pos += 2;
+            const payloadStr = textDecoder.decode(body.subarray(pos));
+            try {
+              this.onTopicMessage?.(topic, JSON.parse(payloadStr));
+            } catch {
+              // ignore malformed JSON
+            }
+          }
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        clearTimeout(timeout);
+        this._stopPing();
+        const wasConnected = this.connected && this.ws === ws;
+        if (this.ws === ws) {
+          this.connected = false;
+          this.ws = null;
+        }
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Closed before CONNACK on ${url}`));
+        } else if (wasConnected) {
+          this.onDisconnect?.();
+        }
+      });
+
+      ws.addEventListener('error', () => {
+        if (!settled) {
+          clearTimeout(timeout);
+          settled = true;
+          try { ws.close(); } catch {}
+          reject(new Error(`WebSocket error on ${url}`));
+        }
+      });
+    });
+  }
+
+  _startPing() {
+    this._stopPing();
+    this._pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(new Uint8Array([0xc0, 0x00]));
+      }
+    }, 18000);
+  }
+
+  _stopPing() {
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer);
+      this._pingTimer = null;
+    }
+  }
+
+  subscribe(topic) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('Not connected'));
+    }
+    const id = (this._pktId++ & 0x7fff) || 1;
+    const tBytes = textEncoder.encode(topic);
+    const body = concatUint8(
+      new Uint8Array([(id >> 8) & 0xff, id & 0xff, (tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
+      tBytes,
+      new Uint8Array([0x00]) // QoS 0
+    );
+    const pkt = concatUint8(new Uint8Array([0x82, ...encodeMqttVarLen(body.length)]), body);
+    return new Promise((resolve) => {
+      const fallback = setTimeout(() => {
+        this._subWaiters.delete(id);
+        resolve();
+      }, 650);
+      this._subWaiters.set(id, () => {
+        clearTimeout(fallback);
+        resolve();
+      });
+      this.ws.send(pkt);
+    });
+  }
+
+  publish(topic, obj) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const tBytes = textEncoder.encode(topic);
+    const pBytes = textEncoder.encode(JSON.stringify(obj));
+    const body = concatUint8(
+      new Uint8Array([(tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
+      tBytes,
+      pBytes
+    );
+    const pkt = concatUint8(new Uint8Array([0x30, ...encodeMqttVarLen(body.length)]), body);
+    this.ws.send(pkt);
+  }
+
+  close() {
+    this._stopPing();
+    this._subWaiters.clear();
+    if (this.ws) {
+      const w = this.ws;
+      this.ws = null;
+      this.connected = false;
+      try { w.close(); } catch {}
+    }
+  }
+}
+
+// ============================================================================
+// 3. Real-Time Phone/Desktop Party Multiplayer Client (Local WS + 24/7 Cloud!)
 // ============================================================================
 
 export class MultiplayerClient {
   constructor(options = {}) {
     this.wsUrl = options.wsUrl || null;
+    this.forceCloud = Boolean(options.forceCloud);
+    this.cloudBrokers = options.cloudBrokers || CLOUD_MQTT_BROKERS;
+    this.isStaticCloud = false;
+
     this.ws = null;
+    this.mqtt = null;
     this.connected = false;
-    this.playerId = null;
+    this.playerId = 'p_' + Math.random().toString(36).slice(2, 10);
     this.roomCode = null;
     this.isHost = false;
     this.roomState = null;
@@ -446,7 +733,11 @@ export class MultiplayerClient {
     this._lastStateSentAt = 0;
     this._lastProfile = null;
 
-    // Optional direct callback hooks in constructor options
+    // Cloud Host-Coordinator state (used when playing on 24/7 static HTTPS page!)
+    this._cloudHostRoom = null;
+    this._joinTimeout = null;
+    this._joinRetry = null;
+
     for (const [key, val] of Object.entries(options)) {
       if (key.startsWith('on') && typeof val === 'function') {
         const evtName = key.slice(2, 3).toLowerCase() + key.slice(3);
@@ -486,41 +777,76 @@ export class MultiplayerClient {
     return /^[A-Z0-9]{4}$/.test(code) ? code : null;
   }
 
+  _getStaticBaseUrl() {
+    if (typeof window === 'undefined' || !window.location?.origin) {
+      return 'http://localhost:4567';
+    }
+    const cleanPath = (window.location.pathname || '')
+      .replace(/\/index\.html$/i, '')
+      .replace(/\/+$/, '');
+    return `${window.location.origin}${cleanPath}`;
+  }
+
   async fetchNetworkInfo(baseHttpUrl = '') {
+    if (this.forceCloud) {
+      this.isStaticCloud = true;
+      const shareBaseUrl = this._getStaticBaseUrl();
+      this.networkInfo = { port: 443, hostname: 'cloud', lanIps: [], shareBaseUrl, urls: [shareBaseUrl] };
+      return this.networkInfo;
+    }
+
     try {
-      const res = await fetch(`${baseHttpUrl}/api/network-info`, { cache: 'no-store' });
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 1400) : null;
+      const res = await fetch(`${baseHttpUrl}/api/network-info`, {
+        cache: 'no-store',
+        signal: ctrl?.signal,
+      });
+      if (timer) clearTimeout(timer);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      this.networkInfo = await res.json();
+      const json = await res.json();
+      if (!json || !json.shareBaseUrl) throw new Error('Invalid network-info');
+      this.isStaticCloud = false;
+      this.networkInfo = json;
       this._emit('network_info', this.networkInfo);
       return this.networkInfo;
     } catch {
-      const fallbackOrigin =
-        typeof window !== 'undefined' && window.location?.origin
-          ? window.location.origin
-          : 'http://localhost:4567';
+      // Running on static 24/7 HTTPS page (e.g. GitHub Pages) -> enable anywhere internet party relay!
+      this.isStaticCloud = true;
+      const shareBaseUrl = this._getStaticBaseUrl();
       this.networkInfo = {
-        port: 4567,
-        hostname: 'localhost',
+        port: 443,
+        hostname: 'cloud',
         lanIps: [],
-        shareBaseUrl: fallbackOrigin,
-        urls: [fallbackOrigin],
+        shareBaseUrl,
+        urls: [shareBaseUrl],
       };
       return this.networkInfo;
     }
   }
 
   getShareUrl(roomCode = this.roomCode) {
-    const base =
-      this.networkInfo?.shareBaseUrl ||
-      (typeof window !== 'undefined' && window.location?.origin
-        ? window.location.origin
-        : 'http://localhost:4567');
+    const base = this.networkInfo?.shareBaseUrl || this._getStaticBaseUrl();
     const cleanBase = base.replace(/\/+$/, '');
     return roomCode ? `${cleanBase}/?room=${encodeURIComponent(roomCode)}` : `${cleanBase}/`;
   }
 
   getQrCodeSvg(roomCode = this.roomCode, options = {}) {
     return renderQrCodeSvg(this.getShareUrl(roomCode), options);
+  }
+
+  _useCloudMode() {
+    if (this.forceCloud) return true;
+    if (this.wsUrl) return false;
+    if (this.isStaticCloud) return true;
+    if (typeof window !== 'undefined' && /\.github\.io$|\.pages\.dev$|\.netlify\.app$|\.vercel\.app$/i.test(window.location.hostname)) {
+      return true;
+    }
+    return false;
+  }
+
+  _roomTopic(code) {
+    return `smashykart/v2/room/${String(code || '').toUpperCase()}`;
   }
 
   _resolveWsUrl(explicitUrl) {
@@ -533,7 +859,28 @@ export class MultiplayerClient {
     return 'ws://127.0.0.1:4567/ws';
   }
 
-  connect(explicitUrl) {
+  async connect(explicitUrl) {
+    if (this._useCloudMode() && !explicitUrl) {
+      if (this.mqtt && this.mqtt.connected) {
+        this.connected = true;
+        return this;
+      }
+      if (!this.mqtt) {
+        this.mqtt = new MqttWssClient(
+          (topic, packet) => this._handleCloudPacket(topic, packet),
+          () => {
+            this.connected = false;
+            this._emit('disconnected', {});
+          }
+        );
+      }
+      await this.mqtt.connect(this.cloudBrokers);
+      this.connected = true;
+      this._emit('connected', { url: this.mqtt.brokerUrl, cloud: true });
+      this._emit('welcome', { type: 'welcome', playerId: this.playerId });
+      return this;
+    }
+
     const targetUrl = this._resolveWsUrl(explicitUrl);
     this.wsUrl = targetUrl;
     this._shouldReconnect = true;
@@ -556,7 +903,6 @@ export class MultiplayerClient {
           ws.send(this._sendQueue.shift());
         }
 
-        // Rejoin active room seamlessly if reconnected mid-lobby
         if (this.roomCode && this._lastProfile && !settled) {
           this._sendRaw({ type: 'join_room', code: this.roomCode, profile: this._lastProfile });
         }
@@ -604,25 +950,46 @@ export class MultiplayerClient {
 
   disconnect() {
     this._shouldReconnect = false;
+    this._clearJoinTimers();
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    if (this._cloudHostRoom?.match?.countdownTimer) {
+      clearTimeout(this._cloudHostRoom.match.countdownTimer);
+    }
+    this._cloudHostRoom = null;
     this.remoteSnapshots.clear();
     this.roomCode = null;
     this.roomState = null;
+    if (this.mqtt) {
+      this.mqtt.close();
+      this.mqtt = null;
+    }
     if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
+      try { this.ws.close(); } catch {}
       this.ws = null;
     }
     this.connected = false;
   }
 
+  _clearJoinTimers() {
+    if (this._joinTimeout) {
+      clearTimeout(this._joinTimeout);
+      this._joinTimeout = null;
+    }
+    if (this._joinRetry) {
+      clearTimeout(this._joinRetry);
+      this._joinRetry = null;
+    }
+  }
+
   _sendRaw(obj) {
+    if (this._useCloudMode()) {
+      this._sendCloudCommand(obj);
+      return;
+    }
+
     const serialized = JSON.stringify(obj);
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(serialized);
@@ -636,18 +1003,431 @@ export class MultiplayerClient {
     }
   }
 
+  // ==========================================================================
+  // Cloud Internet Party Room Coordinator (Host-in-Browser over WSS Pub/Sub)
+  // ==========================================================================
+
+  _generateRoomCode() {
+    let code = '';
+    for (let i = 0; i < 4; i++) {
+      code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
+    }
+    return code;
+  }
+
+  _publishCloud(code, packet) {
+    if (!this.mqtt || !this.mqtt.connected || !code) return;
+    this.mqtt.publish(this._roomTopic(code), packet);
+  }
+
+  _serializeCloudRoom(room) {
+    const players = [];
+    let idx = 0;
+    for (const [id, member] of room.members.entries()) {
+      players.push({
+        id,
+        name: member.profile.name,
+        isHost: id === room.hostId,
+        spawnIndex: idx++,
+        characterMode: member.profile.characterMode,
+        vehicleId: member.profile.vehicleId,
+        primaryColor: member.profile.primaryColor,
+        accentColor: member.profile.accentColor,
+        avatarId: member.profile.avatarId || `net_${id}`,
+        avatarDataUrl: member.profile.avatarDataUrl || null,
+        ready: Boolean(member.profile.ready),
+      });
+    }
+    return {
+      type: 'room_state',
+      code: room.code,
+      roomCode: room.code,
+      hostId: room.hostId,
+      state: room.state,
+      settings: room.settings,
+      players,
+    };
+  }
+
+  _computeCloudStandings(room) {
+    if (!room?.match) return [];
+    const elapsedSec = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
+    const list = Array.from(room.match.participants.values()).map((p) => ({
+      ...p,
+      survivalTime: Number((p.alive ? Math.max(p.survivalTime || 0, elapsedSec) : p.survivalTime || 0).toFixed(2)),
+    }));
+    list.sort((a, b) => {
+      if (a.alive !== b.alive) return a.alive ? -1 : 1;
+      if (Math.abs(b.survivalTime - a.survivalTime) > 0.001) return b.survivalTime - a.survivalTime;
+      return (b.score || 0) - (a.score || 0);
+    });
+    return list.map((p, idx) => ({
+      rank: idx + 1,
+      winner: idx === 0,
+      crowned: idx === 0,
+      id: p.id,
+      playerId: p.id,
+      name: p.name,
+      alive: p.alive,
+      survivalTime: p.survivalTime,
+      score: Math.round(p.score || 0),
+      copsWrecked: p.copsWrecked || 0,
+      eliminatedReason: p.eliminatedReason,
+      killerName: p.killerName,
+    }));
+  }
+
+  _evaluateCloudMatchEnd(room) {
+    if (!room?.match || room.match.finished) return;
+    const participants = Array.from(room.match.participants.values());
+    const total = participants.length;
+    if (total === 0) return;
+    const alive = participants.filter((p) => p.alive);
+    const shouldFinish = (total >= 2 && alive.length <= 1) || alive.length === 0;
+    if (!shouldFinish) return;
+
+    if (alive.length === 1) {
+      const maxElim = participants
+        .filter((p) => !p.alive)
+        .reduce((mx, p) => Math.max(mx, p.survivalTime || 0), 0);
+      const elapsed = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
+      alive[0].survivalTime = Math.max(alive[0].survivalTime || 0, elapsed, maxElim + 0.05);
+    }
+
+    room.match.finished = true;
+    room.state = 'results';
+    const standings = this._computeCloudStandings(room);
+    const winner = standings[0] || null;
+    const msg = {
+      type: 'match_results',
+      code: room.code,
+      roomCode: room.code,
+      winnerId: winner ? winner.id : null,
+      winnerName: winner ? winner.name : null,
+      standings,
+      leaderboard: standings,
+    };
+    this._publishCloud(room.code, { env: 'h2c', msg });
+    this._handleServerMessage(msg);
+  }
+
+  _broadcastCloudFromHost(room, msg, targetId = null) {
+    this._publishCloud(room.code, { env: 'h2c', targetId, msg });
+    if (!targetId || targetId === this.playerId) {
+      this._handleServerMessage(msg);
+    }
+  }
+
+  async _sendCloudCommand(obj) {
+    if (!obj || typeof obj !== 'object') return;
+    switch (obj.type) {
+      case 'leave_room': {
+        const oldCode = this._lastCloudCode;
+        this._clearJoinTimers();
+        if (oldCode && this.mqtt?.connected) {
+          this._publishCloud(oldCode, { env: 'c2h', from: this.playerId, cmd: { type: 'leave_room' } });
+        }
+        if (this._cloudHostRoom?.match?.countdownTimer) {
+          clearTimeout(this._cloudHostRoom.match.countdownTimer);
+        }
+        this._cloudHostRoom = null;
+        this._lastCloudCode = null;
+        break;
+      }
+
+      case 'update_profile': {
+        if (!this.roomCode) return;
+        if (this.isHost && this._cloudHostRoom) {
+          const me = this._cloudHostRoom.members.get(this.playerId);
+          if (me) {
+            me.profile = sanitizeCloudProfile({ ...me.profile, ...(obj.profile || {}) }, me.profile.name);
+            const st = this._serializeCloudRoom(this._cloudHostRoom);
+            this._broadcastCloudFromHost(this._cloudHostRoom, st);
+          }
+        } else {
+          this._publishCloud(this.roomCode, {
+            env: 'c2h',
+            from: this.playerId,
+            cmd: { type: 'update_profile', profile: obj.profile },
+          });
+        }
+        break;
+      }
+
+      case 'update_room_settings': {
+        if (this.isHost && this._cloudHostRoom) {
+          this._cloudHostRoom.settings = { ...this._cloudHostRoom.settings, ...(obj.settings || {}) };
+          this._broadcastCloudFromHost(this._cloudHostRoom, {
+            type: 'room_settings_updated',
+            code: this._cloudHostRoom.code,
+            roomCode: this._cloudHostRoom.code,
+            settings: this._cloudHostRoom.settings,
+          });
+          this._broadcastCloudFromHost(this._cloudHostRoom, this._serializeCloudRoom(this._cloudHostRoom));
+        }
+        break;
+      }
+
+      case 'start_match': {
+        if (!this.isHost || !this._cloudHostRoom) return;
+        const room = this._cloudHostRoom;
+        if (room.match?.countdownTimer) clearTimeout(room.match.countdownTimer);
+        const seed = Number.isFinite(Number(obj.seed))
+          ? Math.floor(Math.abs(Number(obj.seed)))
+          : Math.floor(100000 + Math.random() * 899999);
+        room.settings = { ...(room.settings || {}), worldSeed: seed };
+        room.state = 'countdown';
+
+        const participants = new Map();
+        const serialized = this._serializeCloudRoom(room);
+        for (const p of serialized.players) {
+          participants.set(p.id, {
+            id: p.id,
+            name: p.name,
+            spawnIndex: p.spawnIndex,
+            alive: true,
+            survivalTime: 0,
+            score: 0,
+            copsWrecked: 0,
+            eliminatedReason: null,
+            killerName: null,
+          });
+        }
+
+        const now = Date.now();
+        room.match = {
+          seed,
+          liveStartAt: now + 3000,
+          finished: false,
+          participants,
+          countdownTimer: setTimeout(() => {
+            if (room.state === 'countdown' && room.match && !room.match.finished) {
+              room.state = 'playing';
+              room.match.liveStartAt = Date.now();
+              this._broadcastCloudFromHost(room, {
+                type: 'match_start',
+                code: room.code,
+                roomCode: room.code,
+                seed,
+              });
+            }
+          }, 3000),
+        };
+
+        this._broadcastCloudFromHost(room, {
+          type: 'match_countdown',
+          code: room.code,
+          roomCode: room.code,
+          seed,
+          countdownSec: 3,
+          settings: room.settings,
+          players: serialized.players,
+        });
+        break;
+      }
+
+      case 'player_state': {
+        if (!this.roomCode) return;
+        if (this.isHost && this._cloudHostRoom?.match && !this._cloudHostRoom.match.finished) {
+          const part = this._cloudHostRoom.match.participants.get(this.playerId);
+          if (part && part.alive) {
+            part.survivalTime = Math.max(part.survivalTime, Number(obj.state?.survivalTime) || 0);
+            part.score = Number(obj.state?.score) || part.score;
+            part.copsWrecked = Number(obj.state?.copsWrecked) || part.copsWrecked;
+          }
+        }
+        this._publishCloud(this.roomCode, {
+          env: 'peer',
+          from: this.playerId,
+          msg: { type: 'player_state', playerId: this.playerId, state: { ...obj.state, id: this.playerId } },
+        });
+        break;
+      }
+
+      case 'ability_event': {
+        if (!this.roomCode) return;
+        this._publishCloud(this.roomCode, {
+          env: 'peer',
+          from: this.playerId,
+          msg: { type: 'ability_event', event: obj.event },
+        });
+        break;
+      }
+
+      case 'pvp_bump': {
+        if (!this.roomCode) return;
+        this._publishCloud(this.roomCode, {
+          env: 'peer',
+          from: this.playerId,
+          msg: obj,
+        });
+        break;
+      }
+
+      case 'player_eliminated': {
+        if (!this.roomCode) return;
+        if (this.isHost && this._cloudHostRoom) {
+          this._handleCloudEliminationOnHost(this._cloudHostRoom, this.playerId, obj);
+        } else {
+          this._publishCloud(this.roomCode, { env: 'c2h', from: this.playerId, cmd: obj });
+        }
+        break;
+      }
+
+      case 'return_to_lobby': {
+        if (!this.roomCode) return;
+        if (this.isHost && this._cloudHostRoom) {
+          this._handleCloudReturnLobbyOnHost(this._cloudHostRoom, this.playerId);
+        } else {
+          this._publishCloud(this.roomCode, { env: 'c2h', from: this.playerId, cmd: obj });
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  _handleCloudEliminationOnHost(room, pid, cmd) {
+    if (!room?.match || room.match.finished) return;
+    const part = room.match.participants.get(pid);
+    if (!part || !part.alive) return;
+    part.alive = false;
+    part.survivalTime = Number((Number(cmd.survivalTime) || 0).toFixed(2));
+    part.score = Math.round(Number(cmd.score) || part.score || 0);
+    part.copsWrecked = Number(cmd.copsWrecked) || part.copsWrecked || 0;
+    part.eliminatedReason = cmd.reason || 'busted';
+    part.killerName = cmd.killerName || null;
+
+    const announcement = part.killerName
+      ? part.eliminatedReason === 'drowned'
+        ? `${part.killerName} slammed ${part.name} into the river!`
+        : `${part.killerName} wrecked ${part.name}!`
+      : part.eliminatedReason === 'drowned'
+        ? `${part.name} drowned in the river!`
+        : part.eliminatedReason === 'busted'
+          ? `${part.name} got BUSTED by the police!`
+          : `${part.name} WRECKED out!`;
+
+    this._broadcastCloudFromHost(room, {
+      type: 'player_eliminated',
+      playerId: pid,
+      playerName: part.name,
+      reason: part.eliminatedReason,
+      killerName: part.killerName,
+      announcement,
+      survivalTime: part.survivalTime,
+      standings: this._computeCloudStandings(room),
+    });
+    this._evaluateCloudMatchEnd(room);
+  }
+
+  _handleCloudReturnLobbyOnHost(room, requesterId) {
+    if (room.state !== 'results' && requesterId !== room.hostId) return;
+    if (room.match?.countdownTimer) clearTimeout(room.match.countdownTimer);
+    room.match = null;
+    room.state = 'lobby';
+    this._broadcastCloudFromHost(room, { type: 'return_to_lobby', code: room.code, roomCode: room.code });
+    this._broadcastCloudFromHost(room, this._serializeCloudRoom(room));
+  }
+
+  _handleCloudPacket(topic, packet) {
+    if (!packet || typeof packet !== 'object') return;
+
+    // 1. Direct 1-hop peer packets (20Hz position, Mario Kart abilities, PvP slams)
+    if (packet.env === 'peer') {
+      if (!packet.from || packet.from === this.playerId) return;
+      if (this.isHost && this._cloudHostRoom?.match && packet.msg?.type === 'player_state') {
+        const part = this._cloudHostRoom.match.participants.get(packet.from);
+        if (part && part.alive) {
+          part.survivalTime = Math.max(part.survivalTime, Number(packet.msg.state?.survivalTime) || 0);
+          part.score = Number(packet.msg.state?.score) || part.score;
+          part.copsWrecked = Number(packet.msg.state?.copsWrecked) || part.copsWrecked;
+        }
+      }
+      this._handleServerMessage(packet.msg);
+      return;
+    }
+
+    // 2. Host-to-Client room broadcasts
+    if (packet.env === 'h2c') {
+      if (this.isHost) return; // Host already applied locally
+      if (packet.targetId && packet.targetId !== this.playerId) return;
+      if (packet.msg?.type === 'room_joined') {
+        this._clearJoinTimers();
+      }
+      this._handleServerMessage(packet.msg);
+      return;
+    }
+
+    // 3. Client-to-Host requests (processed ONLY by the Host's phone/browser!)
+    if (packet.env === 'c2h' && this.isHost && this._cloudHostRoom) {
+      const room = this._cloudHostRoom;
+      const fromId = packet.from;
+      const cmd = packet.cmd;
+      if (!fromId || !cmd) return;
+
+      if (cmd.type === 'join_room') {
+        if (room.members.size >= 10 && !room.members.has(fromId)) {
+          this._broadcastCloudFromHost(
+            room,
+            { type: 'error', code: 'ROOM_FULL', message: 'Party room is full (max 10 players).' },
+            fromId
+          );
+          return;
+        }
+        const prof = sanitizeCloudProfile(cmd.profile || {}, `Player ${room.members.size + 1}`);
+        prof.avatarId = `net_${fromId}`;
+        room.members.set(fromId, { id: fromId, profile: prof });
+        const serialized = this._serializeCloudRoom(room);
+        this._broadcastCloudFromHost(
+          room,
+          {
+            type: 'room_joined',
+            code: room.code,
+            roomCode: room.code,
+            playerId: fromId,
+            isHost: false,
+            room: serialized,
+          },
+          fromId
+        );
+        this._broadcastCloudFromHost(room, serialized);
+      } else if (cmd.type === 'update_profile') {
+        const m = room.members.get(fromId);
+        if (m) {
+          m.profile = sanitizeCloudProfile({ ...m.profile, ...(cmd.profile || {}) }, m.profile.name);
+          m.profile.avatarId = `net_${fromId}`;
+          this._broadcastCloudFromHost(room, this._serializeCloudRoom(room));
+        }
+      } else if (cmd.type === 'leave_room') {
+        room.members.delete(fromId);
+        if (room.match && !room.match.finished) {
+          this._handleCloudEliminationOnHost(room, fromId, { reason: 'disconnected', survivalTime: 0 });
+        }
+        this._broadcastCloudFromHost(room, this._serializeCloudRoom(room));
+      } else if (cmd.type === 'player_eliminated') {
+        this._handleCloudEliminationOnHost(room, fromId, cmd);
+      } else if (cmd.type === 'return_to_lobby') {
+        this._handleCloudReturnLobbyOnHost(room, fromId);
+      }
+    }
+  }
+
   _handleServerMessage(msg) {
     if (!msg || typeof msg !== 'object') return;
 
     switch (msg.type) {
       case 'welcome': {
-        this.playerId = msg.playerId;
+        this.playerId = msg.playerId || this.playerId;
         this._emit('welcome', msg);
         break;
       }
 
       case 'room_joined': {
         this.roomCode = msg.code || msg.roomCode;
+        this._lastCloudCode = this.roomCode;
         this.playerId = msg.playerId || this.playerId;
         this.isHost = Boolean(msg.isHost);
         if (msg.room) this.roomState = msg.room;
@@ -756,7 +1536,7 @@ export class MultiplayerClient {
 
   getInterpolatedRemotePlayers(nowMs) {
     const now = nowMs ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    const renderTime = now - 75; // 75ms buffer smooths 20Hz Wi-Fi jitter cleanly
+    const renderTime = now - 75;
     const results = [];
 
     for (const [id, bucket] of this.remoteSnapshots.entries()) {
@@ -806,6 +1586,39 @@ export class MultiplayerClient {
   async createRoom(profile = {}, settings = {}) {
     this._lastProfile = { ...profile };
     await this.connect();
+
+    if (this._useCloudMode()) {
+      this._clearJoinTimers();
+      const code = this._generateRoomCode();
+      await this.mqtt.subscribe(this._roomTopic(code));
+      const cleanProfile = sanitizeCloudProfile(profile, 'Host');
+      cleanProfile.avatarId = `net_${this.playerId}`;
+
+      this._cloudHostRoom = {
+        code,
+        hostId: this.playerId,
+        state: 'lobby',
+        settings: { ...settings },
+        members: new Map([[this.playerId, { id: this.playerId, profile: cleanProfile }]]),
+        match: null,
+      };
+      this.isHost = true;
+      this.roomCode = code;
+      this._lastCloudCode = code;
+
+      const serialized = this._serializeCloudRoom(this._cloudHostRoom);
+      this._handleServerMessage({
+        type: 'room_joined',
+        code,
+        roomCode: code,
+        playerId: this.playerId,
+        isHost: true,
+        room: serialized,
+      });
+      this._handleServerMessage(serialized);
+      return;
+    }
+
     this._sendRaw({ type: 'create_room', profile, settings });
   }
 
@@ -813,10 +1626,42 @@ export class MultiplayerClient {
     const cleanCode = String(code || '').trim().toUpperCase();
     this._lastProfile = { ...profile };
     await this.connect();
+
+    if (this._useCloudMode()) {
+      this._clearJoinTimers();
+      this._cloudHostRoom = null;
+      this.isHost = false;
+      this._lastCloudCode = cleanCode;
+      await this.mqtt.subscribe(this._roomTopic(cleanCode));
+
+      const sendJoinReq = () => {
+        this._publishCloud(cleanCode, {
+          env: 'c2h',
+          from: this.playerId,
+          cmd: { type: 'join_room', code: cleanCode, profile },
+        });
+      };
+      sendJoinReq();
+      this._joinRetry = setTimeout(() => {
+        if (!this.roomCode) sendJoinReq();
+      }, 950);
+      this._joinTimeout = setTimeout(() => {
+        if (!this.roomCode) {
+          this._emit('error', {
+            type: 'error',
+            code: 'ROOM_NOT_FOUND',
+            message: `Room "${cleanCode}" not found — make sure the host has the lobby open!`,
+          });
+        }
+      }, 4200);
+      return;
+    }
+
     this._sendRaw({ type: 'join_room', code: cleanCode, profile });
   }
 
   leaveRoom() {
+    this._clearJoinTimers();
     this.roomCode = null;
     this.roomState = null;
     this.remoteSnapshots.clear();
@@ -840,7 +1685,6 @@ export class MultiplayerClient {
     this._sendRaw({ type: 'start_match', seed });
   }
 
-  // Publishes local player state capped to 20Hz (every 50ms) unless force=true
   sendPlayerState(player, force = false) {
     if (!player || !this.roomCode || !this.connected) return;
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
