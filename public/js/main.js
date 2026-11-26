@@ -48,6 +48,7 @@ function loadSavedSettings() {
       ...defaults,
       ...parsed,
       enabledItems: { ...defaults.enabledItems, ...(parsed.enabledItems || {}) },
+      lobbyRules: { ...defaults.lobbyRules, ...(parsed.lobbyRules || {}) },
     };
   } catch {
     return defaults;
@@ -418,11 +419,21 @@ class SmashyKartApp {
     // Character Mode switchers across Home, Lobby, and Garage
     const setCharacterMode = (mode) => {
       if (!CHARACTER_MODES.some((m) => m.id === mode)) return;
+      if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowModeChoice === false) {
+        this._showChaosToast('🔒 Runner style is locked by the Lobby Manager!');
+        return;
+      }
       this.settings.characterMode = mode;
+      if (!this.net.roomCode || this.net.isHost) {
+        this.settings.lobbyRules.universalCharacterMode = mode;
+      }
       saveSettings(this.settings);
       this._refreshAllUiFromSettings();
       if (this.mode === 'attract') this._respawnAttractHero();
-      if (this.net.roomCode) this.net.updateProfile(this._buildLocalNetProfile());
+      if (this.net.roomCode) {
+        this.net.updateProfile(this._buildLocalNetProfile());
+        if (this.net.isHost) this.net.updateRoomSettings(this.settings);
+      }
     };
 
     for (const containerId of ['home-mode-pills', 'lobby-mode-pills', 'garage-mode-cards']) {
@@ -699,10 +710,25 @@ class SmashyKartApp {
     });
 
     // Garage stat sliders
+    const universalRuleKeyMap = {
+      speedMult: 'universalSpeedMult',
+      driftMult: 'universalDriftMult',
+      massMult: 'universalMassMult',
+      scaleMult: 'universalScaleMult',
+    };
     const bindSlider = (id, key, fmt) => {
       const el = document.getElementById(id);
       el.addEventListener('input', () => {
-        this.settings[key] = Number(el.value);
+        if (this.net.roomCode && !this.net.isHost && key in universalRuleKeyMap && this.settings.lobbyRules?.lockStats !== false) {
+          this._refreshAllUiFromSettings();
+          this._showChaosToast('🔒 Car stats are locked by the Lobby Manager!');
+          return;
+        }
+        const v = Number(el.value);
+        this.settings[key] = v;
+        if ((!this.net.roomCode || this.net.isHost) && universalRuleKeyMap[key]) {
+          this.settings.lobbyRules[universalRuleKeyMap[key]] = v;
+        }
         saveSettings(this.settings);
         this._refreshAllUiFromSettings();
         if (this.mode === 'attract') this._respawnAttractHero();
@@ -786,13 +812,23 @@ class SmashyKartApp {
         <div class="veh-stats">SPD ${veh.speed} · HP ${veh.maxHp}</div>
       `;
       card.addEventListener('click', () => {
+        if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowCarChoice === false) {
+          this._showChaosToast('🔒 Car choice is locked to Same Car by the Lobby Manager!');
+          return;
+        }
         this.settings.vehicleId = veh.id;
         this.settings.primaryColor = veh.color;
         this.settings.accentColor = veh.accent;
+        if (!this.net.roomCode || this.net.isHost) {
+          this.settings.lobbyRules.universalVehicleId = veh.id;
+        }
         saveSettings(this.settings);
         this._refreshAllUiFromSettings();
         if (this.mode === 'attract') this._respawnAttractHero();
-        if (this.net.roomCode) this.net.updateProfile(this._buildLocalNetProfile());
+        if (this.net.roomCode) {
+          this.net.updateProfile(this._buildLocalNetProfile());
+          if (this.net.isHost) this.net.updateRoomSettings(this.settings);
+        }
       });
       grid.appendChild(card);
     }
@@ -958,14 +994,25 @@ class SmashyKartApp {
     document.getElementById('inp-primary-color').value = s.primaryColor;
     document.getElementById('inp-accent-color').value = s.accentColor;
 
-    document.getElementById('rng-speed-mult').value = String(s.speedMult);
-    document.getElementById('val-speed-mult').textContent = `${Math.round(s.speedMult * 100)}%`;
-    document.getElementById('rng-drift-mult').value = String(s.driftMult);
-    document.getElementById('val-drift-mult').textContent = `${Math.round(s.driftMult * 100)}%`;
-    document.getElementById('rng-mass-mult').value = String(s.massMult);
-    document.getElementById('val-mass-mult').textContent = `${Math.round(s.massMult * 100)}%`;
-    document.getElementById('rng-scale-mult').value = String(s.scaleMult);
-    document.getElementById('val-scale-mult').textContent = `${Math.round(s.scaleMult * 100)}%`;
+    const guestStatsLocked = Boolean(this.net.roomCode && !this.net.isHost && s.lobbyRules?.lockStats !== false);
+    const dispSpeed = guestStatsLocked ? s.lobbyRules?.universalSpeedMult ?? 1.0 : s.speedMult;
+    const dispDrift = guestStatsLocked ? s.lobbyRules?.universalDriftMult ?? 1.0 : s.driftMult;
+    const dispMass = guestStatsLocked ? s.lobbyRules?.universalMassMult ?? 1.0 : s.massMult;
+    const dispScale = guestStatsLocked ? s.lobbyRules?.universalScaleMult ?? 1.0 : s.scaleMult;
+    const lockSuffix = guestStatsLocked ? ' 🔒' : '';
+
+    document.getElementById('rng-speed-mult').value = String(dispSpeed);
+    document.getElementById('rng-speed-mult').disabled = guestStatsLocked;
+    document.getElementById('val-speed-mult').textContent = `${Math.round(dispSpeed * 100)}%${lockSuffix}`;
+    document.getElementById('rng-drift-mult').value = String(dispDrift);
+    document.getElementById('rng-drift-mult').disabled = guestStatsLocked;
+    document.getElementById('val-drift-mult').textContent = `${Math.round(dispDrift * 100)}%${lockSuffix}`;
+    document.getElementById('rng-mass-mult').value = String(dispMass);
+    document.getElementById('rng-mass-mult').disabled = guestStatsLocked;
+    document.getElementById('val-mass-mult').textContent = `${Math.round(dispMass * 100)}%${lockSuffix}`;
+    document.getElementById('rng-scale-mult').value = String(dispScale);
+    document.getElementById('rng-scale-mult').disabled = guestStatsLocked;
+    document.getElementById('val-scale-mult').textContent = `${Math.round(dispScale * 100)}%${lockSuffix}`;
 
     document.querySelectorAll('#biome-btns .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.biome === s.biome)
@@ -1041,11 +1088,22 @@ class SmashyKartApp {
       document.getElementById('lobby-error').classList.add('hidden');
       try {
         this.isReadyInLobby = true;
+        this.settings.lobbyRules = {
+          ...(this.settings.lobbyRules || {}),
+          universalSpeedMult: this.settings.speedMult || 1.0,
+          universalDriftMult: this.settings.driftMult || 1.0,
+          universalMassMult: this.settings.massMult || 1.0,
+          universalScaleMult: this.settings.scaleMult || 1.0,
+          universalVehicleId: this.settings.vehicleId || 'sedan',
+          universalCharacterMode: this.settings.characterMode || 'car_driver',
+        };
         await this.net.createRoom(this._buildLocalNetProfile(), this.settings);
       } catch {
         this._showLobbyError('Could not connect to party relay. Check your internet connection!');
       }
     });
+
+    this._bindHostManagerControls();
 
     document.getElementById('btn-join-room').addEventListener('click', () => {
       this.sound.unlock();
@@ -1103,6 +1161,12 @@ class SmashyKartApp {
 
     this.net.on('error', (err) => {
       this._showLobbyError(err?.message || 'Lobby error.');
+    });
+
+    this.net.on('kicked', (msg) => {
+      window.history.replaceState({}, '', window.location.pathname);
+      this._openLobbyModal();
+      this._showLobbyError(msg?.message || 'Removed from lobby by Lobby Manager.');
     });
 
     this.net.on('room_joined', (msg) => {
@@ -1195,6 +1259,116 @@ class SmashyKartApp {
     });
   }
 
+  _bindHostManagerControls() {
+    const syncHostRules = () => {
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+      if (this.net.roomCode && this.net.isHost) {
+        this.net.updateRoomSettings(this.settings);
+      }
+      if (this.net.roomState) this._renderLobbyRoom(this.net.roomState);
+    };
+
+    // One-Tap Universal Presets
+    document.getElementById('host-preset-btns')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-preset]');
+      if (!btn || !this.net.isHost) return;
+      const p = btn.dataset.preset;
+      const rules = this.settings.lobbyRules;
+
+      if (p === 'fair') {
+        rules.lockStats = true;
+        rules.allowCarChoice = true;
+        rules.allowModeChoice = true;
+        rules.allowCustomPhotos = true;
+        rules.universalSpeedMult = 1.0;
+        rules.universalDriftMult = 1.0;
+        rules.universalMassMult = 1.0;
+        rules.universalScaleMult = 1.0;
+        this.settings.speedMult = 1.0;
+        this.settings.copIntensity = 1.0;
+        this.settings.startStars = 1;
+        this.settings.itemBoxDensity = 1.2;
+        for (const ab of ABILITIES) this.settings.enabledItems[ab.id] = true;
+      } else if (p === 'same_car') {
+        rules.lockStats = true;
+        rules.allowCarChoice = false;
+        rules.allowModeChoice = false;
+        rules.universalVehicleId = this.settings.vehicleId || 'sedan';
+        rules.universalCharacterMode = this.settings.characterMode || 'car_driver';
+        rules.universalSpeedMult = 1.0;
+        rules.universalDriftMult = 1.0;
+        rules.universalMassMult = 1.0;
+        rules.universalScaleMult = 1.0;
+        this.settings.speedMult = 1.0;
+      } else if (p === 'all_foot') {
+        rules.lockStats = true;
+        rules.allowModeChoice = false;
+        rules.universalCharacterMode = 'runner';
+        this.settings.characterMode = 'runner';
+        rules.universalSpeedMult = 1.1;
+        this.settings.speedMult = 1.1;
+        this.settings.startStars = 3;
+      } else if (p === 'turbo') {
+        rules.lockStats = true;
+        rules.universalSpeedMult = 1.35;
+        rules.universalDriftMult = 1.15;
+        this.settings.speedMult = 1.35;
+        this.settings.itemBoxDensity = 2.0;
+        this.settings.copIntensity = 1.4;
+        this.settings.startStars = 3;
+      }
+
+      document.querySelectorAll('#host-preset-btns .preset-pill').forEach((el) =>
+        el.classList.toggle('active', el === btn)
+      );
+      syncHostRules();
+    });
+
+    // Universal Speed Quick Selector
+    document.getElementById('host-univ-speed')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-uspeed]');
+      if (!btn || !this.net.isHost) return;
+      const spd = Number(btn.dataset.uspeed) || 1.0;
+      this.settings.speedMult = spd;
+      this.settings.lobbyRules.universalSpeedMult = spd;
+      this.settings.lobbyRules.lockStats = true;
+      syncHostRules();
+    });
+
+    // Universal Map Quick Selector
+    document.getElementById('host-univ-map')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-ubiome]');
+      if (!btn || !this.net.isHost) return;
+      this.settings.biome = btn.dataset.ubiome;
+      this.world.reset(this.settings.worldSeed, this.settings.biome, {
+        itemBoxDensity: this.settings.itemBoxDensity,
+      });
+      syncHostRules();
+    });
+
+    // Permission Switches
+    const bindPerm = (id, key) => {
+      const el = document.getElementById(id);
+      el?.addEventListener('change', () => {
+        if (!this.net.isHost) return;
+        this.settings.lobbyRules[key] = el.checked;
+        if (key === 'allowCarChoice' && !el.checked) {
+          this.settings.lobbyRules.universalVehicleId = this.settings.vehicleId || 'sedan';
+        }
+        if (key === 'allowModeChoice' && !el.checked) {
+          this.settings.lobbyRules.universalCharacterMode = this.settings.characterMode || 'car_driver';
+        }
+        syncHostRules();
+      });
+    };
+
+    bindPerm('perm-lock-stats', 'lockStats');
+    bindPerm('perm-allow-car', 'allowCarChoice');
+    bindPerm('perm-allow-mode', 'allowModeChoice');
+    bindPerm('perm-allow-photos', 'allowCustomPhotos');
+  }
+
   _applyHostSettings(rs) {
     if (!rs) return;
     if (rs.biome) this.settings.biome = rs.biome;
@@ -1204,7 +1378,17 @@ class SmashyKartApp {
     if (rs.itemBoxDensity !== undefined) this.settings.itemBoxDensity = rs.itemBoxDensity;
     if (rs.gravityMult !== undefined) this.settings.gravityMult = rs.gravityMult;
     if (rs.enabledItems) this.settings.enabledItems = { ...this.settings.enabledItems, ...rs.enabledItems };
+    if (rs.lobbyRules) {
+      this.settings.lobbyRules = { ...this.settings.lobbyRules, ...rs.lobbyRules };
+      if (this.settings.lobbyRules.allowModeChoice === false && this.settings.lobbyRules.universalCharacterMode) {
+        this.settings.characterMode = this.settings.lobbyRules.universalCharacterMode;
+      }
+      if (this.settings.lobbyRules.allowCarChoice === false && this.settings.lobbyRules.universalVehicleId) {
+        this.settings.vehicleId = this.settings.lobbyRules.universalVehicleId;
+      }
+    }
     this.abilities.updateSettings(this.settings);
+    this._refreshAllUiFromSettings();
   }
 
   _ingestRoomAvatars(players) {
@@ -1224,6 +1408,54 @@ class SmashyKartApp {
     document.getElementById('room-share-url').value = shareUrl;
     document.getElementById('room-qr-box').innerHTML = this.net.getQrCodeSvg(room.code, { margin: 3 });
 
+    const rules = room.settings?.lobbyRules || this.settings.lobbyRules || {};
+    const isHost = Boolean(this.net.isHost);
+
+    // Sync Host Manager Panel vs Guest Rules Summary Banner
+    const hostPanel = document.getElementById('host-manager-panel');
+    const guestBanner = document.getElementById('guest-rules-banner');
+    hostPanel.classList.toggle('hidden', !isHost);
+    guestBanner.classList.toggle('hidden', isHost);
+
+    if (isHost) {
+      document.getElementById('perm-lock-stats').checked = rules.lockStats !== false;
+      document.getElementById('perm-allow-car').checked = rules.allowCarChoice !== false;
+      document.getElementById('perm-allow-mode').checked = rules.allowModeChoice !== false;
+      document.getElementById('perm-allow-photos').checked = rules.allowCustomPhotos !== false;
+      const curSpd = Number(rules.universalSpeedMult || 1.0);
+      document.querySelectorAll('#host-univ-speed .seg-btn').forEach((b) =>
+        b.classList.toggle('active', Math.abs(Number(b.dataset.uspeed) - curSpd) < 0.04)
+      );
+      const curBiome = room.settings?.biome || this.settings.biome;
+      document.querySelectorAll('#host-univ-map .seg-btn').forEach((b) =>
+        b.classList.toggle('active', b.dataset.ubiome === curBiome)
+      );
+    } else {
+      const spdPct = Math.round((rules.universalSpeedMult || 1.0) * 100);
+      const biomeObj = BIOMES[room.settings?.biome || 'city'] || BIOMES.city;
+      const parts = [
+        rules.lockStats !== false ? `🔒 Equal ${spdPct}% Speed & Stats` : '🔓 Custom Car Tuning Allowed',
+        biomeObj.name,
+        rules.allowCarChoice === false ? '🔒 Same Car Forced' : 'Any Car',
+        rules.allowModeChoice === false ? '🔒 Mode Locked' : 'Any Mode',
+      ];
+      guestBanner.textContent = `👑 Lobby Manager Rules: ${parts.join(' · ')}`;
+    }
+
+    // Lock/unlock Guest buttons right inside Lobby & Garage
+    document.getElementById('lobby-mode-pills')?.classList.toggle(
+      'locked-ctrl',
+      !isHost && rules.allowModeChoice === false
+    );
+    document.getElementById('btn-lobby-car')?.classList.toggle(
+      'locked-ctrl',
+      !isHost && rules.allowCarChoice === false && rules.lockStats !== false
+    );
+    document.getElementById('btn-lobby-photo')?.classList.toggle(
+      'locked-ctrl',
+      !isHost && rules.allowCustomPhotos === false
+    );
+
     const players = room.players || [];
     document.getElementById('lobby-player-count').textContent = String(players.length);
 
@@ -1241,18 +1473,24 @@ class SmashyKartApp {
           : veh.name;
       const fallbackImg = this._safeImgSrc(this._getSelectedPerson()?.dataUrl);
       const safeAvatar = this._safeImgSrc(p.avatarDataUrl) || fallbackImg;
+      const canKick = isHost && p.id !== room.hostId;
       card.innerHTML = `
         <img src="${safeAvatar}" alt="${this._escapeHtml(p.name)}" />
         <div class="roster-meta">
           <div class="roster-name">${this._escapeHtml(p.name)} ${p.id === room.hostId ? '👑' : ''}</div>
           <div class="roster-sub">${this._escapeHtml(modeLabel)} · ${p.ready ? 'READY' : 'Picking...'}</div>
         </div>
+        ${canKick ? `<button type="button" class="tiny-pill" data-kick-id="${this._escapeHtml(p.id)}">Kick</button>` : ''}
       `;
+      card.querySelector('[data-kick-id]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.net.kickPlayer(p.id);
+      });
       rosterEl.appendChild(card);
     }
 
     const startBtn = document.getElementById('btn-host-start');
-    startBtn.classList.toggle('hidden', !this.net.isHost);
+    startBtn.classList.toggle('hidden', !isHost);
     const readyBtn = document.getElementById('btn-toggle-ready');
     readyBtn.textContent = this.isReadyInLobby ? '✓ Ready!' : 'Tap When Ready';
   }
@@ -1316,8 +1554,21 @@ class SmashyKartApp {
 
   _beginPartyCountdown(msg) {
     const roomSettings = msg.settings || {};
+    const rules = roomSettings.lobbyRules || this.settings.lobbyRules || {};
+    const lockStats = rules.lockStats !== false;
+    const allowCar = rules.allowCarChoice !== false;
+    const allowMode = rules.allowModeChoice !== false;
+    const allowPhotos = rules.allowCustomPhotos !== false;
+
     const mergedSettings = {
       ...this.settings,
+      characterMode: allowMode ? this.settings.characterMode : rules.universalCharacterMode || 'car_driver',
+      vehicleId: allowCar ? this.settings.vehicleId : rules.universalVehicleId || 'sedan',
+      speedMult: lockStats ? rules.universalSpeedMult ?? 1.0 : this.settings.speedMult,
+      accelMult: lockStats ? rules.universalSpeedMult ?? 1.0 : this.settings.accelMult,
+      driftMult: lockStats ? rules.universalDriftMult ?? 1.0 : this.settings.driftMult,
+      massMult: lockStats ? rules.universalMassMult ?? 1.0 : this.settings.massMult,
+      scaleMult: lockStats ? rules.universalScaleMult ?? 1.0 : this.settings.scaleMult,
       biome: roomSettings.biome || this.settings.biome,
       copIntensity: roomSettings.copIntensity ?? this.settings.copIntensity,
       startStars: roomSettings.startStars ?? this.settings.startStars,
@@ -1327,7 +1578,11 @@ class SmashyKartApp {
       enabledItems: roomSettings.enabledItems || this.settings.enabledItems,
       worldSeed: msg.seed,
       playerId: this.net.playerId || 'local',
-      avatarId: this.net.playerId ? `net_${this.net.playerId}` : this.settings.avatarId,
+      avatarId: !allowPhotos
+        ? 'default_hero'
+        : this.net.playerId
+          ? `net_${this.net.playerId}`
+          : this.settings.avatarId,
     };
 
     // Register our own network avatarId texture so local & remote match
@@ -1804,18 +2059,25 @@ class SmashyKartApp {
     }
     combined.sort((a, b) => (a.alive !== b.alive ? (a.alive ? -1 : 1) : b.survivalTime - a.survivalTime));
 
-    strip.innerHTML = combined
-      .map(
-        (p) => {
+    const aliveCount = combined.filter((p) => p.alive).length;
+    const visiblePills = combined.length > 6 ? combined.slice(0, 5) : combined;
+    const countBadge =
+      combined.length >= 6
+        ? `<div class="survivor-pill" style="border-color:#facc15;color:#fde047">👥 ${aliveCount}/${combined.length} ALIVE</div>`
+        : '';
+
+    strip.innerHTML =
+      countBadge +
+      visiblePills
+        .map((p) => {
           const safeUrl = this._safeImgSrc(p.avatarDataUrl);
           return `
       <div class="survivor-pill ${p.alive ? '' : 'out'}">
         ${safeUrl ? `<img src="${safeUrl}" alt="" />` : ''}
         <span>${this._escapeHtml(p.name)} · ${p.survivalTime.toFixed(0)}s</span>
       </div>`;
-        }
-      )
-      .join('');
+        })
+        .join('');
   }
 
   _showChaosToast(text) {
@@ -1875,18 +2137,68 @@ class SmashyKartApp {
       return;
     }
 
+    const vw = window.innerWidth || 390;
+    const vh = window.innerHeight || 844;
+    const pad = {
+      left: 62,
+      right: 68,
+      top: 108,
+      bottom: 106,
+    };
+
+    const refX = this.sim.localPlayer?.x ?? 0;
+    const refZ = this.sim.localPlayer?.z ?? 0;
+    const placedOffscreen = [];
     let html = '';
+
     for (const rp of this.sim.remotePlayers) {
       if (rp.alive === false) continue;
-      const proj = this.renderer.projectToScreen(rp.x, (rp.y || 0) + 4.1 * (rp.scale || 1), rp.z);
-      if (!proj.visible) continue;
+      const wp = this.renderer.projectWaypoint(
+        rp.x,
+        (rp.y || 0) + 4.1 * (rp.scale || 1),
+        rp.z,
+        pad
+      );
       const imgUrl = this._safeImgSrc(this.remoteAvatarCache.get(rp.avatarId || `net_${rp.id}`));
-      html += `
-        <div class="player-tag" style="left:${proj.x.toFixed(1)}px;top:${proj.y.toFixed(1)}px">
-          ${imgUrl ? `<img src="${imgUrl}" alt="" />` : ''}
-          <span>${this._escapeHtml(rp.name || 'Friend')}</span>
-        </div>
-      `;
+      const borderCol = /^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '')
+        ? rp.primaryColor
+        : '#facc15';
+      const distMeters = Math.round(Math.hypot(rp.x - refX, rp.z - refZ));
+
+      if (wp.onScreen) {
+        html += `
+          <div class="player-tag" style="left:${wp.x.toFixed(1)}px;top:${wp.y.toFixed(1)}px;border-color:${borderCol}">
+            ${imgUrl ? `<img src="${imgUrl}" alt="" />` : ''}
+            <span>${this._escapeHtml(rp.name || 'Friend')}</span>
+          </div>
+        `;
+      } else {
+        // Off-screen directional corner/edge tracker — nudge gently if multiple friends share the same corner!
+        let tx = wp.x;
+        let ty = wp.y;
+        for (let pass = 0; pass < placedOffscreen.length; pass++) {
+          const prev = placedOffscreen[pass];
+          if (Math.abs(tx - prev.x) < 78 && Math.abs(ty - prev.y) < 32) {
+            if (ty + 34 <= vh - pad.bottom) {
+              ty += 34;
+            } else if (ty - 34 >= pad.top) {
+              ty -= 34;
+            } else {
+              tx = Math.max(pad.left, Math.min(vw - pad.right, tx + (tx < vw * 0.5 ? 82 : -82)));
+            }
+          }
+        }
+        placedOffscreen.push({ x: tx, y: ty });
+        const deg = Math.round((wp.angleRad * 180) / Math.PI);
+        html += `
+          <div class="player-tag offscreen" style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;border-color:${borderCol}">
+            <span class="tag-arrow" style="transform:rotate(${deg}deg)">➤</span>
+            ${imgUrl ? `<img src="${imgUrl}" alt="" />` : ''}
+            <span>${this._escapeHtml(rp.name || 'Friend')}</span>
+            <span class="tag-dist">${distMeters}m</span>
+          </div>
+        `;
+      }
     }
     container.innerHTML = html;
   }

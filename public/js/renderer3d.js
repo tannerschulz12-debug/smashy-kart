@@ -1463,6 +1463,62 @@ export class Renderer3D {
     return { x: screenX, y: screenY, visible };
   }
 
+  projectWaypoint(x, y, z, pad = {}) {
+    const w = this.cssWidth || 390;
+    const h = this.cssHeight || 844;
+    const minX = pad.left ?? 56;
+    const maxX = Math.max(minX + 20, w - (pad.right ?? 56));
+    const minY = pad.top ?? 102;
+    const maxY = Math.max(minY + 20, h - (pad.bottom ?? 96));
+
+    const direct = this.projectToScreen(x, y, z);
+    if (
+      direct.visible &&
+      direct.x >= minX &&
+      direct.x <= maxX &&
+      direct.y >= minY &&
+      direct.y <= maxY
+    ) {
+      return { x: direct.x, y: direct.y, onScreen: true, angleRad: 0 };
+    }
+
+    // Off-screen or behind camera: cast a guaranteed-front ray from camTarget toward (x, y, z)
+    const fx = this.camTarget[0];
+    const fy = this.camTarget[1];
+    const fz = this.camTarget[2];
+    const centerProj = this.projectToScreen(fx, fy, fz);
+    const cx = clamp(centerProj.visible ? centerProj.x : w * 0.5, minX + 8, maxX - 8);
+    const cy = clamp(centerProj.visible ? centerProj.y : h * 0.5, minY + 8, maxY - 8);
+
+    const dx = x - fx;
+    const dy = (y - fy) * 0.25;
+    const dz = z - fz;
+    const dist = Math.hypot(dx, dy, dz) || 1;
+    const step = 3.0;
+    const nearProj = this.projectToScreen(
+      fx + (dx / dist) * step,
+      fy + (dy / dist) * step,
+      fz + (dz / dist) * step
+    );
+
+    let vx = (nearProj.visible ? nearProj.x : w * 0.5) - cx;
+    let vy = (nearProj.visible ? nearProj.y : h * 0.8) - cy;
+    if (Math.hypot(vx, vy) < 0.001) {
+      vx = 0;
+      vy = 1;
+    }
+
+    const tx = vx > 0.0001 ? (maxX - cx) / vx : vx < -0.0001 ? (minX - cx) / vx : Infinity;
+    const ty = vy > 0.0001 ? (maxY - cy) / vy : vy < -0.0001 ? (minY - cy) / vy : Infinity;
+    const t = Math.min(tx, ty);
+
+    const edgeX = clamp(cx + vx * t, minX, maxX);
+    const edgeY = clamp(cy + vy * t, minY, maxY);
+    const angleRad = Math.atan2(vy, vx);
+
+    return { x: edgeX, y: edgeY, onScreen: false, angleRad };
+  }
+
   // ==================== Particle & Skid FX ====================
 
   spawnDebris(x, y, z, color = '#f8fafc', count = 8, speed = 14, scale = 0.45) {

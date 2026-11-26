@@ -735,6 +735,7 @@ export class MultiplayerClient {
 
     // Cloud Host-Coordinator state (used when playing on 24/7 static HTTPS page!)
     this._cloudHostRoom = null;
+    this._cloudAvatarBook = new Map(); // playerId -> avatarDataUrl
     this._joinTimeout = null;
     this._joinRetry = null;
 
@@ -1020,21 +1021,34 @@ export class MultiplayerClient {
     this.mqtt.publish(this._roomTopic(code), packet);
   }
 
-  _serializeCloudRoom(room) {
+  _serializeCloudRoom(room, includeAvatars = false) {
+    const rules = room.settings?.lobbyRules || {};
+    const allowPhoto = rules.allowCustomPhotos !== false;
     const players = [];
     let idx = 0;
     for (const [id, member] of room.members.entries()) {
+      if (member.profile.avatarDataUrl) {
+        this._cloudAvatarBook.set(id, member.profile.avatarDataUrl);
+      }
+      const effectiveMode =
+        rules.allowModeChoice === false
+          ? rules.universalCharacterMode || 'car_driver'
+          : member.profile.characterMode;
+      const effectiveVeh =
+        rules.allowCarChoice === false
+          ? rules.universalVehicleId || 'sedan'
+          : member.profile.vehicleId;
       players.push({
         id,
         name: member.profile.name,
         isHost: id === room.hostId,
         spawnIndex: idx++,
-        characterMode: member.profile.characterMode,
-        vehicleId: member.profile.vehicleId,
+        characterMode: effectiveMode,
+        vehicleId: effectiveVeh,
         primaryColor: member.profile.primaryColor,
         accentColor: member.profile.accentColor,
-        avatarId: member.profile.avatarId || `net_${id}`,
-        avatarDataUrl: member.profile.avatarDataUrl || null,
+        avatarId: allowPhoto ? member.profile.avatarId || `net_${id}` : 'default_hero',
+        avatarDataUrl: allowPhoto && includeAvatars ? member.profile.avatarDataUrl || null : null,
         ready: Boolean(member.profile.ready),
       });
     }
@@ -1047,6 +1061,17 @@ export class MultiplayerClient {
       settings: room.settings,
       players,
     };
+  }
+
+  _hydrateCloudAvatars(players = [], settings = {}) {
+    const allowPhoto = settings?.lobbyRules?.allowCustomPhotos !== false;
+    return players.map((p) => {
+      if (p.avatarDataUrl) this._cloudAvatarBook.set(p.id, p.avatarDataUrl);
+      return {
+        ...p,
+        avatarDataUrl: allowPhoto ? p.avatarDataUrl || this._cloudAvatarBook.get(p.id) || null : null,
+      };
+    });
   }
 
   _computeCloudStandings(room) {
@@ -1140,7 +1165,18 @@ export class MultiplayerClient {
         if (this.isHost && this._cloudHostRoom) {
           const me = this._cloudHostRoom.members.get(this.playerId);
           if (me) {
+            const prevAv = me.profile.avatarDataUrl;
             me.profile = sanitizeCloudProfile({ ...me.profile, ...(obj.profile || {}) }, me.profile.name);
+            me.profile.avatarId = `net_${this.playerId}`;
+            if (me.profile.avatarDataUrl && me.profile.avatarDataUrl !== prevAv) {
+              this._cloudAvatarBook.set(this.playerId, me.profile.avatarDataUrl);
+              this._broadcastCloudFromHost(this._cloudHostRoom, {
+                type: 'avatar_sync',
+                playerId: this.playerId,
+                avatarId: me.profile.avatarId,
+                avatarDataUrl: me.profile.avatarDataUrl,
+              });
+            }
             const st = this._serializeCloudRoom(this._cloudHostRoom);
             this._broadcastCloudFromHost(this._cloudHostRoom, st);
           }
@@ -1150,6 +1186,22 @@ export class MultiplayerClient {
             from: this.playerId,
             cmd: { type: 'update_profile', profile: obj.profile },
           });
+        }
+        break;
+      }
+
+      case 'kick_player': {
+        if (!this.isHost || !this._cloudHostRoom) return;
+        const targetId = String(obj.targetId || '');
+        if (!targetId || targetId === this.playerId) return;
+        if (this._cloudHostRoom.members.has(targetId)) {
+          this._cloudHostRoom.members.delete(targetId);
+          this._broadcastCloudFromHost(
+            this._cloudHostRoom,
+            { type: 'kicked', message: 'Removed from lobby by Lobby Manager.' },
+            targetId
+          );
+          this._broadcastCloudFromHost(this._cloudHostRoom, this._serializeCloudRoom(this._cloudHostRoom));
         }
         break;
       }
@@ -1369,17 +1421,41 @@ export class MultiplayerClient {
       if (!fromId || !cmd) return;
 
       if (cmd.type === 'join_room') {
-        if (room.members.size >= 10 && !room.members.has(fromId)) {
+        if (room.members.size >= 16 && !room.members.has(fromId)) {
           this._broadcastCloudFromHost(
             room,
-            { type: 'error', code: 'ROOM_FULL', message: 'Party room is full (max 10 players).' },
+            { type: 'error', code: 'ROOM_FULL', message: 'Party room is full (max 16 players).' },
             fromId
           );
           return;
         }
         const prof = sanitizeCloudProfile(cmd.profile || {}, `Player ${room.members.size + 1}`);
         prof.avatarId = `net_${fromId}`;
+        if (prof.avatarDataUrl) {
+          this._cloudAvatarBook.set(fromId, prof.avatarDataUrl);
+          this._broadcastCloudFromHost(room, {
+            type: 'avatar_sync',
+            playerId: fromId,
+            avatarId: prof.avatarId,
+            avatarDataUrl: prof.avatarDataUrl,
+          });
+        }
         room.members.set(fromId, { id: fromId, profile: prof });
+        // Send each existing member's avatar individually (<30KB per packet) to the new joiner
+        for (const [eid, em] of room.members.entries()) {
+          if (eid !== fromId && em.profile.avatarDataUrl) {
+            this._broadcastCloudFromHost(
+              room,
+              {
+                type: 'avatar_sync',
+                playerId: eid,
+                avatarId: em.profile.avatarId || `net_${eid}`,
+                avatarDataUrl: em.profile.avatarDataUrl,
+              },
+              fromId
+            );
+          }
+        }
         const serialized = this._serializeCloudRoom(room);
         this._broadcastCloudFromHost(
           room,
@@ -1397,8 +1473,18 @@ export class MultiplayerClient {
       } else if (cmd.type === 'update_profile') {
         const m = room.members.get(fromId);
         if (m) {
+          const prevAv = m.profile.avatarDataUrl;
           m.profile = sanitizeCloudProfile({ ...m.profile, ...(cmd.profile || {}) }, m.profile.name);
           m.profile.avatarId = `net_${fromId}`;
+          if (m.profile.avatarDataUrl && m.profile.avatarDataUrl !== prevAv) {
+            this._cloudAvatarBook.set(fromId, m.profile.avatarDataUrl);
+            this._broadcastCloudFromHost(room, {
+              type: 'avatar_sync',
+              playerId: fromId,
+              avatarId: m.profile.avatarId,
+              avatarDataUrl: m.profile.avatarDataUrl,
+            });
+          }
           this._broadcastCloudFromHost(room, this._serializeCloudRoom(room));
         }
       } else if (cmd.type === 'leave_room') {
@@ -1425,18 +1511,46 @@ export class MultiplayerClient {
         break;
       }
 
+      case 'avatar_sync': {
+        if (msg.playerId && msg.avatarDataUrl && SAFE_AVATAR_RE.test(msg.avatarDataUrl)) {
+          this._cloudAvatarBook.set(msg.playerId, msg.avatarDataUrl);
+          if (this.roomState?.players) {
+            this.roomState.players = this._hydrateCloudAvatars(this.roomState.players, this.roomState.settings);
+            this._emit('room_state', this.roomState);
+          }
+        }
+        break;
+      }
+
+      case 'kicked': {
+        this.roomCode = null;
+        this.roomState = null;
+        this.isHost = false;
+        this.remoteSnapshots.clear();
+        this._emit('kicked', msg);
+        break;
+      }
+
       case 'room_joined': {
         this.roomCode = msg.code || msg.roomCode;
         this._lastCloudCode = this.roomCode;
         this.playerId = msg.playerId || this.playerId;
         this.isHost = Boolean(msg.isHost);
-        if (msg.room) this.roomState = msg.room;
+        if (msg.room) {
+          if (msg.room.players) {
+            msg.room.players = this._hydrateCloudAvatars(msg.room.players, msg.room.settings);
+          }
+          this.roomState = msg.room;
+        }
         this._emit('room_joined', msg);
         break;
       }
 
       case 'room_state': {
         this.roomCode = msg.code || msg.roomCode || this.roomCode;
+        if (msg.players) {
+          msg.players = this._hydrateCloudAvatars(msg.players, msg.settings);
+        }
         this.roomState = msg;
         this.isHost = Boolean(this.playerId && msg.hostId === this.playerId);
 
@@ -1449,6 +1563,15 @@ export class MultiplayerClient {
         break;
       }
 
+      case 'match_countdown': {
+        this.remoteSnapshots.clear();
+        if (msg.players) {
+          msg.players = this._hydrateCloudAvatars(msg.players, msg.settings);
+        }
+        this._emit('match_countdown', msg);
+        break;
+      }
+
       case 'host_promoted': {
         this.isHost = Boolean(this.playerId && msg.hostId === this.playerId);
         this._emit('host_promoted', msg);
@@ -1458,12 +1581,6 @@ export class MultiplayerClient {
       case 'room_settings_updated': {
         if (this.roomState) this.roomState.settings = msg.settings;
         this._emit('room_settings_updated', msg);
-        break;
-      }
-
-      case 'match_countdown': {
-        this.remoteSnapshots.clear();
-        this._emit('match_countdown', msg);
         break;
       }
 
@@ -1685,10 +1802,17 @@ export class MultiplayerClient {
     this._sendRaw({ type: 'start_match', seed });
   }
 
+  kickPlayer(targetId) {
+    if (!this.roomCode || !targetId) return;
+    this._sendRaw({ type: 'kick_player', targetId });
+  }
+
   sendPlayerState(player, force = false) {
     if (!player || !this.roomCode || !this.connected) return;
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (!force && now - this._lastStateSentAt < 50) return;
+    const playerCount = this.roomState?.players?.length || 2;
+    const minIntervalMs = playerCount >= 12 ? 85 : playerCount >= 7 ? 68 : 50;
+    if (!force && now - this._lastStateSentAt < minIntervalMs) return;
     this._lastStateSentAt = now;
 
     this._sendRaw({

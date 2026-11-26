@@ -347,5 +347,17 @@ export function createDefaultSettings() {
     soundVolume: 0.85,
     worldSeed: 777123,
     enabledItems,
+    lobbyRules: {
+      lockStats: true,
+      allowCarChoice: true,
+      allowModeChoice: true,
+      allowCustomPhotos: true,
+      universalSpeedMult: 1.0,
+      universalDriftMult: 1.0,
+      universalMassMult: 1.0,
+      universalScaleMult: 1.0,
+      universalVehicleId: 'sedan',
+      universalCharacterMode: 'car_driver',
+    },
   };
 }

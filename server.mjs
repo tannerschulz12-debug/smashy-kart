@@ -12,8 +12,8 @@ const PUBLIC_DIR = path.resolve(__dirname, 'public');
 
 const FORBIDDEN_PORTS = new Set([8766, 8767, 8800]);
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const MAX_WS_PAYLOAD = 512 * 1024; // 512KB ceiling (plenty for 30KB avatar PNG/WebP data URLs)
-const MAX_ROOM_PLAYERS = 10;
+const MAX_WS_PAYLOAD = 2 * 1024 * 1024; // 2MB ceiling for 16-player custom avatar lobbies
+const MAX_ROOM_PLAYERS = 16;
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No 0/O/1/I ambiguity
 
 const MIME_TYPES = {
@@ -169,6 +169,18 @@ function defaultRoomSettings() {
       lightning_zap: true,
       super_horn: true,
     },
+    lobbyRules: {
+      lockStats: true,
+      allowCarChoice: true,
+      allowModeChoice: true,
+      allowCustomPhotos: true,
+      universalSpeedMult: 1.0,
+      universalDriftMult: 1.0,
+      universalMassMult: 1.0,
+      universalScaleMult: 1.0,
+      universalVehicleId: 'sedan',
+      universalCharacterMode: 'car_driver',
+    },
   };
 }
 
@@ -200,6 +212,38 @@ function sanitizeRoomSettings(current, patch = {}) {
     for (const [k, v] of Object.entries(patch.enabledItems)) {
       next.enabledItems[k] = Boolean(v);
     }
+  }
+  if (patch.lobbyRules && typeof patch.lobbyRules === 'object') {
+    const curR = next.lobbyRules || {};
+    const pr = patch.lobbyRules;
+    next.lobbyRules = {
+      lockStats: pr.lockStats !== undefined ? Boolean(pr.lockStats) : curR.lockStats !== false,
+      allowCarChoice: pr.allowCarChoice !== undefined ? Boolean(pr.allowCarChoice) : curR.allowCarChoice !== false,
+      allowModeChoice: pr.allowModeChoice !== undefined ? Boolean(pr.allowModeChoice) : curR.allowModeChoice !== false,
+      allowCustomPhotos: pr.allowCustomPhotos !== undefined ? Boolean(pr.allowCustomPhotos) : curR.allowCustomPhotos !== false,
+      universalSpeedMult: Number.isFinite(Number(pr.universalSpeedMult))
+        ? Math.max(0.6, Math.min(1.7, Number(pr.universalSpeedMult)))
+        : curR.universalSpeedMult ?? 1.0,
+      universalDriftMult: Number.isFinite(Number(pr.universalDriftMult))
+        ? Math.max(0.6, Math.min(1.7, Number(pr.universalDriftMult)))
+        : curR.universalDriftMult ?? 1.0,
+      universalMassMult: Number.isFinite(Number(pr.universalMassMult))
+        ? Math.max(0.6, Math.min(1.9, Number(pr.universalMassMult)))
+        : curR.universalMassMult ?? 1.0,
+      universalScaleMult: Number.isFinite(Number(pr.universalScaleMult))
+        ? Math.max(0.65, Math.min(1.7, Number(pr.universalScaleMult)))
+        : curR.universalScaleMult ?? 1.0,
+      universalVehicleId:
+        typeof pr.universalVehicleId === 'string'
+          ? pr.universalVehicleId.slice(0, 24)
+          : curR.universalVehicleId || 'sedan',
+      universalCharacterMode:
+        pr.universalCharacterMode === 'photo_car' || pr.universalCharacterMode === 'runner'
+          ? pr.universalCharacterMode
+          : pr.universalCharacterMode === 'car_driver'
+            ? 'car_driver'
+            : curR.universalCharacterMode || 'car_driver',
+    };
   }
   return next;
 }
@@ -247,18 +291,29 @@ export function createSmashyServer() {
   }
 
   function serializeRoomPlayer(client, spawnIndex = 0) {
+    const room = client.roomCode ? rooms.get(client.roomCode) : null;
+    const rules = room?.settings?.lobbyRules || {};
+    const effectiveMode =
+      rules.allowModeChoice === false
+        ? rules.universalCharacterMode || 'car_driver'
+        : client.profile.characterMode;
+    const effectiveVeh =
+      rules.allowCarChoice === false
+        ? rules.universalVehicleId || 'sedan'
+        : client.profile.vehicleId;
+    const allowPhoto = rules.allowCustomPhotos !== false;
     return {
       id: client.id,
       playerId: client.id,
-      isHost: Boolean(client.roomCode && rooms.get(client.roomCode)?.hostId === client.id),
+      isHost: Boolean(room && room.hostId === client.id),
       spawnIndex,
       name: client.profile.name,
-      characterMode: client.profile.characterMode,
-      vehicleId: client.profile.vehicleId,
+      characterMode: effectiveMode,
+      vehicleId: effectiveVeh,
       primaryColor: client.profile.primaryColor,
       accentColor: client.profile.accentColor,
-      avatarId: client.profile.avatarId || client.id,
-      avatarDataUrl: client.profile.avatarDataUrl || null,
+      avatarId: allowPhoto ? client.profile.avatarId || client.id : 'default_hero',
+      avatarDataUrl: allowPhoto ? client.profile.avatarDataUrl || null : null,
       ready: Boolean(client.profile.ready),
     };
   }
@@ -482,7 +537,7 @@ export function createSmashyServer() {
           return;
         }
         if (room.clients.size >= MAX_ROOM_PLAYERS && !room.clients.has(client.id)) {
-          sendJson(client, { type: 'error', code: 'ROOM_FULL', message: `Room "${rawCode}" is full (max 10).` });
+          sendJson(client, { type: 'error', code: 'ROOM_FULL', message: `Room "${rawCode}" is full (max 16).` });
           return;
         }
 
@@ -540,6 +595,20 @@ export function createSmashyServer() {
           settings: room.settings,
         });
         broadcastRoomState(room);
+        break;
+      }
+
+      case 'kick_player': {
+        if (!client.roomCode) return;
+        const room = rooms.get(client.roomCode);
+        if (!room || room.hostId !== client.id) return;
+        const targetId = String(msg.targetId || '');
+        if (!targetId || targetId === client.id) return;
+        const targetClient = room.clients.get(targetId);
+        if (targetClient) {
+          removeClientFromRoom(targetClient);
+          sendJson(targetClient, { type: 'kicked', message: 'Removed from lobby by Lobby Manager.' });
+        }
         break;
       }
 

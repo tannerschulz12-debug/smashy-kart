@@ -7,6 +7,7 @@ import net from 'node:net';
 import { VEHICLES, ABILITIES, BIOMES, createDefaultSettings } from '../public/js/config.js';
 import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
+import { Renderer3D } from '../public/js/renderer3d.js';
 import { AbilitySystem } from '../public/js/abilities.js';
 import { Simulation } from '../public/js/physics_ai.js';
 import { renderQrCodeSvg, generateQrMatrix } from '../public/js/multiplayer.js';
@@ -152,7 +153,7 @@ async function runAllChecks() {
   }
 
   const world = new World(777123, 'city', { itemBoxDensity: 1.4 });
-  const spawns = Array.from({ length: 10 }, (_, i) => world.findSpawnPoint(i));
+  const spawns = Array.from({ length: 16 }, (_, i) => world.findSpawnPoint(i));
   const spawnKeys = new Set();
   for (let i = 0; i < spawns.length; i++) {
     const key = `${spawns[i].x},${spawns[i].z}`;
@@ -163,6 +164,20 @@ async function runAllChecks() {
     const hit = world.resolveBuildingCollision({ ...spawns[i], y: 0, vx: 0, vz: 0, radius: 2.1 });
     assert.equal(hit.hit, false, `Spawn ${i} overlaps a building`);
   }
+
+  // Verify off-screen directional edge/corner waypoint projection in all 4 directions (including behind camera!)
+  const mockRenderer = new Renderer3D(null);
+  mockRenderer.resize(390, 844, 1);
+  mockRenderer.setCamera({ x: 0, y: 0, z: 0, vx: 0, vz: 0, angle: 0 }, 'chase', 0, 1);
+  const pad = { left: 60, right: 60, top: 100, bottom: 100 };
+  const wpOnScreen = mockRenderer.projectWaypoint(0, 2, 5, pad);
+  assert.equal(wpOnScreen.onScreen, true, 'Close friend in front should be onScreen');
+  const wpBehind = mockRenderer.projectWaypoint(0, 2, -400, pad);
+  assert.equal(wpBehind.onScreen, false, 'Friend 400m behind should be offScreen');
+  assert.equal(Math.round(wpBehind.y), 844 - 100, 'Friend directly behind in chase cam must pin to bottom edge');
+  const wpFarEast = mockRenderer.projectWaypoint(-400, 2, 20, pad);
+  assert.equal(wpFarEast.onScreen, false);
+  assert.ok(wpFarEast.x >= 60 && wpFarEast.x <= 330, 'Off-screen X must stay clamped inside safe border');
 
   console.log('2. Checking all 12 vehicle blueprints...');
   for (const v of VEHICLES) {
@@ -262,6 +277,44 @@ async function runAllChecks() {
     await p2.waitFor((m) => m.type === 'room_joined');
     const syncedRoom = await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
     assert.equal(syncedRoom.players[1].avatarDataUrl.length, fakeAvatar.length);
+
+    // Verify 16 players can join one room + Lobby Manager universal lock overrides guest car/mode!
+    const extraClients = [];
+    for (let k = 3; k <= 16; k++) {
+      const ck = await connectTestWs(port);
+      await ck.waitFor((m) => m.type === 'welcome');
+      ck.send({
+        type: 'join_room',
+        code: created.code,
+        profile: { name: `P${k}`, characterMode: 'runner', vehicleId: 'f1', ready: true },
+      });
+      await ck.waitFor((m) => m.type === 'room_joined');
+      extraClients.push(ck);
+    }
+    const full16 = await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 16);
+    assert.equal(full16.players.length, 16, 'Room must hold 16 players');
+
+    // Host locks Same Car ('monster') + Same Mode ('car_driver') + Equal 125% Speed
+    p1.send({
+      type: 'update_room_settings',
+      settings: {
+        lobbyRules: {
+          lockStats: true,
+          allowCarChoice: false,
+          allowModeChoice: false,
+          universalVehicleId: 'monster',
+          universalCharacterMode: 'car_driver',
+          universalSpeedMult: 1.25,
+        },
+      },
+    });
+    const lockedRoom = await p2.waitFor(
+      (m) => m.type === 'room_state' && m.settings?.lobbyRules?.allowCarChoice === false
+    );
+    assert.ok(lockedRoom.players.every((pl) => pl.vehicleId === 'monster' && pl.characterMode === 'car_driver'));
+
+    for (const ck of extraClients) ck.close();
+    await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
 
     p1.send({ type: 'start_match', seed: 888999 });
     const cd1 = await p1.waitFor((m) => m.type === 'match_countdown');
