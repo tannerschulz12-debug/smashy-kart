@@ -1014,10 +1014,17 @@ class SmashyKartApp {
     const clean = String(code || '').trim().toUpperCase();
     if (!clean) return;
     document.getElementById('lobby-error').classList.add('hidden');
+    this._requestWakeLock();
     try {
       await this.net.joinRoom(clean, this._buildLocalNetProfile());
     } catch {
-      this._showLobbyError('Could not reach party server. Make sure you are on the same Wi-Fi!');
+      this._showLobbyError('Could not connect to party relay. Check your internet connection and try again!');
+    }
+  }
+
+  _requestWakeLock() {
+    if (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') {
+      navigator.wakeLock.request('screen').catch(() => {});
     }
   }
 
@@ -1030,12 +1037,13 @@ class SmashyKartApp {
   _bindMultiplayerEvents() {
     document.getElementById('btn-create-room').addEventListener('click', async () => {
       this.sound.unlock();
+      this._requestWakeLock();
       document.getElementById('lobby-error').classList.add('hidden');
       try {
         this.isReadyInLobby = true;
         await this.net.createRoom(this._buildLocalNetProfile(), this.settings);
       } catch {
-        this._showLobbyError('Could not connect to party server.');
+        this._showLobbyError('Could not connect to party relay. Check your internet connection!');
       }
     });
 
@@ -1103,7 +1111,8 @@ class SmashyKartApp {
       if (!this.net.isHost && msg.room?.settings) {
         this._applyHostSettings(msg.room.settings);
       }
-      window.history.replaceState({}, '', `/?room=${encodeURIComponent(msg.code)}`);
+      const basePath = window.location.pathname || '/';
+      window.history.replaceState({}, '', `${basePath}?room=${encodeURIComponent(msg.code)}`);
       document.getElementById('lobby-entry').classList.add('hidden');
       document.getElementById('lobby-room').classList.remove('hidden');
       if (msg.room) this._renderLobbyRoom(msg.room);
