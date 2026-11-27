@@ -44,9 +44,22 @@ function loadSavedSettings() {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw);
+    const validCam = ['smashy', 'chase', 'pov'].includes(parsed.cameraMode)
+      ? parsed.cameraMode
+      : defaults.cameraMode;
+    const povFov = Math.max(62, Math.min(92, Number(parsed.povFov) || defaults.povFov));
+    const steerSensitivity = Math.max(
+      0.7,
+      Math.min(1.4, Number(parsed.steerSensitivity) || defaults.steerSensitivity)
+    );
     return {
       ...defaults,
       ...parsed,
+      cameraMode: validCam,
+      povFov,
+      steerSensitivity,
+      showSpeedometer: parsed.showSpeedometer !== false,
+      showQuickCamBtn: parsed.showQuickCamBtn !== false,
       enabledItems: { ...defaults.enabledItems, ...(parsed.enabledItems || {}) },
       lobbyRules: { ...defaults.lobbyRules, ...(parsed.lobbyRules || {}) },
     };
@@ -134,8 +147,11 @@ class SmashyKartApp {
     this.leftZoneTouches = new Set();
     this.rightZoneTouches = new Set();
 
-    // Photo editor state
+    // Photo editor state (60fps cached session)
     this.editingImage = null;
+    this.editingPersonId = null;
+    this.photoCutoutSession = null;
+    this._photoSessionSeq = 0;
     this.photoEditOpts = {
       zoom: 1.1,
       offsetX: 0,
@@ -166,6 +182,7 @@ class SmashyKartApp {
     this._bindKeyboardInput();
     this._bindTouchControls();
     this._bindHomeAndModals();
+    this._bindPersonalSettings();
     this._bindPeopleStudio();
     this._bindGarageAndWorld();
     this._bindSoundStudio();
@@ -238,7 +255,9 @@ class SmashyKartApp {
     window.addEventListener('keydown', (e) => {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
       this.keys.add(e.code);
-      if (e.code === 'Space' || e.code === 'KeyE' || e.code === 'Enter') {
+      if ((e.code === 'KeyC' || e.code === 'KeyV') && !e.repeat) {
+        this._cycleCameraMode();
+      } else if (e.code === 'Space' || e.code === 'KeyE' || e.code === 'Enter') {
         if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
           e.preventDefault();
           this.touchUseItemQueued = true;
@@ -248,6 +267,16 @@ class SmashyKartApp {
           this.touchHornQueued = true;
         }
       } else if (e.code === 'Escape') {
+        const soundModal = document.getElementById('sound-modal');
+        const settingsModal = document.getElementById('settings-modal');
+        if (soundModal && !soundModal.classList.contains('hidden')) {
+          soundModal.classList.add('hidden');
+          return;
+        }
+        if (settingsModal && !settingsModal.classList.contains('hidden')) {
+          settingsModal.classList.add('hidden');
+          return;
+        }
         if (this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'spectating') {
           this._exitToMainMenu();
         }
@@ -335,14 +364,13 @@ class SmashyKartApp {
     joyZone.addEventListener('pointerup', endJoy);
     joyZone.addEventListener('pointercancel', endJoy);
 
-    // Use Item buttons (both bottom-right thumb button AND top-center roulette slot)
+    // Side-only Mystery Box Ability Button
     const fireItem = (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.touchUseItemQueued = true;
     };
     document.getElementById('btn-use-item').addEventListener('pointerdown', fireItem);
-    document.getElementById('hud-item-slot').addEventListener('pointerdown', fireItem);
 
     // Brake & Horn buttons
     const brakeBtn = document.getElementById('btn-brake');
@@ -363,7 +391,22 @@ class SmashyKartApp {
       this.touchHornQueued = true;
     });
 
-    document.getElementById('btn-pause').addEventListener('click', () => {
+    const quickCamBtn = document.getElementById('btn-quick-cam');
+    quickCamBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    quickCamBtn.addEventListener('click', () => {
+      this._cycleCameraMode();
+    });
+
+    const ingameSettingsBtn = document.getElementById('btn-ingame-settings');
+    ingameSettingsBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    ingameSettingsBtn.addEventListener('click', () => {
+      this._clearTouchState();
+      document.getElementById('settings-modal').classList.remove('hidden');
+    });
+
+    const pauseBtn = document.getElementById('btn-pause');
+    pauseBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    pauseBtn.addEventListener('click', () => {
       this._exitToMainMenu();
     });
 
@@ -511,6 +554,134 @@ class SmashyKartApp {
     });
   }
 
+  _setCameraMode(cam, announce = false) {
+    if (!['smashy', 'chase', 'pov'].includes(cam)) return;
+    this.settings.cameraMode = cam;
+    saveSettings(this.settings);
+    this._refreshAllUiFromSettings();
+    if (announce) {
+      const camNames = {
+        smashy: '🎥 Smashy Overhead Cam',
+        chase: '🎥 Behind Chase Cam',
+        pov: '🎥 First-Person POV Cam',
+      };
+      this._showChaosToast(camNames[cam] || '🎥 Camera Switched');
+    }
+  }
+
+  _cycleCameraMode() {
+    const order = ['smashy', 'chase', 'pov'];
+    const idx = order.indexOf(this.settings.cameraMode);
+    const next = order[(idx + 1) % order.length];
+    this._setCameraMode(next, true);
+  }
+
+  _syncSimPersonalSettings() {
+    const s = this.settings;
+    const isGuestParty = Boolean(
+      this.net.roomCode && !this.net.isHost && (this.mode === 'playing_party' || this.mode === 'countdown')
+    );
+    if (isGuestParty && this.sim.settings) {
+      this.sim.updateSettings({
+        ...this.sim.settings,
+        cameraMode: s.cameraMode,
+        povFov: s.povFov,
+        touchStyle: s.touchStyle,
+        steerSensitivity: s.steerSensitivity,
+      });
+    } else {
+      this.sim.updateSettings(s);
+    }
+  }
+
+  _bindPersonalSettings() {
+    const settingsModal = document.getElementById('settings-modal');
+    settingsModal.addEventListener('click', (e) => {
+      if (e.target === settingsModal) {
+        settingsModal.classList.add('hidden');
+      }
+    });
+
+    document.getElementById('settings-cam-btns').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-cam]');
+      if (!btn) return;
+      const inMatch = this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'spectating';
+      this._setCameraMode(btn.dataset.cam, inMatch);
+    });
+
+    const fovRng = document.getElementById('rng-pov-fov');
+    fovRng.addEventListener('input', () => {
+      const fov = Math.max(62, Math.min(92, Math.round(Number(fovRng.value) || 76)));
+      this.settings.povFov = fov;
+      document.getElementById('val-pov-fov').textContent = `${fov}°`;
+      saveSettings(this.settings);
+      this._syncSimPersonalSettings();
+    });
+
+    document.getElementById('settings-touch-btns').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-touch]');
+      if (!btn) return;
+      this.settings.touchStyle = btn.dataset.touch;
+      this._clearTouchState();
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+    });
+
+    const sensRng = document.getElementById('rng-steer-sens');
+    sensRng.addEventListener('input', () => {
+      const sens = Math.max(0.7, Math.min(1.4, Number(sensRng.value) || 1.0));
+      this.settings.steerSensitivity = sens;
+      document.getElementById('val-steer-sens').textContent = `${Math.round(sens * 100)}%`;
+      saveSettings(this.settings);
+      this._syncSimPersonalSettings();
+    });
+
+    const settingsVolRng = document.getElementById('rng-settings-vol');
+    settingsVolRng.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(1, Number(settingsVolRng.value)));
+      this.settings.soundVolume = v;
+      this.sound.setVolume(v);
+      const pct = `${Math.round(v * 100)}%`;
+      document.getElementById('val-settings-vol').textContent = pct;
+      document.getElementById('rng-volume').value = String(v);
+      document.getElementById('val-volume').textContent = pct;
+      saveSettings(this.settings);
+    });
+
+    const speedoChk = document.getElementById('chk-show-speedo');
+    speedoChk.addEventListener('change', () => {
+      this.settings.showSpeedometer = speedoChk.checked;
+      document.getElementById('hud-speedo').classList.toggle('hidden', !speedoChk.checked);
+      saveSettings(this.settings);
+    });
+
+    const quickCamChk = document.getElementById('chk-show-quickcam');
+    quickCamChk.addEventListener('change', () => {
+      this.settings.showQuickCamBtn = quickCamChk.checked;
+      document.getElementById('btn-quick-cam').classList.toggle('hidden', !quickCamChk.checked);
+      saveSettings(this.settings);
+    });
+
+    document.getElementById('btn-settings-voice-studio').addEventListener('click', () => {
+      document.getElementById('sound-modal').classList.remove('hidden');
+    });
+
+    document.getElementById('btn-reset-personal-settings').addEventListener('click', () => {
+      this.settings.cameraMode = 'smashy';
+      this.settings.povFov = 76;
+      this.settings.touchStyle = 'split';
+      this.settings.steerSensitivity = 1.0;
+      this.settings.soundVolume = 0.85;
+      this.settings.showSpeedometer = true;
+      this.settings.showQuickCamBtn = true;
+      this.sound.setVolume(0.85);
+      this._clearTouchState();
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+      this._showChaosToast('⚙️ Personal settings reset!');
+    });
+  }
+
   _bindPeopleStudio() {
     const fileInput = document.getElementById('photo-file-input');
     const editorBox = document.getElementById('photo-editor-box');
@@ -521,34 +692,68 @@ class SmashyKartApp {
     const yRng = document.getElementById('rng-photo-y');
     const tolRng = document.getElementById('rng-photo-tol');
     const copChk = document.getElementById('chk-person-cop');
+    const centerBtn = document.getElementById('btn-center-photo');
 
-    let latestProcessedDataUrl = null;
-    const refreshCutoutPreview = async () => {
-      if (!this.editingImage) return;
-      document.getElementById('val-photo-zoom').textContent = `${Number(zoomRng.value).toFixed(2)}x`;
-      document.getElementById('val-photo-tol').textContent = tolRng.value;
+    const clampVal = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    // Synchronous <0.5ms 60fps canvas redraw (zero Image decode, zero LAB flood-fill!)
+    const drawInstantPreview = () => {
+      if (!this.photoCutoutSession) return;
+      const z = clampVal(Number(this.photoEditOpts.zoom) || 1.1, 0.7, 2.6);
+      const ox = clampVal(Number(this.photoEditOpts.offsetX) || 0, -1, 1);
+      const oy = clampVal(Number(this.photoEditOpts.offsetY) || 0, -1, 1);
+
+      zoomRng.value = String(z);
+      xRng.value = String(Math.round(ox * 100));
+      yRng.value = String(Math.round(oy * 100));
+      document.getElementById('val-photo-zoom').textContent = `${z.toFixed(2)}x`;
+      document.getElementById('val-photo-tol').textContent = String(this.photoEditOpts.tolerance);
       document.getElementById('tolerance-row').classList.toggle(
         'hidden',
-        this.photoEditOpts.shape !== 'cutout'
+        this.photoEditOpts.shape === 'full'
+      );
+      document.querySelectorAll('#cutout-shape-btns .seg-btn').forEach((b) =>
+        b.classList.toggle('active', b.dataset.shape === this.photoEditOpts.shape)
       );
 
-      const dataUrl = await this.photos.processImageToCutout(this.editingImage, {
-        zoom: Number(zoomRng.value),
-        offsetX: Number(xRng.value) / 100,
-        offsetY: Number(yRng.value) / 100,
-        magicCutout: this.photoEditOpts.shape === 'cutout',
-        tolerance: Number(tolRng.value),
+      this.photos.renderSessionPreview(cropCanvas, this.photoCutoutSession, {
+        zoom: z,
+        offsetX: ox,
+        offsetY: oy,
         shape: this.photoEditOpts.shape,
+        normalizedOffsets: true,
       });
-      latestProcessedDataUrl = dataUrl;
+    };
 
-      const ctx = cropCanvas.getContext('2d');
-      const previewImg = new Image();
-      previewImg.onload = () => {
-        ctx.clearRect(0, 0, 256, 256);
-        ctx.drawImage(previewImg, 0, 0, 256, 256);
-      };
-      previewImg.src = dataUrl;
+    const rebuildCutoutSession = async () => {
+      if (!this.editingImage) return;
+      const seq = ++this._photoSessionSeq;
+      const magic = this.photoEditOpts.shape !== 'full';
+      const tol = Number(tolRng.value) || 38;
+      this.photoEditOpts.tolerance = tol;
+      document.getElementById('val-photo-tol').textContent = String(tol);
+      const session = await this.photos.prepareCutoutSession(this.editingImage, {
+        magicCutout: magic,
+        tolerance: tol,
+      });
+      if (seq !== this._photoSessionSeq) return;
+      this.photoCutoutSession = session;
+      drawInstantPreview();
+    };
+
+    this._openEditorForImage = (img, { personId = null, name = 'Me', useAsCop = true, initialZoom = 1.1 } = {}) => {
+      this.editingImage = img;
+      this.editingPersonId = personId;
+      this.photoEditOpts.zoom = initialZoom;
+      this.photoEditOpts.offsetX = 0;
+      this.photoEditOpts.offsetY = 0;
+      this.photoEditOpts.tolerance = 38;
+      this.photoEditOpts.shape = 'cutout';
+      tolRng.value = '38';
+      nameInp.value = name;
+      copChk.checked = Boolean(useAsCop);
+      editorBox.classList.remove('hidden');
+      rebuildCutoutSession();
     };
 
     fileInput.addEventListener('change', () => {
@@ -558,15 +763,14 @@ class SmashyKartApp {
       reader.onload = () => {
         const img = new Image();
         img.onload = () => {
-          this.editingImage = img;
-          zoomRng.value = '1.1';
-          xRng.value = '0';
-          yRng.value = '0';
-          tolRng.value = '38';
           const baseName = file.name.replace(/\.[^.]+$/, '').slice(0, 14);
-          nameInp.value = baseName && !/^img_|^image|^photo/i.test(baseName) ? baseName : 'Me';
-          editorBox.classList.remove('hidden');
-          refreshCutoutPreview();
+          const cleanName = baseName && !/^img_|^image|^photo/i.test(baseName) ? baseName : 'Me';
+          this._openEditorForImage(img, {
+            personId: null,
+            name: cleanName,
+            useAsCop: true,
+            initialZoom: 1.1,
+          });
         };
         img.src = reader.result;
       };
@@ -574,35 +778,174 @@ class SmashyKartApp {
       fileInput.value = '';
     });
 
+    // Direct 60fps 1-Finger / Mouse Drag + 2-Finger Pinch-to-Zoom + Wheel Zoom on #photo-crop-canvas
+    const activePointers = new Map();
+    let pinchStartDist = 0;
+    let pinchStartZoom = 1.1;
+    let pinchLastMid = null;
+
+    const refreshPinchBaseline = () => {
+      if (activePointers.size >= 2) {
+        const [pA, pB] = Array.from(activePointers.values());
+        pinchStartDist = Math.max(8, Math.hypot(pB.x - pA.x, pB.y - pA.y));
+        pinchStartZoom = this.photoEditOpts.zoom;
+        pinchLastMid = { x: (pA.x + pB.x) * 0.5, y: (pA.y + pB.y) * 0.5 };
+      } else {
+        pinchStartDist = 0;
+        pinchLastMid = null;
+      }
+    };
+
+    cropCanvas.addEventListener('pointerdown', (e) => {
+      if (!this.photoCutoutSession) return;
+      e.preventDefault();
+      cropCanvas.setPointerCapture?.(e.pointerId);
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      cropCanvas.classList.add('dragging');
+      if (activePointers.size >= 2) {
+        refreshPinchBaseline();
+      }
+    });
+
+    cropCanvas.addEventListener('pointermove', (e) => {
+      if (!activePointers.has(e.pointerId) || !this.photoCutoutSession) return;
+      e.preventDefault();
+      const prev = activePointers.get(e.pointerId);
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const rect = cropCanvas.getBoundingClientRect();
+      const boxW = Math.max(48, rect.width);
+      const boxH = Math.max(48, rect.height);
+
+      if (activePointers.size === 1) {
+        const dx = e.clientX - prev.x;
+        const dy = e.clientY - prev.y;
+        this.photoEditOpts.offsetX = clampVal(this.photoEditOpts.offsetX + (dx / boxW) * 2, -1, 1);
+        this.photoEditOpts.offsetY = clampVal(this.photoEditOpts.offsetY + (dy / boxH) * 2, -1, 1);
+        drawInstantPreview();
+      } else if (activePointers.size >= 2) {
+        const [pA, pB] = Array.from(activePointers.values());
+        const dist = Math.hypot(pB.x - pA.x, pB.y - pA.y);
+        const mid = { x: (pA.x + pB.x) * 0.5, y: (pA.y + pB.y) * 0.5 };
+        if (pinchStartDist > 8) {
+          this.photoEditOpts.zoom = clampVal(pinchStartZoom * (dist / pinchStartDist), 0.7, 2.6);
+        }
+        if (pinchLastMid) {
+          this.photoEditOpts.offsetX = clampVal(
+            this.photoEditOpts.offsetX + ((mid.x - pinchLastMid.x) / boxW) * 2,
+            -1,
+            1
+          );
+          this.photoEditOpts.offsetY = clampVal(
+            this.photoEditOpts.offsetY + ((mid.y - pinchLastMid.y) / boxH) * 2,
+            -1,
+            1
+          );
+        }
+        pinchLastMid = mid;
+        drawInstantPreview();
+      }
+    });
+
+    const releaseCropPointer = (e) => {
+      if (!activePointers.has(e.pointerId)) return;
+      activePointers.delete(e.pointerId);
+      refreshPinchBaseline();
+      if (activePointers.size === 0) {
+        cropCanvas.classList.remove('dragging');
+      }
+    };
+    cropCanvas.addEventListener('pointerup', releaseCropPointer);
+    cropCanvas.addEventListener('pointercancel', releaseCropPointer);
+    cropCanvas.addEventListener('lostpointercapture', releaseCropPointer);
+
+    cropCanvas.addEventListener(
+      'wheel',
+      (e) => {
+        if (!this.photoCutoutSession) return;
+        e.preventDefault();
+        const nextZoom = clampVal(this.photoEditOpts.zoom - e.deltaY * 0.0022, 0.7, 2.6);
+        this.photoEditOpts.zoom = nextZoom;
+        drawInstantPreview();
+      },
+      { passive: false }
+    );
+
+    centerBtn.addEventListener('click', () => {
+      this.photoEditOpts.zoom = this.editingPersonId ? 1.0 : 1.1;
+      this.photoEditOpts.offsetX = 0;
+      this.photoEditOpts.offsetY = 0;
+      drawInstantPreview();
+    });
+
     document.getElementById('cutout-shape-btns').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-shape]');
       if (!btn) return;
+      const prevShape = this.photoEditOpts.shape;
       this.photoEditOpts.shape = btn.dataset.shape;
-      document.querySelectorAll('#cutout-shape-btns .seg-btn').forEach((b) =>
-        b.classList.toggle('active', b.dataset.shape === this.photoEditOpts.shape)
-      );
-      refreshCutoutPreview();
+      if ((prevShape === 'full') !== (this.photoEditOpts.shape === 'full')) {
+        rebuildCutoutSession();
+      } else {
+        drawInstantPreview();
+      }
     });
 
-    for (const rng of [zoomRng, xRng, yRng, tolRng]) {
-      rng.addEventListener('input', () => refreshCutoutPreview());
-    }
+    zoomRng.addEventListener('input', () => {
+      this.photoEditOpts.zoom = clampVal(Number(zoomRng.value), 0.7, 2.6);
+      drawInstantPreview();
+    });
+    xRng.addEventListener('input', () => {
+      this.photoEditOpts.offsetX = clampVal(Number(xRng.value) / 100, -1, 1);
+      drawInstantPreview();
+    });
+    yRng.addEventListener('input', () => {
+      this.photoEditOpts.offsetY = clampVal(Number(yRng.value) / 100, -1, 1);
+      drawInstantPreview();
+    });
+
+    let tolRaf = 0;
+    tolRng.addEventListener('input', () => {
+      document.getElementById('val-photo-tol').textContent = tolRng.value;
+      if (tolRaf) cancelAnimationFrame(tolRaf);
+      tolRaf = requestAnimationFrame(() => {
+        tolRaf = 0;
+        rebuildCutoutSession();
+      });
+    });
 
     document.getElementById('btn-cancel-photo').addEventListener('click', () => {
       this.editingImage = null;
+      this.editingPersonId = null;
+      this.photoCutoutSession = null;
       editorBox.classList.add('hidden');
     });
 
     document.getElementById('btn-save-photo').addEventListener('click', async () => {
-      if (!latestProcessedDataUrl) return;
+      if (!this.photoCutoutSession && !this.editingImage) return;
+      const exportOpts = {
+        zoom: this.photoEditOpts.zoom,
+        offsetX: this.photoEditOpts.offsetX,
+        offsetY: this.photoEditOpts.offsetY,
+        magicCutout: this.photoEditOpts.shape !== 'full',
+        tolerance: this.photoEditOpts.tolerance,
+        shape: this.photoEditOpts.shape,
+        normalizedOffsets: true,
+      };
+      const finalDataUrl = this.photoCutoutSession
+        ? this.photos.exportSessionDataUrl(this.photoCutoutSession, exportOpts)
+        : await this.photos.processImageToCutout(this.editingImage, exportOpts);
+      if (!finalDataUrl) return;
+
       const saved = await this.photos.savePerson({
+        id: this.editingPersonId || undefined,
         name: nameInp.value.trim() || 'Custom Hero',
-        dataUrl: latestProcessedDataUrl,
+        dataUrl: finalDataUrl,
         useAsCop: copChk.checked,
       });
       this.settings.avatarId = saved.id;
       saveSettings(this.settings);
       this.editingImage = null;
+      this.editingPersonId = null;
+      this.photoCutoutSession = null;
       editorBox.classList.add('hidden');
 
       this._syncAllPhotoTextures();
@@ -636,18 +979,38 @@ class SmashyKartApp {
           <button type="button" class="tiny-pill ${person.useAsCop ? 'cop-on' : ''}" data-toggle-cop="${person.id}">
             ${person.useAsCop ? '🚔 Cop ON' : 'Cop OFF'}
           </button>
-          ${person.builtIn ? '' : `<button type="button" class="tiny-pill" data-del-person="${person.id}">✕</button>`}
+          ${
+            person.builtIn
+              ? ''
+              : `<button type="button" class="tiny-pill edit-pill" data-edit-person="${person.id}">✏️ Edit</button>
+                 <button type="button" class="tiny-pill" data-del-person="${person.id}">✕</button>`
+          }
         </div>
       `;
 
       card.addEventListener('click', async (e) => {
         const copBtn = e.target.closest('[data-toggle-cop]');
+        const editBtn = e.target.closest('[data-edit-person]');
         const delBtn = e.target.closest('[data-del-person]');
         if (copBtn) {
           e.stopPropagation();
           await this.photos.savePerson({ ...person, useAsCop: !person.useAsCop });
           this._syncAllPhotoTextures();
           this._renderPeopleGrid();
+          return;
+        }
+        if (editBtn) {
+          e.stopPropagation();
+          const img = new Image();
+          img.onload = () => {
+            this._openEditorForImage?.(img, {
+              personId: person.id,
+              name: person.name || 'Custom Hero',
+              useAsCop: person.useAsCop !== false,
+              initialZoom: 1.0,
+            });
+          };
+          img.src = person.dataUrl;
           return;
         }
         if (delBtn) {
@@ -744,14 +1107,45 @@ class SmashyKartApp {
     bindSlider('rng-mass-mult', 'massMult');
     bindSlider('rng-scale-mult', 'scaleMult');
 
-    document.getElementById('btn-reset-garage').addEventListener('click', () => {
-      this.settings.speedMult = 1.0;
-      this.settings.driftMult = 1.0;
-      this.settings.massMult = 1.0;
-      this.settings.scaleMult = 1.0;
+    // 1-Tap Garage Tuning Presets
+    const GARAGE_PRESETS = {
+      balanced: { speedMult: 1.0, driftMult: 1.0, massMult: 1.0, scaleMult: 1.0, accelMult: 1.0 },
+      drift:    { speedMult: 1.15, driftMult: 1.45, massMult: 0.85, scaleMult: 0.95, accelMult: 1.2 },
+      speed:    { speedMult: 1.5, driftMult: 1.15, massMult: 0.9, scaleMult: 0.95, accelMult: 1.35 },
+      tank:     { speedMult: 0.95, driftMult: 0.85, massMult: 1.7, scaleMult: 1.35, accelMult: 1.0 },
+    };
+
+    const applyGaragePreset = (presetKey) => {
+      const vals = GARAGE_PRESETS[presetKey];
+      if (!vals) return;
+      if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.lockStats !== false) {
+        this._refreshAllUiFromSettings();
+        this._showChaosToast('🔒 Car stats are locked by the Lobby Manager!');
+        return;
+      }
+      Object.assign(this.settings, vals);
+      if (!this.net.roomCode || this.net.isHost) {
+        this.settings.lobbyRules.universalSpeedMult = vals.speedMult;
+        this.settings.lobbyRules.universalDriftMult = vals.driftMult;
+        this.settings.lobbyRules.universalMassMult = vals.massMult;
+        this.settings.lobbyRules.universalScaleMult = vals.scaleMult;
+      }
       saveSettings(this.settings);
       this._refreshAllUiFromSettings();
       if (this.mode === 'attract') this._respawnAttractHero();
+      if (this.net.roomCode && this.net.isHost) {
+        this.net.updateRoomSettings(this.settings);
+      }
+    };
+
+    document.getElementById('garage-preset-btns').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-gpreset]');
+      if (!btn) return;
+      applyGaragePreset(btn.dataset.gpreset);
+    });
+
+    document.getElementById('btn-reset-garage').addEventListener('click', () => {
+      applyGaragePreset('balanced');
     });
 
     // World & Map controls
@@ -785,15 +1179,14 @@ class SmashyKartApp {
     document.getElementById('camera-mode-btns').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-cam]');
       if (!btn) return;
-      this.settings.cameraMode = btn.dataset.cam;
-      saveSettings(this.settings);
-      this._refreshAllUiFromSettings();
+      this._setCameraMode(btn.dataset.cam, false);
     });
 
     document.getElementById('touch-style-btns').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-touch]');
       if (!btn) return;
       this.settings.touchStyle = btn.dataset.touch;
+      this._clearTouchState();
       saveSettings(this.settings);
       this._refreshAllUiFromSettings();
     });
@@ -803,6 +1196,9 @@ class SmashyKartApp {
     const grid = document.getElementById('vehicle-grid');
     grid.innerHTML = '';
     for (const veh of VEHICLES) {
+      const spdPct = Math.round(Math.min(100, (veh.speed / 60) * 100));
+      const hdlPct = Math.round(Math.min(100, (veh.handling / 4.6) * 100));
+      const hpPct = Math.round(Math.min(100, (veh.maxHp / 190) * 100));
       const card = document.createElement('button');
       card.type = 'button';
       card.className = `vehicle-card${veh.id === this.settings.vehicleId ? ' selected' : ''}`;
@@ -810,6 +1206,11 @@ class SmashyKartApp {
         <div class="veh-swatch" style="background: linear-gradient(90deg, ${veh.color} 72%, ${veh.accent} 72%)"></div>
         <div class="veh-name">${veh.name}</div>
         <div class="veh-stats">SPD ${veh.speed} · HP ${veh.maxHp}</div>
+        <div class="veh-bars">
+          <div class="veh-bar-row"><span class="veh-bar-lbl">SPD</span><div class="veh-bar-track"><div class="veh-bar-fill" style="width:${spdPct}%"></div></div></div>
+          <div class="veh-bar-row"><span class="veh-bar-lbl">HDL</span><div class="veh-bar-track"><div class="veh-bar-fill hdl" style="width:${hdlPct}%"></div></div></div>
+          <div class="veh-bar-row"><span class="veh-bar-lbl">HP</span><div class="veh-bar-track"><div class="veh-bar-fill hp" style="width:${hpPct}%"></div></div></div>
+        </div>
       `;
       card.addEventListener('click', () => {
         if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowCarChoice === false) {
@@ -872,7 +1273,10 @@ class SmashyKartApp {
       const v = Number(volRng.value);
       this.settings.soundVolume = v;
       this.sound.setVolume(v);
-      document.getElementById('val-volume').textContent = `${Math.round(v * 100)}%`;
+      const pct = `${Math.round(v * 100)}%`;
+      document.getElementById('val-volume').textContent = pct;
+      document.getElementById('rng-settings-vol').value = String(v);
+      document.getElementById('val-settings-vol').textContent = pct;
       saveSettings(this.settings);
     });
     this._renderSoundSlots();
@@ -1027,12 +1431,55 @@ class SmashyKartApp {
     document.getElementById('val-gravity').textContent =
       s.gravityMult < 0.85 ? 'Moon Jumps' : s.gravityMult > 1.1 ? 'Heavy' : 'Normal';
 
-    document.querySelectorAll('#camera-mode-btns .seg-btn').forEach((b) =>
+    document.querySelectorAll('#camera-mode-btns .seg-btn, #settings-cam-btns .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.cam === s.cameraMode)
     );
-    document.querySelectorAll('#touch-style-btns .seg-btn').forEach((b) =>
+    document.querySelectorAll('#touch-style-btns .seg-btn, #settings-touch-btns .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.touch === s.touchStyle)
     );
+
+    // Sync Personal Settings controls
+    const fov = Math.max(62, Math.min(92, Math.round(Number(s.povFov) || 76)));
+    document.getElementById('rng-pov-fov').value = String(fov);
+    document.getElementById('val-pov-fov').textContent = `${fov}°`;
+
+    const sens = Math.max(0.7, Math.min(1.4, Number(s.steerSensitivity) || 1.0));
+    document.getElementById('rng-steer-sens').value = String(sens);
+    document.getElementById('val-steer-sens').textContent = `${Math.round(sens * 100)}%`;
+
+    const vol = Math.max(0, Math.min(1, Number(s.soundVolume ?? 0.85)));
+    const volPct = `${Math.round(vol * 100)}%`;
+    document.getElementById('rng-volume').value = String(vol);
+    document.getElementById('val-volume').textContent = volPct;
+    document.getElementById('rng-settings-vol').value = String(vol);
+    document.getElementById('val-settings-vol').textContent = volPct;
+
+    const showSpeedo = s.showSpeedometer !== false;
+    const showQuickCam = s.showQuickCamBtn !== false;
+    document.getElementById('chk-show-speedo').checked = showSpeedo;
+    document.getElementById('chk-show-quickcam').checked = showQuickCam;
+    document.getElementById('hud-speedo').classList.toggle('hidden', !showSpeedo);
+    const quickCamBtn = document.getElementById('btn-quick-cam');
+    quickCamBtn.classList.toggle('hidden', !showQuickCam);
+    quickCamBtn.classList.toggle('pov-active', s.cameraMode === 'pov');
+
+    // Highlight matching 1-tap garage preset pill if active
+    const presetChecks = {
+      balanced: [1.0, 1.0, 1.0],
+      drift: [1.15, 1.45, 0.85],
+      speed: [1.5, 1.15, 0.9],
+      tank: [0.95, 0.85, 1.7],
+    };
+    document.querySelectorAll('#garage-preset-btns .preset-pill').forEach((pill) => {
+      const target = presetChecks[pill.dataset.gpreset];
+      const isMatch = Boolean(
+        target &&
+          Math.abs(dispSpeed - target[0]) < 0.03 &&
+          Math.abs(dispDrift - target[1]) < 0.03 &&
+          Math.abs(dispMass - target[2]) < 0.03
+      );
+      pill.classList.toggle('active', isMatch);
+    });
 
     // Toggle mobile touch steering layout
     document.getElementById('split-steer').classList.toggle('hidden', s.touchStyle === 'joystick');
@@ -1041,7 +1488,7 @@ class SmashyKartApp {
     this._renderPeopleGrid();
     this._renderVehicleGrid();
     this._renderAbilityMixer();
-    this.sim.updateSettings(s);
+    this._syncSimPersonalSettings();
   }
 
   // ======================== MULTIPLAYER PARTY LOBBY ========================
@@ -1503,6 +1950,7 @@ class SmashyKartApp {
     document.getElementById('hud').classList.add('hidden');
     document.getElementById('gameover-modal').classList.add('hidden');
     document.getElementById('danger-vignette').classList.add('hidden');
+    document.getElementById('speed-lines').classList.add('hidden');
     document.getElementById('world-labels').innerHTML = '';
     this.sound.updateLoopSounds(0, false, 1, false, true);
     this._respawnAttractHero();
@@ -1786,8 +2234,9 @@ class SmashyKartApp {
         break;
       }
       case 'pickup_box': {
-        this.renderer.spawnDebris(ev.x, (ev.y || 1) + 0.8, ev.z, '#38bdf8', 10, 12, 0.34);
-        this.sound.playEvent('pickup_box', 1.0);
+        const boxCol = ev.sugar ? '#f472b6' : '#38bdf8';
+        this.renderer.spawnDebris(ev.x, (ev.y || 1) + 0.8, ev.z, boxCol, 11, 13, 0.34);
+        this.sound.playEvent('pickup_box', ev.sugar ? 1.15 : 1.0);
         break;
       }
       case 'roulette_tick': {
@@ -1796,14 +2245,23 @@ class SmashyKartApp {
       }
       case 'roulette_lock': {
         this.sound.playEvent('roulette_lock', 1.0);
-        const slotEl = document.getElementById('hud-item-slot');
-        slotEl?.classList.add('locked-pop');
-        setTimeout(() => slotEl?.classList.remove('locked-pop'), 420);
+        const useBtn = document.getElementById('btn-use-item');
+        useBtn?.classList.add('locked-pop');
+        setTimeout(() => useBtn?.classList.remove('locked-pop'), 440);
+        break;
+      }
+      case 'mini_turbo': {
+        const sparkCol = (ev.tier || 1) >= 2 ? '#f97316' : '#38bdf8';
+        this.renderer.spawnDebris(ev.x, (ev.y || 0.4) + 0.35, ev.z, sparkCol, 8, 12, 0.3);
+        this.sound.playEvent('boost', 0.65);
         break;
       }
       case 'item_used': {
         const id = ev.abilityId;
-        if (id === 'triple_boost' || id === 'star_power' || id === 'mega_giant') {
+        if (id === 'sugar_rush') {
+          this.cameraShake = Math.max(this.cameraShake, 0.42);
+          this.sound.playEvent('boost', 1.25);
+        } else if (id === 'triple_boost' || id === 'star_power' || id === 'mega_giant') {
           this.sound.playEvent('boost', 1.0);
         } else {
           this.sound.playEvent('item', 1.0);
@@ -1904,6 +2362,8 @@ class SmashyKartApp {
     this.sound.updateLoopSounds(0, false, 1, false, true);
     document.getElementById('spectator-bar').classList.add('hidden');
     document.getElementById('danger-vignette').classList.add('hidden');
+    document.getElementById('speed-lines').classList.add('hidden');
+    document.getElementById('settings-modal').classList.add('hidden');
 
     const lp = this.sim.localPlayer;
     const survived = lp?.survivalTime || 0;
@@ -1983,53 +2443,91 @@ class SmashyKartApp {
       vignette.classList.add('hidden');
     }
 
-    // Mario Kart Roulette & Held Ability UI
+    // Side-Only Mario Kart Mystery Box Ability Button
     const items = lp.items || {};
-    const slotBtn = document.getElementById('hud-item-slot');
-    const slotIcon = document.getElementById('item-slot-icon');
-    const slotName = document.getElementById('item-slot-name');
-    const slotCharges = document.getElementById('item-slot-charges');
     const useBtn = document.getElementById('btn-use-item');
     const useIcon = document.getElementById('btn-use-item-icon');
+    const useLabel = document.getElementById('btn-use-item-label');
+    const useCharges = document.getElementById('btn-use-item-charges');
 
     if (items.rouletteTimer > 0) {
       const disp = ABILITIES.find((a) => a.id === items.rouletteDisplayId) || ABILITIES[0];
-      slotBtn.className = 'item-slot spinning';
-      slotIcon.textContent = disp.icon;
-      slotName.textContent = 'SPINNING...';
-      slotCharges.classList.add('hidden');
-      useBtn.classList.add('disabled');
+      useBtn.classList.remove('disabled', 'sugar-glow');
+      useBtn.classList.add('spinning');
       useIcon.textContent = disp.icon;
+      useLabel.textContent = 'SPIN...';
+      useCharges.classList.add('hidden');
     } else if (items.heldItem) {
       const held = ABILITIES.find((a) => a.id === items.heldItem) || ABILITIES[0];
-      slotBtn.className = 'item-slot';
-      slotIcon.textContent = held.icon;
-      slotName.textContent = held.shortName;
-      if (items.charges > 1) {
-        slotCharges.textContent = `x${items.charges}`;
-        slotCharges.classList.remove('hidden');
-      } else {
-        slotCharges.classList.add('hidden');
-      }
-      useBtn.classList.remove('disabled');
+      useBtn.classList.remove('disabled', 'spinning');
+      useBtn.classList.toggle('sugar-glow', items.heldItem === 'sugar_rush');
       useIcon.textContent = held.icon;
+      useLabel.textContent = held.shortName;
+      if (items.charges > 1) {
+        useCharges.textContent = `x${items.charges}`;
+        useCharges.classList.remove('hidden');
+      } else {
+        useCharges.classList.add('hidden');
+      }
     } else {
-      slotBtn.className = 'item-slot empty';
-      slotIcon.textContent = '?';
-      slotName.textContent = 'GET A ? BOX';
-      slotCharges.classList.add('hidden');
       useBtn.classList.add('disabled');
+      useBtn.classList.remove('spinning', 'sugar-glow', 'locked-pop');
       useIcon.textContent = '?';
+      useLabel.textContent = 'ITEM';
+      useCharges.classList.add('hidden');
     }
 
-    // Active buffs chips
+    // Active buffs chips (under .hud-left-stack so top-center is 100% open!)
     const buffsEl = document.getElementById('active-buffs');
     const chips = [];
-    if (items.starTimer > 0) chips.push(`⭐ ${items.starTimer.toFixed(1)}s`);
-    if (items.megaTimer > 0) chips.push(`🦖 ${items.megaTimer.toFixed(1)}s`);
-    if (items.boostTimer > 0) chips.push(`🍄 BOOST`);
-    if (items.shrunkTimer > 0) chips.push(`⚡ TINY`);
-    buffsEl.innerHTML = chips.map((c) => `<span class="buff-chip">${c}</span>`).join('');
+    if (items.sugarTimer > 0) {
+      chips.push({ text: `🍭 ${items.sugarTimer.toFixed(1)}s`, cls: 'buff-chip sugar' });
+    }
+    if (items.starTimer > 0) {
+      chips.push({ text: `⭐ ${items.starTimer.toFixed(1)}s`, cls: 'buff-chip' });
+    }
+    if (items.megaTimer > 0) {
+      chips.push({ text: `🦖 ${items.megaTimer.toFixed(1)}s`, cls: 'buff-chip' });
+    }
+    if (items.boostTimer > 0) {
+      chips.push({ text: '🍄 BOOST', cls: 'buff-chip' });
+    }
+    if (items.shrunkTimer > 0) {
+      chips.push({ text: '⚡ TINY', cls: 'buff-chip' });
+    }
+    buffsEl.innerHTML = chips.map((c) => `<span class="${c.cls}">${c.text}</span>`).join('');
+
+    // Speedometer + Drift Spark Gauge
+    const speedoEl = document.getElementById('hud-speedo');
+    const showSpeedo = this.settings.showSpeedometer !== false;
+    speedoEl.classList.toggle('hidden', !showSpeedo);
+    if (showSpeedo) {
+      const mph = Math.round((lp.speed || 0) * 2.2);
+      document.getElementById('hud-speedo-val').textContent = String(mph);
+      const sugarOn = Boolean(lp.sugarActive || items.sugarTimer > 0);
+      speedoEl.classList.toggle('sugar-speed', sugarOn);
+
+      const sparkEl = document.getElementById('hud-drift-spark');
+      const sparkTier = lp.driftSparkTier || 0;
+      if (lp.alive && sparkTier > 0) {
+        sparkEl.classList.remove('hidden');
+        sparkEl.classList.toggle('tier-1', sparkTier === 1);
+        sparkEl.classList.toggle('tier-2', sparkTier >= 2);
+      } else {
+        sparkEl.classList.add('hidden');
+        sparkEl.classList.remove('tier-1', 'tier-2');
+      }
+    }
+
+    // Screen-Edge Speed Streaks (3x Sugar Rush OR POV Turbo/Star)
+    const speedLinesEl = document.getElementById('speed-lines');
+    const sugarActive = Boolean(lp.sugarActive || items.sugarTimer > 0);
+    const povHyper =
+      this.settings.cameraMode === 'pov' &&
+      Boolean(lp.boostActive || items.boostTimer > 0 || lp.starActive || items.starTimer > 0);
+    const showStreaks = Boolean(lp.alive && this.mode !== 'spectating' && (sugarActive || povHyper));
+    speedLinesEl.classList.toggle('hidden', !showStreaks);
+    speedLinesEl.classList.toggle('sugar-mode', sugarActive);
 
     // Clock & Score
     document.getElementById('hud-timer').textContent = formatClock(lp.survivalTime || 0);
@@ -2112,7 +2610,8 @@ class SmashyKartApp {
       focusEntity,
       this.mode === 'attract' ? 'smashy' : this.settings.cameraMode,
       this.cameraShake,
-      dt
+      dt,
+      { povFov: this.settings.povFov || 76 }
     );
 
     const activeProjectiles = this.sim.getProjectiles();

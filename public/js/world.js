@@ -1,4 +1,4 @@
-// Deterministic Seeded 3D Smashy Road World (2400x2400, 1600 chunks, rivers, bridges, ramps, districts, ? boxes)
+// Deterministic Seeded 3D Smashy Road World (4800x4800, 6400 chunks, outer rivers, airport runways, bridges, ramps, ? & sugar boxes)
 
 import { WORLD_CONFIG, BIOMES } from './config.js';
 
@@ -13,10 +13,12 @@ const {
   BRIDGE_Y,
 } = WORLD_CONFIG;
 
-const MIN_CHUNK = -Math.floor(HALF_WORLD / CHUNK_SIZE); // -20
-const MAX_CHUNK = Math.floor(HALF_WORLD / CHUNK_SIZE) - 1; // 19
-const RIVER_ROWS = new Set([5, -7]);
+const MIN_CHUNK = -Math.floor(HALF_WORLD / CHUNK_SIZE); // -40
+const MAX_CHUNK = Math.floor(HALF_WORLD / CHUNK_SIZE) - 1; // 39
+const RIVER_ROWS = new Set([5, -7, 16, -18]);
 const ITEM_BOX_RESPAWN_SEC = 12.0;
+const MAX_CACHED_CHUNKS = 260;
+const MAX_SMASHED_HISTORY = 2400;
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -102,8 +104,12 @@ export class World {
     };
     this.chunks = new Map();
     this.collectedBoxes = new Set();
+    this.smashedPropIds = new Set();
+    this.damagedStationIds = new Set();
     this.geysers = [];
     this.time = 0;
+    this._focusCX = 0;
+    this._focusCZ = 0;
 
     // Pre-warm central starting region so frame 0 and spawn queries are instant
     for (let cz = -3; cz <= 3; cz++) {
@@ -137,7 +143,8 @@ export class World {
 
   getRiverCenterZ(x, cz) {
     const baseZ = cz * CHUNK_SIZE + CHUNK_SIZE * 0.5;
-    const phase = ((this.seed % 4096) * 0.013) + (cz === 5 ? 0.65 : 2.35);
+    const rowPhase = cz === 5 ? 0.65 : cz === -7 ? 2.35 : cz === 16 ? 1.48 : 3.72;
+    const phase = ((this.seed % 4096) * 0.013) + rowPhase;
     const wave =
       Math.sin(x * 0.021 + phase) * 5.2 +
       Math.cos(x * 0.0085 - phase * 0.7) * 2.4;
@@ -161,22 +168,73 @@ export class World {
     return clamp(Math.floor(v / CHUNK_SIZE), MIN_CHUNK, MAX_CHUNK);
   }
 
+  _isAirportChunk(cx, cz) {
+    if (this.isRiverChunkZ(cz)) return false;
+    // Inner 2x2 stunt runway airports in all 4 quadrants (avoiding river rows cz = 5, -7)
+    const inInnerX = (cx >= 6 && cx <= 7) || (cx >= -8 && cx <= -7);
+    const inInnerZ = (cz >= 6 && cz <= 7) || (cz >= -9 && cz <= -8);
+    if (inInnerX && inInnerZ) return true;
+
+    // Outer 2x2 stunt runway airports in expanded 4800x4800 quadrants (avoiding river rows cz = 16, -18)
+    const inOuterX = (cx >= 15 && cx <= 16) || (cx >= -16 && cx <= -15);
+    const inOuterZ = (cz >= 14 && cz <= 15) || (cz >= -16 && cz <= -15);
+    if (inOuterX && inOuterZ) return true;
+
+    return false;
+  }
+
   _getOrCreateChunk(cx, cz) {
     if (cx < MIN_CHUNK || cx > MAX_CHUNK || cz < MIN_CHUNK || cz > MAX_CHUNK) {
       return null;
     }
     const key = `${cx},${cz}`;
     let chunk = this.chunks.get(key);
-    if (!chunk) {
-      chunk = this._generateChunk(cx, cz, key);
+    if (chunk) {
+      // Refresh LRU order (most recently used moves to end of Map)
+      this.chunks.delete(key);
       this.chunks.set(key, chunk);
+      return chunk;
+    }
+
+    chunk = this._generateChunk(cx, cz, key);
+    this.chunks.set(key, chunk);
+    if (this.chunks.size > MAX_CACHED_CHUNKS) {
+      this._evictChunksIfNeeded(this._focusCX ?? cx, this._focusCZ ?? cz);
     }
     return chunk;
+  }
+
+  _evictChunksIfNeeded(centerCX = 0, centerCZ = 0) {
+    if (this.chunks.size <= MAX_CACHED_CHUNKS) return;
+    const safeRadius = VIEW_CHUNK_RADIUS + 2;
+
+    for (const [key, chunk] of this.chunks.entries()) {
+      if (this.chunks.size <= MAX_CACHED_CHUNKS) break;
+      if (
+        Math.abs(chunk.cx - centerCX) <= safeRadius &&
+        Math.abs(chunk.cz - centerCZ) <= safeRadius
+      ) {
+        continue;
+      }
+
+      let hasActiveRespawn = false;
+      const boxes = chunk.itemBoxes;
+      for (let i = 0; i < boxes.length; i++) {
+        if (boxes[i].collected) {
+          hasActiveRespawn = true;
+          break;
+        }
+      }
+      if (hasActiveRespawn) continue;
+
+      this.chunks.delete(key);
+    }
   }
 
   _chooseDistrict(cx, cz, rng) {
     if (this.isRiverChunkZ(cz)) return 'river';
     if (cx >= -1 && cx <= 0 && cz >= -1 && cz <= 0) return 'plaza';
+    if (this._isAirportChunk(cx, cz)) return 'airport';
 
     const dist = Math.hypot(cx + 0.5, cz + 0.5);
     const roll = rng();
@@ -193,10 +251,10 @@ export class World {
     if (dist < 6.5) {
       return roll < 0.78 ? 'downtown' : 'suburban';
     }
-    if (dist < 13.0) {
-      return roll < 0.45 ? 'downtown' : 'suburban';
+    if (dist < 18.0) {
+      return roll < 0.46 ? 'downtown' : 'suburban';
     }
-    return roll < 0.24 ? 'downtown' : 'suburban';
+    return roll < 0.28 ? 'downtown' : 'suburban';
   }
 
   _pickPalette(district, rng) {
@@ -254,7 +312,10 @@ export class World {
 
     // Base road/lot descriptor tiles for renderer & queries
     chunk.tiles.push({
-      type: district === 'stunt_park' || district === 'gas_station' ? 'paved_lot' : 'ground',
+      type:
+        district === 'stunt_park' || district === 'gas_station' || district === 'airport'
+          ? 'paved_lot'
+          : 'ground',
       x: centerX,
       z: centerZ,
       w: CHUNK_SIZE,
@@ -282,10 +343,13 @@ export class World {
         crate: { radius: 0.95, height: 1.5 },
         cone: { radius: 0.55, height: 1.0 },
         gas_pump: { radius: 1.15, height: 2.6 },
+        stunt_jet: { radius: 2.45, height: 3.2 },
       }[type] || { radius: 0.9, height: 2.0 };
 
+      const id = `${key}:p${propSeq++}`;
+      const wasSmashed = this.smashedPropIds ? this.smashedPropIds.has(id) : false;
       const prop = {
-        id: `${key}:p${propSeq++}`,
+        id,
         type,
         x: px,
         y: opts.y || 0,
@@ -297,8 +361,8 @@ export class World {
         color: opts.color || null,
         stationId: opts.stationId || null,
         explosive: type === 'gas_pump',
-        smashed: false,
-        smashTime: -1,
+        smashed: wasSmashed,
+        smashTime: wasSmashed ? 0 : -1,
       };
       chunk.props.push(prop);
       return prop;
@@ -346,12 +410,13 @@ export class World {
     };
 
     let boxSeq = 0;
-    const addItemBox = (bx, by, bz) => {
+    const addItemBox = (bx, by, bz, boxType = 'normal') => {
       const box = {
         id: `${key}:ib${boxSeq++}`,
         x: bx,
         y: by,
         z: bz,
+        boxType: boxType === 'sugar' ? 'sugar' : 'normal',
         collected: false,
         respawnTimer: 0,
         phase: rng() * Math.PI * 2,
@@ -373,6 +438,8 @@ export class World {
       this._populateRiverChunk(chunk, rng, addProp, addRamp, addItemBox, floraType);
     } else if (district === 'plaza') {
       this._populatePlazaChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox, floraType);
+    } else if (district === 'airport') {
+      this._populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox);
     } else if (district === 'downtown') {
       this._populateDowntownChunk(chunk, rng, addBuilding, addProp, floraType);
     } else if (district === 'suburban') {
@@ -385,8 +452,8 @@ export class World {
       this._populateStuntParkChunk(chunk, rng, addProp, addRamp, addItemBox);
     }
 
-    // Sidewalk streetlights & hydrants along roads (outside river chunks & central plaza)
-    if (district !== 'river' && district !== 'plaza') {
+    // Sidewalk streetlights & hydrants along roads (outside river chunks, central plaza & open airport runways)
+    if (district !== 'river' && district !== 'plaza' && district !== 'airport') {
       this._populateStreetFurniture(chunk, rng, addProp);
     }
 
@@ -414,17 +481,17 @@ export class World {
       });
       // Item boxes on bridge crest!
       if (rng() < 0.75 * this.options.itemBoxDensity) {
-        addItemBox(x0 - 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5);
-        addItemBox(x0 + 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5);
+        addItemBox(x0 - 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5, rng() < 0.24 ? 'sugar' : 'normal');
+        addItemBox(x0 + 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5, rng() < 0.28 ? 'sugar' : 'normal');
       }
     } else {
       // Non-bridge street T-junction: either warning cones/fence or an epic river-jump stunt ramp!
       if (Math.abs(cx) % 4 === 1) {
         // Stunt jump ramps on both banks to leap over the water!
         const southRamp = addRamp(x0, z0 + 11.5, 8.5, 11.0, 0, 3.6);
-        addItemBox(southRamp.x, 3.6, southRamp.z + 4.2);
+        addItemBox(southRamp.x, 3.6, southRamp.z + 4.2, rng() < 0.35 ? 'sugar' : 'normal');
         const northRamp = addRamp(x0, z1 - 11.5, 8.5, 11.0, Math.PI, 3.6);
-        addItemBox(northRamp.x, 3.6, northRamp.z - 4.2);
+        addItemBox(northRamp.x, 3.6, northRamp.z - 4.2, rng() < 0.35 ? 'sugar' : 'normal');
       } else {
         for (let ox = -4.5; ox <= 4.5; ox += 3.0) {
           addProp('cone', x0 + ox, z0 + 8.5);
@@ -470,21 +537,21 @@ export class World {
     addProp(floraType(), propX, propZ);
     addProp('streetlight', cx === -1 ? -20.5 : 20.5, cz === -1 ? -10.0 : 14.0);
 
-    // Guaranteed starting-boulevard ? Item Boxes right ahead of the 8-player grid!
+    // Guaranteed starting-boulevard ? & Sugar Item Boxes right ahead of the 8-player grid!
     if (cx === 0 && cz === 0) {
-      addItemBox(-9.0, 0, 24.0);
-      addItemBox(-3.0, 0, 24.0);
-      addItemBox(3.0, 0, 24.0);
-      addItemBox(9.0, 0, 24.0);
+      addItemBox(-9.0, 0, 24.0, 'normal');
+      addItemBox(-3.0, 0, 24.0, 'sugar');
+      addItemBox(3.0, 0, 24.0, 'normal');
+      addItemBox(9.0, 0, 24.0, 'sugar');
 
-      // Guaranteed highway jump ramp slightly further north at z = 50 in chunk (0,0)/(0,1)
+      // Guaranteed highway jump ramp slightly further north at z = 48 in chunk (0,0) with Sugar Box atop!
       const startRamp = addRamp(0, 48.0, 9.2, 13.0, 0, 3.6);
-      addItemBox(0, 3.6, startRamp.z + 5.0);
+      addItemBox(0, 3.6, startRamp.z + 5.0, 'sugar');
     }
     if (cx === 0 && cz === -1) {
       // Rear item boxes if someone reverses or loops South
-      addItemBox(-5.5, 0, -34.0);
-      addItemBox(5.5, 0, -34.0);
+      addItemBox(-5.5, 0, -34.0, 'normal');
+      addItemBox(5.5, 0, -34.0, 'sugar');
     }
   }
 
@@ -668,7 +735,7 @@ export class World {
       w: 18.0,
       d: 11.0,
       clearanceY: 5.2,
-      damaged: false,
+      damaged: this.damagedStationIds ? this.damagedStationIds.has(stationId) : false,
     };
     chunk.gasStations.push(station);
 
@@ -683,9 +750,9 @@ export class World {
     addProp('crate', lotBounds.maxX - 3.5, storeZ - 1.5);
     addProp(floraType(), lotBounds.maxX - 3.0, lotBounds.maxZ - 3.0);
 
-    // Risk-reward Mario Kart ? box right under the explosive gas station canopy!
+    // Risk-reward Mario Kart ? / Sugar box right under the explosive gas station canopy!
     if (rng() < 0.85 * this.options.itemBoxDensity) {
-      addItemBox(cx - 2.6, 0, canopyZ - 3.8);
+      addItemBox(cx - 2.6, 0, canopyZ - 3.8, rng() < 0.3 ? 'sugar' : 'normal');
     }
   }
 
@@ -694,16 +761,16 @@ export class World {
     const cx = (lotBounds.minX + lotBounds.maxX) * 0.5;
     const cz = (lotBounds.minZ + lotBounds.maxZ) * 0.5;
 
-    // Two opposing super ramps with ? boxes at the launch lips!
+    // Two opposing super ramps with ? & Sugar boxes at the launch lips!
     const r1 = addRamp(cx - 7.5, cz, 7.6, 13.5, 0, 3.6);
     const r2 = addRamp(cx + 7.5, cz, 7.6, 13.5, Math.PI, 3.6);
-    addItemBox(r1.x, 3.6, r1.z + r1.length * 0.42);
-    addItemBox(r2.x, 3.6, r2.z - r2.length * 0.42);
+    addItemBox(r1.x, 3.6, r1.z + r1.length * 0.42, 'normal');
+    addItemBox(r2.x, 3.6, r2.z - r2.length * 0.42, 'sugar');
 
     // Optional East-West ramp if lot is roomy
     if (lotBounds.maxX - lotBounds.minX > 32) {
       const r3 = addRamp(cx, cz - 11.5, 7.0, 11.5, Math.PI * 0.5, 3.6);
-      addItemBox(r3.x + r3.length * 0.42, 3.6, r3.z);
+      addItemBox(r3.x + r3.length * 0.42, 3.6, r3.z, rng() < 0.45 ? 'sugar' : 'normal');
     }
 
     // Slalom cones & crate pyramids to smash through
@@ -714,6 +781,83 @@ export class World {
     addProp('crate', lotBounds.minX + 5.2, lotBounds.minZ + 3.5);
     addProp('crate', lotBounds.maxX - 3.5, lotBounds.maxZ - 3.5);
     addProp('crate', lotBounds.maxX - 5.2, lotBounds.maxZ - 3.5);
+  }
+
+  _populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox) {
+    const { cx, cz, lotBounds } = chunk;
+    const lotCX = (lotBounds.minX + lotBounds.maxX) * 0.5;
+    const lotCZ = (lotBounds.minZ + lotBounds.maxZ) * 0.5;
+    const isEastHalf = this._isAirportChunk(cx - 1, cz);
+    const isNorthHalf = this._isAirportChunk(cx, cz - 1);
+    const jetColors = ['#ef4444', '#38bdf8', '#facc15', '#f472b6', '#22c55e'];
+
+    if (!isEastHalf) {
+      // West Half of 2x2 Airport: Wide Twin-Mega-Ramp Stunt Runway Strip + Sugar Mystery Box Line!
+      const launchDir = isNorthHalf ? Math.PI : 0;
+      const rLeft = addRamp(lotCX - 6.4, lotCZ, 7.8, 15.2, launchDir, 5.0);
+      const rRight = addRamp(lotCX + 6.4, lotCZ, 7.8, 15.2, launchDir, 5.0);
+
+      // Guaranteed Sugar Mystery Boxes atop both 5.0m Mega-Ramps!
+      addItemBox(rLeft.x, 5.0, rLeft.z + rLeft.dirZ * (rLeft.length * 0.44), 'sugar');
+      addItemBox(rRight.x, 5.0, rRight.z + rRight.dirZ * (rRight.length * 0.44), 'sugar');
+
+      // Runway approach line of Sugar & Normal Mystery Boxes!
+      const approachZ = isNorthHalf ? lotBounds.maxZ - 5.2 : lotBounds.minZ + 5.2;
+      addItemBox(lotCX - 6.4, 0, approachZ, 'sugar');
+      addItemBox(lotCX, 0, approachZ, 'normal');
+      addItemBox(lotCX + 6.4, 0, approachZ, 'sugar');
+
+      // Parked stunt jet on outer apron + runway guide cones
+      const apronX = lotBounds.minX + 5.2;
+      addProp('stunt_jet', apronX, lotCZ + (isNorthHalf ? -8.5 : 8.5), {
+        angle: Math.PI * 0.5,
+        color: jetColors[Math.floor(rng() * jetColors.length)],
+      });
+      addProp('cone', lotBounds.minX + 2.6, lotCZ - 6.0);
+      addProp('cone', lotBounds.minX + 2.6, lotCZ + 6.0);
+    } else {
+      // East Half of 2x2 Airport: Voxel Air-Traffic Control Tower / Hangar + Stunt Jet Apron + Sky-Jump Mega-Ramp!
+      if (isNorthHalf) {
+        // Towering Air-Traffic Control Tower in NE corner of tarmac
+        addBuilding(lotBounds.maxX - 7.8, lotBounds.maxZ - 7.8, 10.2, 10.2, 29.0, {
+          color: '#e2e8f0',
+          roofColor: '#0284c7',
+          accentColor: '#38bdf8',
+          style: 'control_tower',
+          tiers: 3,
+        });
+      } else {
+        // Wide Aircraft Stunt Hangar in SE corner of tarmac
+        addBuilding(lotBounds.maxX - 8.6, lotBounds.minZ + 7.4, 13.6, 10.6, 9.6, {
+          color: '#cbd5e1',
+          roofColor: '#334155',
+          accentColor: '#f472b6',
+          style: 'hangar',
+          tiers: 1,
+          hasWindows: false,
+        });
+      }
+
+      // Twin-line parked colorful Voxel Stunt Jets on apron
+      addProp('stunt_jet', lotCX + 4.8, lotCZ + (isNorthHalf ? -7.5 : 7.5), {
+        angle: isNorthHalf ? -Math.PI * 0.75 : -Math.PI * 0.25,
+        color: jetColors[Math.floor(rng() * jetColors.length)],
+      });
+      addProp('stunt_jet', lotCX - 8.2, lotCZ + (isNorthHalf ? 7.5 : -7.5), {
+        angle: isNorthHalf ? Math.PI * 0.15 : Math.PI * 0.85,
+        color: jetColors[Math.floor(rng() * jetColors.length)],
+      });
+
+      // Taxiway Mega-Ramp (height = 5.0) + Diagonal Sugar Mystery Box streak!
+      const jetRamp = addRamp(lotCX - 5.5, lotCZ, 8.2, 14.8, isNorthHalf ? 0 : Math.PI, 5.0);
+      addItemBox(jetRamp.x, 5.0, jetRamp.z + jetRamp.dirZ * (jetRamp.length * 0.44), 'sugar');
+      addItemBox(lotCX + 2.5, 0, lotCZ - 3.5, 'sugar');
+      addItemBox(lotCX + 2.5, 0, lotCZ + 3.5, 'sugar');
+      addItemBox(lotCX - 5.5, 0, isNorthHalf ? lotBounds.minZ + 4.8 : lotBounds.maxZ - 4.8, 'normal');
+
+      addProp('crate', lotBounds.maxX - 3.5, lotCZ);
+      addProp('cone', lotCX + 7.5, lotCZ);
+    }
   }
 
   _populateStreetFurniture(chunk, rng, addProp) {
@@ -737,6 +881,7 @@ export class World {
   _populateRoadRampsAndBoxes(chunk, rng, addRamp, addItemBox) {
     const { cx, cz, x0, z0 } = chunk;
     const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.2, 3.0);
+    const pickType = (sugarProb = 0.22) => (rng() < sugarProb ? 'sugar' : 'normal');
 
     // Intersection (x0, z0) owned uniquely by chunk (cx, cz) — never duplicated!
     if (!(cx === 0 && cz === 0)) {
@@ -744,11 +889,11 @@ export class World {
       const boxChance = (isMajor ? 0.62 : 0.34) * density;
       if (rng() < boxChance) {
         if (isMajor && rng() < 0.55) {
-          // Pair of Mario Kart ? boxes across the intersection!
-          addItemBox(x0 - 3.5, 0, z0);
-          addItemBox(x0 + 3.5, 0, z0);
+          // Pair of Mario Kart ? / Sugar boxes across the intersection!
+          addItemBox(x0 - 3.5, 0, z0, pickType(0.22));
+          addItemBox(x0 + 3.5, 0, z0, pickType(0.22));
         } else {
-          addItemBox(x0, 0, z0);
+          addItemBox(x0, 0, z0, pickType(0.22));
         }
       }
     }
@@ -762,16 +907,16 @@ export class World {
         addItemBox(
           ramp.x + ramp.dirX * (ramp.length * 0.42),
           3.6,
-          ramp.z + ramp.dirZ * (ramp.length * 0.42)
+          ramp.z + ramp.dirZ * (ramp.length * 0.42),
+          pickType(0.32)
         );
       } else if (rng() < 0.32 * density) {
-        addItemBox(x0 - 2.8, 0, midZ);
-        if (rng() < 0.5 * density) addItemBox(x0 + 2.8, 0, midZ);
+        addItemBox(x0 - 2.8, 0, midZ, pickType(0.22));
+        if (rng() < 0.5 * density) addItemBox(x0 + 2.8, 0, midZ, pickType(0.22));
       }
     }
 
     // Mid-segment EW road (x = x0 + 30, z = z0) owned uniquely by chunk (cx, cz)
-    // Skip riverside roads right adjacent to river chunks only if inside river (we already filtered river chunks)
     const midX = x0 + CHUNK_SIZE * 0.5;
     if (!this._isCentralPlazaRoad(midX, z0)) {
       if (this.isHighwayGrid(cz) && rng() < 0.24) {
@@ -780,11 +925,12 @@ export class World {
         addItemBox(
           ramp.x + ramp.dirX * (ramp.length * 0.42),
           3.6,
-          ramp.z + ramp.dirZ * (ramp.length * 0.42)
+          ramp.z + ramp.dirZ * (ramp.length * 0.42),
+          pickType(0.32)
         );
       } else if (rng() < 0.3 * density) {
-        addItemBox(midX, 0, z0 - 2.8);
-        if (rng() < 0.45 * density) addItemBox(midX, 0, z0 + 2.8);
+        addItemBox(midX, 0, z0 - 2.8, pickType(0.22));
+        if (rng() < 0.45 * density) addItemBox(midX, 0, z0 + 2.8, pickType(0.22));
       }
     }
   }
@@ -800,8 +946,9 @@ export class World {
       for (let j = 0; j < boxes.length; j++) {
         const box = boxes[j];
         if (!box.collected) {
-          box.spinAngle = this.time * 1.9 + box.phase;
-          box.bobOffset = Math.sin(this.time * 3.4 + box.phase) * 0.32;
+          const isSugar = box.boxType === 'sugar';
+          box.spinAngle = this.time * (isSugar ? 3.1 : 1.9) + box.phase;
+          box.bobOffset = Math.sin(this.time * (isSugar ? 4.4 : 3.4) + box.phase) * 0.34;
         }
       }
     }
@@ -830,6 +977,8 @@ export class World {
   getVisibleChunks(focusX = 0, focusZ = 0) {
     const ccx = this._worldToChunkCoord(focusX);
     const ccz = this._worldToChunkCoord(focusZ);
+    this._focusCX = ccx;
+    this._focusCZ = ccz;
     const r = VIEW_CHUNK_RADIUS;
     const out = [];
 
@@ -844,6 +993,7 @@ export class World {
         if (chunk) out.push(chunk);
       }
     }
+    this._evictChunksIfNeeded(ccx, ccz);
     return out;
   }
 
@@ -972,7 +1122,9 @@ export class World {
     const curChunk = this._getOrCreateChunk(cx, cz);
     const onPavedLot =
       curChunk &&
-      (curChunk.district === 'stunt_park' || curChunk.district === 'gas_station') &&
+      (curChunk.district === 'stunt_park' ||
+        curChunk.district === 'gas_station' ||
+        curChunk.district === 'airport') &&
       x >= curChunk.lotBounds.minX - 2.5 &&
       x <= curChunk.lotBounds.maxX + 2.5 &&
       z >= curChunk.lotBounds.minZ - 2.5 &&
@@ -1142,10 +1294,20 @@ export class World {
     return smashed;
   }
 
+  _recordSmashedPropId(id) {
+    if (!id || !this.smashedPropIds) return;
+    this.smashedPropIds.add(id);
+    if (this.smashedPropIds.size > MAX_SMASHED_HISTORY) {
+      const oldest = this.smashedPropIds.values().next().value;
+      if (oldest !== undefined) this.smashedPropIds.delete(oldest);
+    }
+  }
+
   _smashSingleProp(chunk, prop, smashedList, onSmash) {
     if (prop.smashed) return;
     prop.smashed = true;
     prop.smashTime = this.time;
+    this._recordSmashedPropId(prop.id);
     smashedList.push(prop);
 
     if (prop.type === 'hydrant') {
@@ -1166,6 +1328,7 @@ export class World {
       });
       // Chain-reaction across sibling gas_pumps & crates in the same gas station!
       if (prop.stationId) {
+        if (this.damagedStationIds) this.damagedStationIds.add(prop.stationId);
         for (const gs of chunk.gasStations) {
           if (gs.id === prop.stationId) gs.damaged = true;
         }
@@ -1177,6 +1340,7 @@ export class World {
           ) {
             other.smashed = true;
             other.smashTime = this.time;
+            this._recordSmashedPropId(other.id);
             smashedList.push(other);
             if (typeof onSmash === 'function') onSmash(other);
           }
@@ -1189,7 +1353,7 @@ export class World {
     }
   }
 
-  collectItemBoxes(entity) {
+  _collectBoxesByType(entity, targetType) {
     const r = (entity.radius || 1.8) + 1.8;
     const rSq = r * r;
     const ey = entity.y || 0;
@@ -1201,6 +1365,8 @@ export class World {
       for (let i = 0; i < boxes.length; i++) {
         const box = boxes[i];
         if (box.collected) continue;
+        const bType = box.boxType || 'normal';
+        if (bType !== targetType) continue;
         const dx = entity.x - box.x;
         const dz = entity.z - box.z;
         if (dx * dx + dz * dz > rSq) continue;
@@ -1214,6 +1380,14 @@ export class World {
     }
 
     return collectedCount;
+  }
+
+  collectItemBoxes(entity) {
+    return this._collectBoxesByType(entity, 'normal');
+  }
+
+  collectSugarBoxes(entity) {
+    return this._collectBoxesByType(entity, 'sugar');
   }
 
   findSpawnPoint(index = 0) {

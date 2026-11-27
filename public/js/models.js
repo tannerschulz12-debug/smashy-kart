@@ -379,6 +379,7 @@ function getBuffTimers(entity) {
     megaTimer: entity.megaTimer ?? items.megaTimer ?? (buffs.mega ? 1 : 0),
     shrunkTimer: entity.shrunkTimer ?? items.shrunkTimer ?? (buffs.shrunk ? 1 : 0),
     boostTimer: entity.boostTimer ?? items.boostTimer ?? (buffs.boost ? 1 : 0),
+    sugarTimer: entity.sugarTimer ?? items.sugarTimer ?? (entity.sugarActive || buffs.sugar ? 0.5 : 0),
     shockwaveTimer: entity.shockwaveVisualTimer ?? items.shockwaveVisualTimer ?? 0,
   };
 }
@@ -419,6 +420,144 @@ function emitNitroFlames(batcher, x, y, z, yaw, pitch, roll, scale, backZ, time)
   }
 }
 
+function emitSugarHyperFlames(batcher, x, y, z, yaw, pitch, roll, scale, backZ, time) {
+  // Blazing Quad Cotton-Candy Pink & Electric Cyan 3x Hyper-Flames + Trailing Electric Speed-Streak Blocks!
+  const offsets = [-0.78, -0.28, 0.28, 0.78];
+  for (let i = 0; i < offsets.length; i++) {
+    const ox = offsets[i];
+    const f = 0.85 + Math.sin(time * 62 + i * 1.7) * 0.38;
+    const outerCol = i % 2 === 0 ? '#f472b6' : '#22d3ee';
+    const coreCol = i % 2 === 0 ? '#fef08a' : '#ffffff';
+    const pOuter = transformLocalOffset(ox * scale, 0.62 * scale, (backZ - 0.88 * f) * scale, yaw, pitch, roll);
+    const pCore = transformLocalOffset(ox * scale, 0.62 * scale, (backZ - 0.36 * f) * scale, yaw, pitch, roll);
+
+    batcher.addBox(
+      x + pOuter.x,
+      y + pOuter.y,
+      z + pOuter.z,
+      0.38 * scale,
+      0.36 * scale,
+      1.68 * f * scale,
+      outerCol,
+      yaw,
+      pitch,
+      roll,
+      1.0
+    );
+    batcher.addBox(
+      x + pCore.x,
+      y + pCore.y,
+      z + pCore.z,
+      0.22 * scale,
+      0.22 * scale,
+      0.78 * f * scale,
+      coreCol,
+      yaw,
+      pitch,
+      roll,
+      1.0
+    );
+  }
+
+  // Electric speed-streak blocks whipping past the flanks & tail!
+  const streakColors = ['#f472b6', '#22d3ee', '#fde047', '#ec4899'];
+  for (let s = 0; s < 6; s++) {
+    const side = s % 2 === 0 ? -1 : 1;
+    const prog = (time * 18.0 + s * 0.27) % 1;
+    const sxLocal = side * (1.36 + (s % 3) * 0.18) * scale;
+    const syLocal = (0.55 + (s % 3) * 0.38) * scale;
+    const szLocal = (0.85 - prog * 4.4) * scale;
+    const sp = transformLocalOffset(sxLocal, syLocal, szLocal, yaw, pitch, roll);
+    batcher.addBox(
+      x + sp.x,
+      y + sp.y,
+      z + sp.z,
+      0.16 * scale,
+      0.16 * scale,
+      1.35 * scale,
+      streakColors[s % streakColors.length],
+      yaw,
+      pitch,
+      roll,
+      1.0
+    );
+  }
+}
+
+function emitDriftSparks(batcher, x, y, z, yaw, pitch, roll, scale, tier, time) {
+  // Mario Kart Rear-Tire Drift Sparks: Tier 1 = Electric Blue (#38bdf8), Tier 2 = Super-Orange (#fb923c)!
+  const mainCol = tier >= 2 ? '#fb923c' : '#38bdf8';
+  const hotCol = tier >= 2 ? '#fde047' : '#e0f2fe';
+  const sparksPerWheel = tier >= 2 ? 4 : 3;
+
+  for (const side of [-1, 1]) {
+    const tireX = side * 1.08;
+    const tireZ = -1.32;
+    const contact = transformLocalOffset(tireX * scale, 0.24 * scale, tireZ * scale, yaw, pitch, roll);
+    batcher.addBox(
+      x + contact.x,
+      y + contact.y,
+      z + contact.z,
+      0.34 * scale,
+      0.22 * scale,
+      0.38 * scale,
+      hotCol,
+      yaw + time * 14,
+      pitch,
+      roll,
+      1.0
+    );
+
+    for (let k = 0; k < sparksPerWheel; k++) {
+      const u = (time * 13.5 + k * (1 / sparksPerWheel) + (side > 0 ? 0.19 : 0)) % 1;
+      const ox = (tireX + side * u * (tier >= 2 ? 1.05 : 0.72)) * scale;
+      const oy = (0.24 + Math.sin(u * Math.PI) * (tier >= 2 ? 0.72 : 0.46)) * scale;
+      const oz = (tireZ - u * (tier >= 2 ? 1.95 : 1.38)) * scale;
+      const sp = transformLocalOffset(ox, oy, oz, yaw, pitch, roll);
+      const cubeS = (tier >= 2 ? 0.32 : 0.25) * (1.0 - u * 0.42) * scale;
+      batcher.addBox(
+        x + sp.x,
+        y + sp.y,
+        z + sp.z,
+        cubeS,
+        cubeS,
+        cubeS * 1.35,
+        k % 2 === 0 ? mainCol : hotCol,
+        yaw + u * 6.0,
+        pitch + u * 4.0,
+        roll,
+        1.0
+      );
+    }
+  }
+}
+
+function emitTwinRpgLauncher(batcher, x, y, z, yaw, pitch, roll, scale, mountY, isRunner, isPovSelf) {
+  // Chunky 3D Voxel Olive-Green Twin-Barrel RPG Launcher with Dual Red-Gold Warhead Tips!
+  // In POV self-view, mounted cleanly on the right fender/shoulder edge so POV center stays 100% unobstructed!
+  const baseX = isPovSelf ? 1.06 : isRunner ? 0.92 : 0.84;
+  const baseY = isPovSelf ? (isRunner ? 1.92 : 1.24) : mountY;
+  const baseZ = isPovSelf ? 1.18 : 0.18;
+
+  const rpgParts = [
+    // Steel side/roof mounting bracket & blast collar
+    part(baseX, baseY - 0.16, baseZ, 0.56, 0.2, 0.72, '#27272a'),
+    part(baseX, baseY + 0.04, baseZ - 0.86, 0.74, 0.34, 0.18, '#18181b'),
+    // Twin parallel Olive-Drab RPG launch tubes
+    part(baseX - 0.19, baseY + 0.06, baseZ, 0.32, 0.32, 1.88, '#4d5d3b'),
+    part(baseX + 0.19, baseY + 0.06, baseZ, 0.32, 0.32, 1.88, '#3f4f30'),
+    // Yellow military hazard band across both barrels
+    part(baseX, baseY + 0.06, baseZ + 0.48, 0.72, 0.35, 0.18, '#facc15', 0.25),
+    // Protruding twin crimson RPG warheads + golden fuse tips!
+    part(baseX - 0.19, baseY + 0.06, baseZ + 1.08, 0.38, 0.38, 0.44, '#ef4444', 0.72),
+    part(baseX + 0.19, baseY + 0.06, baseZ + 1.08, 0.38, 0.38, 0.44, '#ef4444', 0.72),
+    part(baseX - 0.19, baseY + 0.06, baseZ + 1.36, 0.18, 0.18, 0.22, '#fef08a', 0.95),
+    part(baseX + 0.19, baseY + 0.06, baseZ + 1.36, 0.18, 0.18, 0.22, '#fef08a', 0.95),
+  ];
+
+  emitPartList(batcher, rpgParts, x, y, z, yaw, pitch, roll, scale);
+}
+
 function emitStarAura(batcher, x, y, z, scale, time) {
   for (let i = 0; i < 5; i++) {
     const a = time * 5.2 + (i * Math.PI * 2) / 5;
@@ -437,14 +576,22 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
   const x = player.x || 0;
   const y = player.y || 0;
   const z = player.z || 0;
-  const spinExtra = (player.spinoutTimer || 0) > 0 ? (player.spinoutTimer || 0) * 14.0 : 0;
+  const spinExtra = (player.spinoutTimer || player.spinOutTimer || 0) > 0 ? (player.spinoutTimer || player.spinOutTimer || 0) * 14.0 : 0;
   const yaw = (player.angle || 0) + spinExtra;
   const vx = player.vx || 0;
   const vz = player.vz || 0;
   const vy = player.vy || 0;
   const speed = player.speed ?? Math.hypot(vx, vz);
 
-  const { starTimer, megaTimer, shrunkTimer, boostTimer, shockwaveTimer } = getBuffTimers(player);
+  const { starTimer, megaTimer, shrunkTimer, boostTimer, sugarTimer, shockwaveTimer } = getBuffTimers(player);
+  const heldItemId = player.heldItemId ?? player.items?.heldItem ?? null;
+  const driftSparkTier = player.driftSparkTier || 0;
+
+  const isPovSelf = Boolean(
+    (batcher.povFocusId && player.id && player.id === batcher.povFocusId) ||
+      (batcher.povFocusEntity && player === batcher.povFocusEntity) ||
+      (batcher.povFocusId === '__local__' && !player.id && player.isLocal !== false)
+  );
 
   let scale =
     player.isLocal === false && player.scale
@@ -460,9 +607,10 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
   const airPitch = y > 0.25 ? clamp(-vy * 0.024, -0.38, 0.38) : 0;
 
   const isStar = starTimer > 0;
+  const isSugar = sugarTimer > 0;
   const rainbowPrimary = isStar ? hslToHex((time * 3.4) % 1, 0.95, 0.56) : null;
   const rainbowAccent = isStar ? hslToHex((time * 3.4 + 0.38) % 1, 0.95, 0.68) : null;
-  const starEmissive = isStar ? 0.42 : 0;
+  const starEmissive = isStar ? 0.42 : isSugar ? 0.24 : 0;
 
   const pColor = rainbowPrimary || player.primaryColor || '#ef4444';
   const aColor = rainbowAccent || player.accentColor || '#fef08a';
@@ -551,13 +699,16 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       emissive: 0.14 + starEmissive,
     });
 
-    // Pumping arms (opposite phase to legs)
+    // Pumping arms (pushed slightly forward in POV so you see your own blocky hands pumping!)
     for (const side of [-1, 1]) {
       const armSwing = -side * swing;
+      const armFwdBase = isPovSelf ? 0.96 : 0.0;
+      const armYBase = isPovSelf ? 1.76 : 1.44;
+      const armXBase = isPovSelf ? side * 0.66 : side * 0.8;
       const armPos = transformLocalOffset(
-        side * 0.8 * scale,
-        1.44 * scale,
-        Math.sin(armSwing) * 0.28 * scale,
+        armXBase * scale,
+        (armYBase + (isPovSelf ? Math.max(0, Math.sin(armSwing)) * 0.16 : 0)) * scale,
+        (armFwdBase + Math.sin(armSwing) * (isPovSelf ? 0.36 : 0.28)) * scale,
         yaw,
         leanPitch,
         driftRoll
@@ -567,13 +718,35 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
         baseY + armPos.y,
         z + armPos.z,
         0.34 * scale,
-        0.88 * scale,
+        0.82 * scale,
         0.34 * scale,
         pColor,
         yaw,
-        leanPitch + armSwing * 0.85,
+        (isPovSelf ? -0.85 : leanPitch) + armSwing * 0.75,
         driftRoll,
         starEmissive
+      );
+      // Blocky hand/fist cuff
+      const handPos = transformLocalOffset(
+        armXBase * scale,
+        (armYBase + (isPovSelf ? 0.12 + Math.sin(armSwing) * 0.22 : -0.44)) * scale,
+        (armFwdBase + (isPovSelf ? 0.42 : 0.08) + Math.sin(armSwing) * 0.38) * scale,
+        yaw,
+        leanPitch,
+        driftRoll
+      );
+      batcher.addBox(
+        x + handPos.x,
+        baseY + handPos.y,
+        z + handPos.z,
+        0.36 * scale,
+        0.32 * scale,
+        0.36 * scale,
+        aColor,
+        yaw,
+        armSwing * 0.6,
+        driftRoll,
+        starEmissive + 0.1
       );
     }
 
@@ -594,24 +767,31 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       starEmissive
     );
 
-    // Large prominent custom photo cutout head!
-    const headPos = transformLocalOffset(0, 2.86 * scale, 0.08 * scale, yaw, leanPitch, driftRoll);
-    batcher.addTexturedCard({
-      avatarId,
-      x: x + headPos.x,
-      y: baseY + headPos.y,
-      z: z + headPos.z,
-      width: 2.15 * scale,
-      height: 2.15 * scale,
-      yaw,
-      pitch: leanPitch * 0.35,
-      roll: driftRoll * 1.15,
-      billboard: 'y_blend',
-      tint: isStar ? rainbowAccent : '#ffffff',
-      emissive: 0.2 + starEmissive,
-    });
+    // Large prominent custom photo cutout head (suppressed ONLY for POV self so it never blocks the camera!)
+    if (!isPovSelf) {
+      const headPos = transformLocalOffset(0, 2.86 * scale, 0.08 * scale, yaw, leanPitch, driftRoll);
+      batcher.addTexturedCard({
+        avatarId,
+        x: x + headPos.x,
+        y: baseY + headPos.y,
+        z: z + headPos.z,
+        width: 2.15 * scale,
+        height: 2.15 * scale,
+        yaw,
+        pitch: leanPitch * 0.35,
+        roll: driftRoll * 1.15,
+        billboard: 'y_blend',
+        tint: isStar ? rainbowAccent : '#ffffff',
+        emissive: 0.2 + starEmissive,
+      });
+    }
 
-    if (boostTimer > 0) {
+    if (heldItemId === 'homing_rocket') {
+      emitTwinRpgLauncher(batcher, x, baseY, z, yaw, leanPitch, driftRoll, scale, 2.05, true, isPovSelf);
+    }
+    if (isSugar) {
+      emitSugarHyperFlames(batcher, x, baseY, z, yaw, 0, driftRoll, scale, -0.52, time);
+    } else if (boostTimer > 0) {
       emitNitroFlames(batcher, x, baseY, z, yaw, 0, driftRoll, scale, -0.45, time);
     }
   } else if (mode === 'photo_car') {
@@ -664,25 +844,35 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       emissive: 0.18 + starEmissive,
     });
 
-    // Roof photo crest topper so face pops even from overhead angles!
-    const crestPos = transformLocalOffset(0, 2.55 * scale, -0.1 * scale, yaw, airPitch, driftRoll);
-    batcher.addTexturedCard({
-      avatarId,
-      x: x + crestPos.x,
-      y: y + crestPos.y,
-      z: z + crestPos.z,
-      width: 1.65 * scale,
-      height: 1.45 * scale,
-      yaw,
-      pitch: airPitch,
-      roll: driftRoll * 1.2,
-      billboard: 'y_blend',
-      tint: '#ffffff',
-      emissive: 0.2 + starEmissive,
-    });
+    // Roof photo crest topper (suppressed ONLY for POV self so view stays wide open!)
+    if (!isPovSelf) {
+      const crestPos = transformLocalOffset(0, 2.55 * scale, -0.1 * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedCard({
+        avatarId,
+        x: x + crestPos.x,
+        y: y + crestPos.y,
+        z: z + crestPos.z,
+        width: 1.65 * scale,
+        height: 1.45 * scale,
+        yaw,
+        pitch: airPitch,
+        roll: driftRoll * 1.2,
+        billboard: 'y_blend',
+        tint: '#ffffff',
+        emissive: 0.2 + starEmissive,
+      });
+    }
 
-    if (boostTimer > 0) {
+    if (heldItemId === 'homing_rocket') {
+      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, 2.25, false, isPovSelf);
+    }
+    if (isSugar) {
+      emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.18, time);
+    } else if (boostTimer > 0) {
       emitNitroFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.18, time);
+    }
+    if (driftSparkTier >= 1) {
+      emitDriftSparks(batcher, x, y, z, yaw, airPitch, driftRoll, scale, driftSparkTier, time);
     }
   } else {
     // MODE 1: "car_driver" ("People on Car") — 3D voxel vehicle + big roof cutout + hood photo decal!
@@ -690,41 +880,42 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
     const vParts = buildVehicleParts(vehicleId, pColor, aColor, wheelSpin);
     emitPartList(batcher, vParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
 
-    // Cockpit sunroof collar rim
     const roofY = VEHICLE_ROOF_Y[vehicleId] ?? 1.92;
-    const collarPos = transformLocalOffset(0, (roofY - 0.06) * scale, -0.12 * scale, yaw, airPitch, driftRoll);
-    batcher.addBox(
-      x + collarPos.x,
-      y + collarPos.y,
-      z + collarPos.z,
-      1.15 * scale,
-      0.22 * scale,
-      1.15 * scale,
-      '#111827',
-      yaw,
-      airPitch,
-      driftRoll,
-      0
-    );
+    if (!isPovSelf) {
+      // Cockpit sunroof collar rim + large prominent custom photo cutout sticking proudly out of the roof!
+      const collarPos = transformLocalOffset(0, (roofY - 0.06) * scale, -0.12 * scale, yaw, airPitch, driftRoll);
+      batcher.addBox(
+        x + collarPos.x,
+        y + collarPos.y,
+        z + collarPos.z,
+        1.15 * scale,
+        0.22 * scale,
+        1.15 * scale,
+        '#111827',
+        yaw,
+        airPitch,
+        driftRoll,
+        0
+      );
 
-    // Large prominent custom photo cutout sticking proudly out of the roof/cockpit!
-    const cutoutPos = transformLocalOffset(0, (roofY + 1.05) * scale, -0.12 * scale, yaw, airPitch, driftRoll);
-    batcher.addTexturedCard({
-      avatarId,
-      x: x + cutoutPos.x,
-      y: y + cutoutPos.y,
-      z: z + cutoutPos.z,
-      width: 2.38 * scale,
-      height: 2.38 * scale,
-      yaw,
-      pitch: airPitch * 0.5,
-      roll: driftRoll * 1.45, // playful tilt when drifting!
-      billboard: 'y_blend',
-      tint: isStar ? rainbowAccent : '#ffffff',
-      emissive: 0.22 + starEmissive,
-    });
+      const cutoutPos = transformLocalOffset(0, (roofY + 1.05) * scale, -0.12 * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedCard({
+        avatarId,
+        x: x + cutoutPos.x,
+        y: y + cutoutPos.y,
+        z: z + cutoutPos.z,
+        width: 2.38 * scale,
+        height: 2.38 * scale,
+        yaw,
+        pitch: airPitch * 0.5,
+        roll: driftRoll * 1.45, // playful tilt when drifting!
+        billboard: 'y_blend',
+        tint: isStar ? rainbowAccent : '#ffffff',
+        emissive: 0.22 + starEmissive,
+      });
+    }
 
-    // Custom photo hood badge on the front hood!
+    // Custom photo hood badge on the front hood (visible in ALL camera modes including POV!)
     const hoodMeta = VEHICLE_HOOD_POS[vehicleId] || VEHICLE_HOOD_POS.sedan;
     const hoodPos = transformLocalOffset(0, hoodMeta.y * scale, hoodMeta.z * scale, yaw, airPitch, driftRoll);
     batcher.addTexturedCard({
@@ -742,8 +933,16 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       emissive: 0.16 + starEmissive,
     });
 
-    if (boostTimer > 0) {
+    if (heldItemId === 'homing_rocket') {
+      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, roofY + 0.34, false, isPovSelf);
+    }
+    if (isSugar) {
+      emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.15, time);
+    } else if (boostTimer > 0) {
       emitNitroFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.15, time);
+    }
+    if (driftSparkTier >= 1) {
+      emitDriftSparks(batcher, x, y, z, yaw, airPitch, driftRoll, scale, driftSparkTier, time);
     }
   }
 
@@ -1141,6 +1340,34 @@ export function emitPropVisuals(batcher, prop, biomeId = 'city', time = 0) {
       break;
     }
 
+    case 'stunt_jet': {
+      // Blocky Colorful 3D Voxel Stunt Jet parked on Airport Runways!
+      const jCol = prop.color || '#ef4444';
+      const jetParts = [
+        // Landing gear struts & tires
+        part(0, 0.35, 1.85, 0.28, 0.52, 0.36, '#18181b'),
+        part(-1.05, 0.35, -0.65, 0.32, 0.52, 0.42, '#18181b'),
+        part(1.05, 0.35, -0.65, 0.32, 0.52, 0.42, '#18181b'),
+        // Sleek fuselage + white racing stripe + pointed nosecone
+        part(0, 1.18, 0, 1.38, 1.08, 5.45, jCol),
+        part(0, 1.24, 0.1, 1.44, 0.24, 5.2, '#ffffff', 0.15),
+        part(0, 1.14, 3.15, 0.86, 0.72, 1.15, '#f8fafc'),
+        part(0, 1.12, 3.88, 0.44, 0.44, 0.55, '#fde047', 0.55),
+        // Swept delta wings + wingtip stunt smoke pods
+        part(0, 1.12, -0.35, 6.25, 0.18, 1.85, jCol),
+        part(-3.18, 1.14, -0.25, 0.28, 0.28, 2.25, '#facc15', 0.45),
+        part(3.18, 1.14, -0.25, 0.28, 0.28, 2.25, '#facc15', 0.45),
+        // Glowing cyan bubble canopy
+        part(0, 1.88, 0.95, 0.98, 0.62, 1.95, '#38bdf8', 0.38),
+        // Twin angled vertical tail fins + afterburner glow
+        part(-0.56, 2.08, -2.25, 0.18, 1.15, 1.08, '#ffffff', 0.1, 0, 0, -0.18),
+        part(0.56, 2.08, -2.25, 0.18, 1.15, 1.08, '#ffffff', 0.1, 0, 0, 0.18),
+        part(0, 1.18, -2.85, 0.82, 0.72, 0.42, '#fb923c', 0.88),
+      ];
+      emitPartList(batcher, jetParts, x, y, z, ry, 0, 0, s);
+      break;
+    }
+
     default: {
       batcher.addBox(x, y + 0.75, z, 1.2, 1.5, 1.2, prop.color || '#94a3b8', ry);
       break;
@@ -1152,9 +1379,53 @@ export function emitItemBoxVisuals(batcher, box, time = 0) {
   if (!box || box.collected) return;
 
   const phase = box.phase || 0;
+  const baseY = box.y || 0;
+
+  if (box.boxType === 'sugar') {
+    // Dedicated 3x Sugar Mystery Box: Cotton-Candy Pink (#f472b6) & Electric Cyan (#22d3ee) fast-spinning cube + orbiting sparkles!
+    const spin = box.spinAngle ?? time * 3.1 + phase;
+    const bob = box.bobOffset ?? Math.sin(time * 4.4 + phase) * 0.34;
+    const cy = baseY + 1.72 + bob;
+    const pulsePink = Math.sin(time * 7.5 + phase) >= 0;
+    const glowPrimary = '#f472b6';
+    const glowSecondary = '#22d3ee';
+
+    if (typeof batcher.addTranslucentBox === 'function') {
+      batcher.addTranslucentBox(box.x, baseY + 0.05, box.z, 2.15, 0.07, 2.15, glowPrimary, 0.52, spin);
+      batcher.addTranslucentBox(box.x, baseY + 0.08, box.z, 1.38, 0.06, 1.38, glowSecondary, 0.56, -spin * 1.3);
+    } else {
+      batcher.addBox(box.x, baseY + 0.05, box.z, 1.75, 0.06, 1.75, glowPrimary, spin, 0, 0, 0.85);
+    }
+
+    batcher.addTexturedBox({
+      avatarId: '__item_sugar__',
+      x: box.x,
+      y: cy,
+      z: box.z,
+      sx: 1.78,
+      sy: 1.78,
+      sz: 1.78,
+      yaw: spin,
+      pitch: 0.58,
+      roll: 0.58,
+      tint: pulsePink ? '#fbcfe8' : '#a5f3fc',
+      emissive: 0.78,
+    });
+
+    // Orbiting mini candy-cube sparkles!
+    const sparkleCols = ['#f472b6', '#22d3ee', '#fde047', '#ffffff'];
+    for (let i = 0; i < 4; i++) {
+      const a = time * 4.8 + phase + (i * Math.PI * 0.5);
+      const sx = box.x + Math.cos(a) * 1.55;
+      const sz = box.z + Math.sin(a) * 1.55;
+      const sy = cy + Math.sin(time * 7.2 + i * 1.6) * 0.42;
+      batcher.addBox(sx, sy, sz, 0.32, 0.32, 0.32, sparkleCols[i], a * 2, time * 5, 0, 1.0);
+    }
+    return;
+  }
+
   const spin = box.spinAngle ?? time * 1.9 + phase;
   const bob = box.bobOffset ?? Math.sin(time * 3.4 + phase) * 0.32;
-  const baseY = box.y || 0;
   const cy = baseY + 1.65 + bob;
   const rainbowTint = hslToHex((time * 0.55 + phase * 0.18) % 1, 0.9, 0.68);
 
@@ -1211,9 +1482,33 @@ export function emitProjectileVisuals(batcher, proj, time = 0) {
   const type = proj.type || 'homing_rocket';
 
   switch (type) {
-    case 'homing_rocket':
+    case 'rpg_rocket':
+    case 'homing_rocket': {
+      // Sleek 3D Olive/Steel RPG Rocket Tube, Stabilizer Fins, Glowing Red-Gold Warhead & Twin-Stage Thruster Plume!
+      const rollSpin = time * 16.0;
+      const flicker = 0.85 + Math.sin(time * 64) * 0.3;
+      const ry = Math.max(0.45, y + 0.35);
+      const rocketParts = [
+        // Olive-drab & gunmetal steel rocket motor body
+        part(0, 0, 0, 0.42, 0.42, 1.72, '#4d5d3b', 0.12, 0, 0, rollSpin),
+        part(0, 0, 0.32, 0.46, 0.46, 0.24, '#facc15', 0.35, 0, 0, rollSpin),
+        part(0, 0, -0.58, 0.45, 0.45, 0.34, '#334155', 0.1, 0, 0, rollSpin),
+        // 4 Cruciform tail stabilizer fins
+        part(0, 0, -0.78, 1.18, 0.1, 0.48, '#94a3b8', 0.15, 0, 0, rollSpin),
+        part(0, 0, -0.78, 0.1, 1.18, 0.48, '#94a3b8', 0.15, 0, 0, rollSpin),
+        // Shaped-charge crimson RPG warhead + glowing gold nose tip!
+        part(0, 0, 1.02, 0.6, 0.6, 0.68, '#ef4444', 0.68, 0, 0, rollSpin),
+        part(0, 0, 1.46, 0.28, 0.28, 0.38, '#fef08a', 1.0, 0, 0, rollSpin),
+        // Roaring twin-stage white-yellow inner core & blazing orange outer thruster plume!
+        part(0, 0, -1.16, 0.34, 0.34, 0.68 * flicker, '#fef08a', 1.0),
+        part(0, 0, -1.68 * flicker, 0.52, 0.52, 1.25 * flicker, '#f97316', 0.98),
+      ];
+      emitPartList(batcher, rocketParts, x, ry, z, yaw, 0, 0, 1.0);
+      break;
+    }
+
     case 'shell': {
-      // Iconic spinning Red Homing Shell + thruster flame!
+      // Classic spinning Red Shell fallback
       const spin = time * 15.0;
       batcher.addBox(x, y + 0.12, z, 1.56, 0.26, 1.56, '#f8fafc', spin, 0, 0, 0.25);
       batcher.addBox(x, y + 0.48, z, 1.38, 0.68, 1.38, '#ef4444', spin, 0, 0, 0.48);

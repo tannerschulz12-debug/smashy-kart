@@ -128,6 +128,43 @@ html, body {
   100% { box-shadow: inset 0 0 65px rgba(59, 130, 246, 0.58); }
 }
 
+/* Radial Screen-Edge Neon Speed Streaks (Center 75% stays 100% crystal-clear!) */
+.speed-lines {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  background:
+    radial-gradient(circle at center, transparent 62%, rgba(56, 189, 248, 0.22) 86%, rgba(250, 204, 21, 0.34) 100%),
+    repeating-conic-gradient(
+      from 0deg at 50% 50%,
+      rgba(255, 255, 255, 0.26) 0deg 1.4deg,
+      transparent 1.4deg 9deg,
+      rgba(56, 189, 248, 0.22) 9deg 10.2deg,
+      transparent 10.2deg 18deg
+    );
+  -webkit-mask-image: radial-gradient(circle at center, transparent 58%, rgba(0, 0, 0, 0.35) 74%, rgba(0, 0, 0, 0.96) 96%);
+  mask-image: radial-gradient(circle at center, transparent 58%, rgba(0, 0, 0, 0.35) 74%, rgba(0, 0, 0, 0.96) 96%);
+  animation: speedStreakPulse 0.16s infinite alternate;
+}
+
+.speed-lines.sugar-mode {
+  background:
+    radial-gradient(circle at center, transparent 60%, rgba(244, 114, 182, 0.32) 84%, rgba(56, 189, 248, 0.42) 100%),
+    repeating-conic-gradient(
+      from 4deg at 50% 50%,
+      rgba(244, 114, 182, 0.38) 0deg 1.6deg,
+      transparent 1.6deg 8deg,
+      rgba(56, 189, 248, 0.34) 8deg 9.5deg,
+      transparent 9.5deg 16deg
+    );
+}
+
+@keyframes speedStreakPulse {
+  0% { opacity: 0.72; transform: scale(1); }
+  100% { opacity: 1; transform: scale(1.025); }
+}
+
 /* ======================== TACTILE ARCADE BUTTONS ======================== */
 .arcade-btn {
   appearance: none;
@@ -374,11 +411,17 @@ html, body {
 
 .workshop-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 8px;
 }
 
-@media (max-width: 460px) {
+@media (max-width: 580px) {
+  .workshop-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 375px) {
   .workshop-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -535,82 +578,12 @@ html, body {
   background: var(--gold);
 }
 
-/* Mario Kart Roulette Slot */
-.item-slot-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  pointer-events: auto;
-}
-
-.item-slot {
-  position: relative;
-  width: 78px;
-  height: 78px;
-  border-radius: 18px;
-  border: 4px solid var(--gold);
-  background: radial-gradient(circle, #1e293b 0%, #0f172a 100%);
-  box-shadow: 0 5px 0 #0f172a, 0 8px 20px rgba(0, 0, 0, 0.5);
-  color: #fff;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  padding: 4px;
-}
-
-.item-slot.empty {
-  border-color: #64748b;
-  opacity: 0.85;
-}
-
-.item-slot.spinning {
-  border-color: var(--cyan);
-  animation: slotPulse 0.14s infinite alternate;
-}
-
-.item-slot.locked-pop {
-  border-color: #ffffff;
-  box-shadow: 0 0 18px rgba(250, 204, 21, 0.9), 0 5px 0 #0f172a;
-  transform: scale(1.08);
-}
-
-@keyframes slotPulse {
-  from { transform: scale(0.97); }
-  to { transform: scale(1.05); }
-}
-
-.item-slot-icon {
-  font-size: 32px;
-  line-height: 1;
-}
-
-.item-slot-name {
-  font-size: 9.5px;
-  font-weight: 900;
-  margin-top: 3px;
-  text-align: center;
-  color: var(--gold);
-}
-
-.item-slot-charges {
-  position: absolute;
-  top: -7px;
-  right: -7px;
-  background: var(--red);
-  border: 2px solid #fff;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 900;
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-
+/* Active Buffs under Left Stack (Top-Center 100% Unobstructed!) */
 .active-buffs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
+  max-width: 210px;
 }
 
 .buff-chip {
@@ -618,28 +591,50 @@ html, body {
   color: #0f172a;
   font-size: 11px;
   font-weight: 900;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
   border: 2px solid #0f172a;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.buff-chip.sugar {
+  background: linear-gradient(135deg, #f472b6 0%, #38bdf8 100%);
+  color: #ffffff;
+  border-color: #ffffff;
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.75);
+  box-shadow: 0 0 12px rgba(244, 114, 182, 0.75);
+}
+
+.hud-top-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hud-quick-btns {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .score-card {
   background: rgba(15, 23, 42, 0.84);
   border: 2.5px solid #0f172a;
   border-radius: 12px;
-  padding: 5px 11px;
+  padding: 4px 10px;
   text-align: right;
 }
 
 .timer-readout {
-  font-size: 20px;
+  font-size: 19px;
   font-weight: 900;
   color: #fff;
+  line-height: 1.05;
   font-variant-numeric: tabular-nums;
 }
 
 .score-readout {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 800;
   color: var(--gold);
   font-variant-numeric: tabular-nums;
@@ -655,7 +650,77 @@ html, body {
   color: #fff;
   font-size: 18px;
   font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 3px 0 #0f172a;
   cursor: pointer;
+  transition: transform 0.07s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.icon-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 #0f172a;
+}
+
+.icon-btn.pov-active {
+  border-color: var(--cyan);
+  box-shadow: 0 3px 0 #0f172a, 0 0 10px rgba(56, 189, 248, 0.55);
+}
+
+.hud-speedo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.84);
+  border: 2px solid #0f172a;
+  border-radius: 11px;
+  padding: 3px 10px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.32);
+}
+
+.hud-speedo.sugar-speed {
+  border-color: #f472b6;
+  box-shadow: 0 0 14px rgba(244, 114, 182, 0.65);
+}
+
+.speedo-val {
+  font-size: 17px;
+  font-weight: 900;
+  color: #f8fafc;
+  line-height: 1.1;
+}
+
+.speedo-unit {
+  font-size: 10px;
+  font-weight: 800;
+  color: #94a3b8;
+  letter-spacing: 0.04em;
+}
+
+.drift-spark-pill {
+  align-self: center;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  border: 1.5px solid #0f172a;
+}
+
+.drift-spark-pill.tier-1 {
+  background: #38bdf8;
+  color: #082f49;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.78);
+}
+
+.drift-spark-pill.tier-2 {
+  background: linear-gradient(90deg, #fde047 0%, #f97316 100%);
+  color: #0f172a;
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.9);
 }
 
 /* Multiplayer Live Survivor Strip */
@@ -694,7 +759,7 @@ html, body {
 
 .chaos-toast {
   position: fixed;
-  top: calc(max(10px, env(safe-area-inset-top)) + 58px);
+  top: calc(max(10px, env(safe-area-inset-top)) + 86px);
   right: max(12px, env(safe-area-inset-right));
   max-width: min(260px, 68vw);
   background: rgba(15, 23, 42, 0.82);
@@ -824,7 +889,7 @@ html, body {
   transform: translate(-50%, -50%);
 }
 
-/* Right-side Action Cluster */
+/* Right-side Side-Only Mario Kart Mystery Box Ability Button */
 .action-cluster {
   position: absolute;
   right: max(18px, env(safe-area-inset-right));
@@ -837,30 +902,93 @@ html, body {
 }
 
 .use-item-btn {
-  width: 84px;
-  height: 84px;
-  border-radius: 50%;
+  position: relative;
+  width: 88px;
+  height: 88px;
+  border-radius: 20px;
   border: 4px solid #0f172a;
   background: linear-gradient(180deg, #fde047 0%, #f59e0b 100%);
-  box-shadow: 0 5px 0 #0f172a, 0 8px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 5px 0 #0f172a, 0 8px 22px rgba(0, 0, 0, 0.48);
   color: #0f172a;
   font-family: inherit;
+  padding: 4px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+}
+
+.use-item-btn:active:not(.disabled) {
+  transform: translateY(3px) scale(0.97);
+  box-shadow: 0 2px 0 #0f172a;
 }
 
 .use-item-btn.disabled {
-  background: rgba(30, 41, 59, 0.65);
-  color: rgba(255, 255, 255, 0.45);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(30, 41, 59, 0.58);
+  color: rgba(248, 250, 252, 0.46);
+  border-color: rgba(148, 163, 184, 0.34);
   box-shadow: none;
 }
 
-.use-icon { font-size: 30px; line-height: 1; }
-.use-label { font-size: 11px; font-weight: 900; margin-top: 2px; }
+.use-item-btn.spinning {
+  background: radial-gradient(circle, #1e293b 0%, #0f172a 100%);
+  color: #ffffff;
+  animation: mysteryBoxPulse 0.15s infinite alternate, mysteryRainbowGlow 0.9s linear infinite;
+}
+
+.use-item-btn.sugar-glow {
+  background: linear-gradient(135deg, #f472b6 0%, #ec4899 52%, #38bdf8 100%);
+  color: #ffffff;
+  border-color: #fdf2f8;
+  text-shadow: 0 1px 2px rgba(15, 23, 42, 0.65);
+  box-shadow: 0 5px 0 #831843, 0 0 22px rgba(244, 114, 182, 0.9);
+}
+
+.use-item-btn.locked-pop {
+  transform: scale(1.1);
+  border-color: #ffffff;
+  box-shadow: 0 0 24px rgba(250, 204, 21, 0.95), 0 0 14px rgba(244, 114, 182, 0.72), 0 5px 0 #0f172a;
+}
+
+@keyframes mysteryBoxPulse {
+  from { transform: scale(0.96); }
+  to { transform: scale(1.04); }
+}
+
+@keyframes mysteryRainbowGlow {
+  0%   { border-color: #38bdf8; box-shadow: 0 0 18px rgba(56, 189, 248, 0.82), 0 4px 0 #0f172a; }
+  33%  { border-color: #f472b6; box-shadow: 0 0 18px rgba(244, 114, 182, 0.82), 0 4px 0 #0f172a; }
+  66%  { border-color: #facc15; box-shadow: 0 0 18px rgba(250, 204, 21, 0.85), 0 4px 0 #0f172a; }
+  100% { border-color: #4ade80; box-shadow: 0 0 18px rgba(74, 222, 128, 0.82), 0 4px 0 #0f172a; }
+}
+
+.use-icon { font-size: 32px; line-height: 1; }
+.use-label {
+  font-size: 10px;
+  font-weight: 900;
+  margin-top: 4px;
+  letter-spacing: 0.03em;
+  max-width: 78px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.use-charges {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  background: var(--red);
+  border: 2px solid #ffffff;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 1px 7px;
+  border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
 
 .mini-actions {
   display: flex;
@@ -894,6 +1022,24 @@ html, body {
   padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
   overflow-y: auto;
   touch-action: pan-y;
+}
+
+#people-modal,
+#garage-modal,
+#world-modal {
+  z-index: 31;
+}
+
+.settings-backdrop {
+  z-index: 33;
+}
+
+.sound-backdrop {
+  z-index: 35;
+}
+
+#gameover-modal {
+  z-index: 36;
 }
 
 .modal-panel {
@@ -1335,6 +1481,25 @@ html, body {
   color: #fff;
 }
 
+.tiny-pill.edit-pill {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: var(--cyan);
+  color: #e0f2fe;
+}
+
+.tiny-pill.action {
+  background: #1e293b;
+  border-color: var(--gold);
+  color: var(--gold);
+  padding: 4px 9px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.person-card-actions {
+  flex-wrap: wrap;
+}
+
 .photo-editor-box {
   background: #141a24;
   border: 2px solid var(--gold);
@@ -1354,9 +1519,35 @@ html, body {
 }
 
 #photo-crop-canvas {
-  width: 170px;
-  height: 170px;
+  width: 184px;
+  height: 184px;
   border-radius: 10px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#photo-crop-canvas.dragging {
+  cursor: grabbing;
+}
+
+.photo-stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid #293548;
+  border-radius: 9px;
+  padding: 5px 8px;
+}
+
+.photo-drag-hint {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #cbd5e1;
+  line-height: 1.25;
 }
 
 /* Garage & World Controls */
@@ -1429,6 +1620,104 @@ html, body {
 
 .veh-name { font-size: 13px; font-weight: 900; }
 .veh-stats { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+.veh-bars {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.veh-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 800;
+  color: #94a3b8;
+}
+
+.veh-bar-lbl {
+  width: 22px;
+  flex-shrink: 0;
+}
+
+.veh-bar-track {
+  flex: 1;
+  height: 5px;
+  background: #0f172a;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.veh-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--gold);
+}
+
+.veh-bar-fill.hdl { background: var(--cyan); }
+.veh-bar-fill.hp  { background: var(--green); }
+
+.garage-presets {
+  margin-bottom: 10px;
+}
+
+/* Personal Settings Modal */
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-card {
+  background: #141a24;
+  border: 2px solid var(--panel-border);
+  border-radius: 14px;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-heading {
+  font-size: 14px;
+  font-weight: 900;
+  color: var(--gold);
+}
+
+.settings-shortcut-hint {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--cyan);
+  background: rgba(56, 189, 248, 0.14);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.settings-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.settings-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
 
 .color-picker-row {
   display: flex;

@@ -1,12 +1,12 @@
 // Shared game configuration, vehicles, Mario Kart abilities, biomes, and tuning defaults
 
 export const WORLD_CONFIG = {
-  WORLD_SIZE: 2400,
-  HALF_WORLD: 1200,
-  CHUNK_SIZE: 60,        // 40 x 40 chunks = 1,600 city/biome blocks
+  WORLD_SIZE: 4800,
+  HALF_WORLD: 2400,
+  CHUNK_SIZE: 60,        // 80 x 80 chunks = 6,400 city/biome blocks (2x width & length!)
   ROAD_WIDTH: 14,
   HIGHWAY_WIDTH: 22,
-  VIEW_CHUNK_RADIUS: 4,  // 9x9 chunks active around camera (~540x540 visible area)
+  VIEW_CHUNK_RADIUS: 5,  // 11x11 chunks active around camera (~660x660 visible area + deep POV horizon)
   WATER_Y: -1.6,
   BRIDGE_Y: 1.8,
 };
@@ -236,12 +236,21 @@ export const VEHICLES = [
 export const ABILITIES = [
   {
     id: 'homing_rocket',
-    name: 'Red Homing Shell',
-    shortName: 'HOMING SHELL',
-    icon: '🎯',
+    name: 'Twin-Rocket RPG',
+    shortName: 'TWIN RPG',
+    icon: '🚀',
     color: '#ef4444',
-    desc: 'Locks onto the nearest cop or rival and blasts them into the sky',
-    weight: 1.3,
+    desc: 'Fires TWO homing RPG warheads side-by-side that lock onto cops and rivals',
+    weight: 1.35,
+  },
+  {
+    id: 'sugar_rush',
+    name: '3x Sugar Rush',
+    shortName: 'SUGAR 3X',
+    icon: '🍭',
+    color: '#f472b6',
+    desc: 'Insane 3x mushroom hyper-speed burst with candy wall-ricochet and cop bowling',
+    weight: 1.15,
   },
   {
     id: 'triple_boost',
@@ -251,7 +260,7 @@ export const ABILITIES = [
     color: '#f97316',
     charges: 3,
     desc: 'Three blazing speed bursts that smash straight through fences and traffic',
-    weight: 1.4,
+    weight: 1.35,
   },
   {
     id: 'star_power',
@@ -342,8 +351,12 @@ export function createDefaultSettings() {
     trafficDensity: 1.0,         // 0 .. 1.8
     itemBoxDensity: 1.2,         // 0.5 .. 2.0
     gravityMult: 1.0,            // 0.6 (moon jumps) .. 1.3
-    cameraMode: 'smashy',        // 'smashy' (angled overhead) | 'chase' (behind car)
+    cameraMode: 'smashy',        // 'smashy' (angled overhead) | 'chase' (behind car) | 'pov' (first-person point-of-view)
     touchStyle: 'split',         // 'split' (Smashy left/right screen) | 'joystick'
+    steerSensitivity: 1.0,       // 0.7 .. 1.4 personal steering feel
+    povFov: 76,                  // 62 .. 92 degrees in POV camera
+    showSpeedometer: true,       // Personal MPH & drift spark gauge
+    showQuickCamBtn: true,       // In-game 1-tap camera angle cycle button
     soundVolume: 0.85,
     worldSeed: 777123,
     enabledItems,

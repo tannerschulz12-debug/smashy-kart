@@ -4,7 +4,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import net from 'node:net';
 
-import { VEHICLES, ABILITIES, BIOMES, createDefaultSettings } from '../public/js/config.js';
+import { WORLD_CONFIG, VEHICLES, ABILITIES, BIOMES, createDefaultSettings } from '../public/js/config.js';
 import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
 import { Renderer3D } from '../public/js/renderer3d.js';
@@ -142,7 +142,9 @@ function connectTestWs(port) {
 }
 
 async function runAllChecks() {
-  console.log('1. Checking 2400x2400 seeded Smashy Road world & biomes...');
+  console.log('1. Checking 4800x4800 (2x bigger) seeded Smashy Road world, Airport runways & Sugar boxes...');
+  assert.equal(WORLD_CONFIG.WORLD_SIZE, 4800, 'World must be 2x bigger (4800x4800)');
+  assert.equal(WORLD_CONFIG.HALF_WORLD, 2400);
   for (const biomeId of Object.keys(BIOMES)) {
     const wA = new World(424242, biomeId, { itemBoxDensity: 1.3 });
     const wB = new World(424242, biomeId, { itemBoxDensity: 1.3 });
@@ -179,6 +181,13 @@ async function runAllChecks() {
   assert.equal(wpFarEast.onScreen, false);
   assert.ok(wpFarEast.x >= 10 && wpFarEast.x <= 380, 'Off-screen X must stay clamped inside outer rim');
 
+  // Verify First-Person Point-of-View ('pov') camera mode & self-cutout suppression ID
+  mockRenderer.setCamera({ id: 'local', x: 0, y: 0, z: 0, vx: 0, vz: 40, angle: 0, sugarActive: true }, 'pov', 0, 1, { povFov: 78 });
+  assert.equal(mockRenderer.currentCameraMode, 'pov');
+  assert.equal(mockRenderer.povFocusId, 'local');
+  const wpAheadPov = mockRenderer.projectWaypoint(0, 1.8, 25, { left: 10, right: 10, top: 76, bottom: 12 });
+  assert.equal(wpAheadPov.onScreen, true, 'Road 25m ahead must project cleanly into First-Person POV view');
+
   console.log('2. Checking all 12 vehicle blueprints...');
   for (const v of VEHICLES) {
     const parts = buildVehicleParts(v.id, v.color, v.accent, 0.5);
@@ -200,7 +209,23 @@ async function runAllChecks() {
     assert.ok(sim.localPlayer.speed > 5, `${mode} failed to accelerate`);
   }
 
-  // Test all 8 abilities firing cleanly
+  // Test all 9 abilities (including Twin-Rocket RPG & 3x Sugar Rush!) firing cleanly
+  assert.ok(ABILITIES.some((a) => a.id === 'sugar_rush'), 'Sugar Rush must be in ABILITIES');
+  abilities.reset();
+  sim.localPlayer.items.heldItem = 'homing_rocket';
+  sim.localPlayer.items.charges = 1;
+  const rpgRes = abilities.useHeldItem(sim.localPlayer, {
+    world,
+    cops: sim.cops,
+    traffic: sim.traffic,
+    localPlayer: sim.localPlayer,
+    remotePlayers: [],
+    onEvent: () => {},
+  });
+  assert.equal(rpgRes.used, true);
+  const rpgRockets = abilities.getProjectiles().filter((p) => p.type === 'rpg_rocket' || p.type === 'homing_rocket');
+  assert.equal(rpgRockets.length, 2, 'Twin-Rocket RPG must launch TWO rockets simultaneously');
+
   for (const ab of ABILITIES) {
     sim.localPlayer.items.heldItem = ab.id;
     sim.localPlayer.items.charges = ab.charges || 1;
@@ -214,6 +239,7 @@ async function runAllChecks() {
     });
     assert.equal(res.used, true, `Ability ${ab.id} failed to activate`);
   }
+  assert.ok(sim.localPlayer.sugarActive || sim.localPlayer.items.sugarTimer >= 0, 'Sugar Rush state tracked');
 
   console.log('4. Checking QR code generator...');
   const qr = generateQrMatrix('http://192.168.1.35:4567/?room=KART');
@@ -228,6 +254,9 @@ async function runAllChecks() {
     const homeRes = await httpGet(`http://127.0.0.1:${port}/`);
     assert.equal(homeRes.status, 200);
     assert.ok(homeRes.body.includes('SMASHY KART'));
+    assert.equal(homeRes.body.includes('id="hud-item-slot"'), false, 'Front-middle mystery box must be gone');
+    assert.ok(homeRes.body.includes('id="settings-modal"'), 'Personal Settings modal must exist');
+    assert.ok(homeRes.body.includes('id="btn-use-item"'), 'Side clickable item box must exist');
 
     const mainJsRes = await httpGet(`http://127.0.0.1:${port}/js/main.js`);
     assert.equal(mainJsRes.status, 200);

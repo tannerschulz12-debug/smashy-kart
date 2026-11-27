@@ -19,8 +19,11 @@
   <!-- Floating 3D->2D Player Nametags & Elimination Bubbles -->
   <div id="world-labels" class="world-labels" aria-hidden="true"></div>
 
-  <!--Screen-edge Wanted Siren Vignette & Busted Danger Flash -->
+  <!-- Screen-edge Wanted Siren Vignette & Busted Danger Flash -->
   <div id="danger-vignette" class="danger-vignette hidden"></div>
+
+  <!-- Screen-edge Hyper Speed Streaks (3x Sugar Rush & POV Boost) -->
+  <div id="speed-lines" class="speed-lines hidden" aria-hidden="true"></div>
 
   <!-- ======================== IN-GAME HUD ======================== -->
   <div id="hud" class="hud hidden">
@@ -41,24 +44,26 @@
           <div class="busted-title">BOXED IN! ESCAPE!</div>
           <div class="busted-track"><div id="busted-fill" class="busted-fill"></div></div>
         </div>
-      </div>
-
-      <!-- Mario Kart Item Roulette Slot (Top Center) -->
-      <div class="item-slot-wrap">
-        <button id="hud-item-slot" class="item-slot empty" type="button" aria-label="Held ability">
-          <div id="item-slot-icon" class="item-slot-icon">?</div>
-          <div id="item-slot-name" class="item-slot-name">GET A ? BOX</div>
-          <div id="item-slot-charges" class="item-slot-charges hidden">x3</div>
-        </button>
         <div id="active-buffs" class="active-buffs"></div>
       </div>
 
       <div class="hud-right-stack">
-        <div class="score-card">
-          <div class="timer-readout" id="hud-timer">0:00.0</div>
-          <div class="score-readout"><span id="hud-score">0</span> PTS</div>
+        <div class="hud-top-bar">
+          <div class="score-card">
+            <div class="timer-readout" id="hud-timer">0:00.0</div>
+            <div class="score-readout"><span id="hud-score">0</span> PTS</div>
+          </div>
+          <div class="hud-quick-btns">
+            <button id="btn-quick-cam" class="icon-btn" type="button" title="Switch Camera (C / V)" aria-label="Switch Camera Angle">🎥</button>
+            <button id="btn-ingame-settings" class="icon-btn" type="button" title="Personal Settings" aria-label="Open Personal Settings">⚙️</button>
+            <button id="btn-pause" class="icon-btn" type="button" title="Exit to Menu" aria-label="Pause or Menu">✕</button>
+          </div>
         </div>
-        <button id="btn-pause" class="icon-btn" type="button" aria-label="Pause or Menu">✕</button>
+        <div id="hud-speedo" class="hud-speedo">
+          <span id="hud-speedo-val" class="speedo-val">0</span>
+          <span class="speedo-unit">MPH</span>
+          <span id="hud-drift-spark" class="drift-spark-pill hidden">⚡ DRIFT</span>
+        </div>
       </div>
     </div>
 
@@ -99,11 +104,12 @@
         </div>
       </div>
 
-      <!-- Right-Thumb Action Buttons (Mario Kart Item + Horn/Brake) -->
+      <!-- Right-Thumb Action Buttons (Side-Only Mario Kart Mystery Box + Horn/Brake) -->
       <div class="action-cluster">
-        <button id="btn-use-item" class="use-item-btn disabled" type="button">
+        <button id="btn-use-item" class="use-item-btn disabled" type="button" aria-label="Use held ability">
           <span id="btn-use-item-icon" class="use-icon">?</span>
-          <span class="use-label">ITEM</span>
+          <span id="btn-use-item-label" class="use-label">ITEM</span>
+          <span id="btn-use-item-charges" class="use-charges hidden">x3</span>
         </button>
         <div class="mini-actions">
           <button id="btn-brake" class="mini-action-btn" type="button">BRAKE</button>
@@ -151,7 +157,7 @@
         </button>
       </div>
 
-      <!-- 4 Workshop / Customizer Buttons -->
+      <!-- 5 Workshop / Customizer Buttons -->
       <div class="workshop-grid">
         <button class="workshop-btn" type="button" data-open-modal="people-modal">
           <span class="ws-icon">📸</span>
@@ -172,6 +178,11 @@
           <span class="ws-icon">🎙️</span>
           <span class="ws-title">Custom Sounds</span>
           <span class="ws-sub">Record voice</span>
+        </button>
+        <button id="btn-home-settings" class="workshop-btn" type="button" data-open-modal="settings-modal">
+          <span class="ws-icon">⚙️</span>
+          <span class="ws-title">Settings</span>
+          <span class="ws-sub">POV &amp; controls</span>
         </button>
       </div>
 
@@ -232,6 +243,7 @@
           </div>
           <button id="btn-lobby-photo" class="arcade-btn small" type="button" data-open-modal="people-modal">Change Photo</button>
           <button id="btn-lobby-car" class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Car</button>
+          <button id="btn-lobby-settings" class="arcade-btn small cyan" type="button" data-open-modal="settings-modal">⚙️ My Settings</button>
         </div>
 
         <!-- Lobby Manager Full Control Panel (Host Only) -->
@@ -340,6 +352,10 @@
           <div class="crop-preview-stage">
             <canvas id="photo-crop-canvas" width="256" height="256"></canvas>
           </div>
+          <div class="photo-stage-bar">
+            <span class="photo-drag-hint">👆 Drag directly on photo to move · Pinch or scroll to zoom</span>
+            <button id="btn-center-photo" class="tiny-pill action" type="button">↺ Center &amp; Fit</button>
+          </div>
           <input id="photo-person-name" class="name-input full" type="text" maxlength="16" placeholder="Person's Name (e.g. Me, Jake)" />
           <div class="control-group">
             <label>Cutout Style</label>
@@ -421,6 +437,12 @@
 
         <div class="garage-col">
           <h3>Live Performance Sliders</h3>
+          <div class="preset-row garage-presets" id="garage-preset-btns">
+            <button type="button" class="preset-pill active" data-gpreset="balanced">⚖️ Balanced</button>
+            <button type="button" class="preset-pill" data-gpreset="drift">💨 Drift Pro</button>
+            <button type="button" class="preset-pill" data-gpreset="speed">🚀 Speed Demon</button>
+            <button type="button" class="preset-pill" data-gpreset="tank">🦏 Heavy Tank</button>
+          </div>
           <div class="slider-row">
             <label>Top Speed <span id="val-speed-mult">100%</span></label>
             <input id="rng-speed-mult" type="range" min="0.65" max="1.6" step="0.05" value="1.0" />
@@ -453,7 +475,7 @@
 
       <div class="garage-split">
         <div class="garage-col">
-          <h3>Map Theme (Huge 2,400x2,400 World)</h3>
+          <h3>Map Theme (Huge 4,800x4,800 World)</h3>
           <div class="seg-row" id="biome-btns">
             <button type="button" class="seg-btn active" data-biome="city">🏙️ Metro City</button>
             <button type="button" class="seg-btn" data-biome="desert">🌵 Desert Canyon</button>
@@ -481,14 +503,15 @@
             <label>Camera View</label>
             <div class="seg-row" id="camera-mode-btns">
               <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
-              <button type="button" class="seg-btn" data-cam="chase">Behind Chase Cam</button>
+              <button type="button" class="seg-btn" data-cam="chase">Behind Chase</button>
+              <button type="button" class="seg-btn" data-cam="pov">First-Person POV</button>
             </div>
           </div>
 
           <div class="control-group">
             <label>Phone Steering Style</label>
             <div class="seg-row" id="touch-style-btns">
-              <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap (Smashy)</button>
+              <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap</button>
               <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick</button>
             </div>
           </div>
@@ -502,8 +525,72 @@
     </div>
   </div>
 
+  <!-- ======================== PERSONAL SETTINGS MODAL ======================== -->
+  <div id="settings-modal" class="modal-backdrop settings-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2>⚙️ Personal Settings</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="settings-modal">Done</button>
+      </div>
+      <p class="modal-lead">Tune your own camera angle, POV field-of-view, steering feel, and HUD — works live mid-chase and in any Party Lobby!</p>
+
+      <div class="settings-stack">
+        <div class="settings-card">
+          <div class="settings-label-row">
+            <label class="settings-heading">Camera Angle</label>
+            <span class="settings-shortcut-hint">Keys: C / V or 🎥</span>
+          </div>
+          <div class="seg-row" id="settings-cam-btns">
+            <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
+            <button type="button" class="seg-btn" data-cam="chase">Behind Chase</button>
+            <button type="button" class="seg-btn" data-cam="pov">First-Person POV</button>
+          </div>
+          <div class="slider-row">
+            <label>POV Field of View <span id="val-pov-fov">76°</span></label>
+            <input id="rng-pov-fov" type="range" min="62" max="92" step="1" value="76" />
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <label class="settings-heading">Controls &amp; Steering</label>
+          <div class="seg-row" id="settings-touch-btns">
+            <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap</button>
+            <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick</button>
+          </div>
+          <div class="slider-row">
+            <label>Steering Sensitivity <span id="val-steer-sens">100%</span></label>
+            <input id="rng-steer-sens" type="range" min="0.7" max="1.4" step="0.05" value="1.0" />
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <label class="settings-heading">Audio &amp; HUD Display</label>
+          <div class="slider-row">
+            <label>Master Sound Volume <span id="val-settings-vol">85%</span></label>
+            <input id="rng-settings-vol" type="range" min="0" max="1" step="0.05" value="0.85" />
+          </div>
+          <div class="settings-toggles">
+            <label class="switch-row">
+              <input id="chk-show-speedo" type="checkbox" checked />
+              <span>Show Speedometer &amp; Drift Spark Gauge</span>
+            </label>
+            <label class="switch-row">
+              <input id="chk-show-quickcam" type="checkbox" checked />
+              <span>Show Quick Camera Button (🎥) in HUD</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-footer-row">
+          <button id="btn-settings-voice-studio" class="arcade-btn small cyan" type="button">🎙️ Open Custom Voice Studio</button>
+          <button id="btn-reset-personal-settings" class="arcade-btn small dark" type="button">↺ Reset Defaults</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ======================== CUSTOM SOUND STUDIO MODAL ======================== -->
-  <div id="sound-modal" class="modal-backdrop hidden">
+  <div id="sound-modal" class="modal-backdrop sound-backdrop hidden">
     <div class="modal-panel">
       <div class="modal-header">
         <h2>Custom Voice &amp; Sound Studio</h2>

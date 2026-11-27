@@ -161,6 +161,7 @@ function defaultRoomSettings() {
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems: {
       homing_rocket: true,
+      sugar_rush: true,
       triple_boost: true,
       star_power: true,
       mega_giant: true,

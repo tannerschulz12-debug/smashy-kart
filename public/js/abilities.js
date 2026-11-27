@@ -1,7 +1,8 @@
-// Mario Kart Item Box Roulette, 8 Signature Abilities, Projectiles & Multiplayer Ability Sync
+// Mario Kart Item Box Roulette, 9 Signature Abilities (incl. Twin-Rocket RPG & 3x Sugar Rush), Projectiles & Multiplayer Sync
 import { ABILITIES } from './config.js';
 
 const ROULETTE_DURATION = 1.15;
+const SUGAR_ROULETTE_DURATION = 0.5;
 const ABILITY_MAP = new Map(ABILITIES.map((ab) => [ab.id, ab]));
 
 export class AbilitySystem {
@@ -9,6 +10,19 @@ export class AbilitySystem {
     this.settings = { ...(settings || {}) };
     this.projectiles = [];
     this.nextProjectileId = 1;
+    this._targetIdMap = new WeakMap();
+    this._nextAutoTargetId = 1;
+  }
+
+  _getEntityId(entity) {
+    if (!entity || typeof entity !== 'object') return null;
+    if (entity.id != null) return entity.id;
+    let autoId = this._targetIdMap.get(entity);
+    if (!autoId) {
+      autoId = `auto_tgt_${this._nextAutoTargetId++}`;
+      this._targetIdMap.set(entity, autoId);
+    }
+    return autoId;
   }
 
   updateSettings(settings = {}) {
@@ -35,9 +49,11 @@ export class AbilitySystem {
       charges: 0,
       rouletteTimer: 0,
       rouletteDisplayId: null,
+      forcedResultId: null,
       starTimer: 0,
       megaTimer: 0,
       boostTimer: 0,
+      sugarTimer: 0,
       shrunkTimer: 0,
       shockwaveVisualTimer: 0,
     };
@@ -59,6 +75,8 @@ export class AbilitySystem {
       if (bias > 0) {
         if (ab.id === 'star_power' || ab.id === 'mega_giant' || ab.id === 'lightning_zap') {
           w *= 1 + bias * 0.95;
+        } else if (ab.id === 'sugar_rush') {
+          w *= 1 + bias * 0.65;
         } else if (ab.id === 'triple_boost' || ab.id === 'super_horn') {
           w *= 1 + bias * 0.4;
         }
@@ -88,12 +106,65 @@ export class AbilitySystem {
     const startIdx = Math.floor(Math.random() * enabled.length);
     items.rouletteTimer = ROULETTE_DURATION;
     items.rouletteDisplayId = enabled[startIdx].id;
+    items.forcedResultId = null;
     Object.defineProperties(items, {
       _rouletteTargetId: { value: target.id, writable: true, configurable: true, enumerable: false },
+      _rouletteDuration: { value: ROULETTE_DURATION, writable: true, configurable: true, enumerable: false },
       _rouletteTickAccum: { value: 0, writable: true, configurable: true, enumerable: false },
       _rouletteIndex: { value: startIdx, writable: true, configurable: true, enumerable: false },
     });
     return true;
+  }
+
+  triggerSugarBox(playerState, context = {}) {
+    const items = this._resolveItemState(playerState);
+    if (!items) return false;
+    const isPlayerEntity = Boolean(playerState && playerState.items === items);
+
+    // Creative feel-good bonus: if already holding an item (or mid-spin), grant an instant 2.2s Sugar Surge
+    // right away without overwriting their held item so hitting a Sugar Box ALWAYS feels exhilarating!
+    if (items.heldItem || items.rouletteTimer > 0) {
+      items.sugarTimer = Math.max(items.sugarTimer || 0, 2.2);
+      items.shrunkTimer = 0;
+      if (isPlayerEntity) {
+        playerState.sugarTimer = items.sugarTimer;
+        playerState.sugarActive = true;
+        playerState.spinOutTimer = 0;
+        playerState.bustedProgress = 0;
+        if (playerState.activeBuffs) playerState.activeBuffs.sugar = true;
+        const ang = playerState.angle || 0;
+        const fx = Math.sin(ang);
+        const fz = Math.cos(ang);
+        const curFwd = (playerState.vx || 0) * fx + (playerState.vz || 0) * fz;
+        const surgeFwd = Math.max(curFwd + 42, (playerState.baseSpeed || 46) * 2.15);
+        playerState.vx = fx * surgeFwd;
+        playerState.vz = fz * surgeFwd;
+        playerState.speed = Math.hypot(playerState.vx, playerState.vz);
+        context?.onEvent?.({
+          type: 'sugar_surge',
+          playerId: playerState.id || 'local',
+          duration: 2.2,
+          x: playerState.x || 0,
+          y: playerState.y || 0,
+          z: playerState.z || 0,
+        });
+      }
+      return { mode: 'surge', sugarTimer: items.sugarTimer };
+    }
+
+    // Empty slot: start fast 0.5s Sugar roulette locked onto 'sugar_rush'!
+    const enabled = this.getEnabledAbilities();
+    const startIdx = enabled.length > 0 ? Math.floor(Math.random() * enabled.length) : 0;
+    items.rouletteTimer = SUGAR_ROULETTE_DURATION;
+    items.forcedResultId = 'sugar_rush';
+    items.rouletteDisplayId = enabled.length > 0 ? enabled[startIdx].id : 'sugar_rush';
+    Object.defineProperties(items, {
+      _rouletteTargetId: { value: 'sugar_rush', writable: true, configurable: true, enumerable: false },
+      _rouletteDuration: { value: SUGAR_ROULETTE_DURATION, writable: true, configurable: true, enumerable: false },
+      _rouletteTickAccum: { value: 0, writable: true, configurable: true, enumerable: false },
+      _rouletteIndex: { value: startIdx, writable: true, configurable: true, enumerable: false },
+    });
+    return { mode: 'roulette', abilityId: 'sugar_rush' };
   }
 
   updatePlayerItemState(player, dt, context = {}) {
@@ -104,11 +175,12 @@ export class AbilitySystem {
     const items = player.items;
     const enabled = this.getEnabledAbilities();
 
-    // 1. Advance Mario Kart '?' Item Box roulette
+    // 1. Advance Mario Kart '?' / Sugar Item Box roulette
     if (items.rouletteTimer > 0) {
+      const totalDur = items._rouletteDuration || ROULETTE_DURATION;
       items.rouletteTimer = Math.max(0, items.rouletteTimer - dt);
-      const progress = 1 - items.rouletteTimer / ROULETTE_DURATION;
-      const tickInterval = 0.055 + progress * progress * 0.095;
+      const progress = 1 - items.rouletteTimer / totalDur;
+      const tickInterval = 0.05 + progress * progress * 0.085;
       items._rouletteTickAccum = (items._rouletteTickAccum || 0) + dt;
 
       if (items.rouletteTimer > 0 && enabled.length > 0 && items._rouletteTickAccum >= tickInterval) {
@@ -123,9 +195,14 @@ export class AbilitySystem {
       }
 
       if (items.rouletteTimer <= 0) {
+        const forcedId =
+          items.forcedResultId && ABILITY_MAP.has(items.forcedResultId)
+            ? items.forcedResultId
+            : null;
         const fallbackId = enabled[0]?.id || null;
-        const lockedId =
-          items._rouletteTargetId && enabled.some((a) => a.id === items._rouletteTargetId)
+        const lockedId = forcedId
+          ? forcedId
+          : items._rouletteTargetId && enabled.some((a) => a.id === items._rouletteTargetId)
             ? items._rouletteTargetId
             : fallbackId;
         if (lockedId) {
@@ -142,7 +219,9 @@ export class AbilitySystem {
         } else {
           items.rouletteDisplayId = null;
         }
+        items.forcedResultId = null;
         items._rouletteTargetId = null;
+        items._rouletteDuration = ROULETTE_DURATION;
       }
     }
 
@@ -150,9 +229,15 @@ export class AbilitySystem {
     if (items.starTimer > 0) items.starTimer = Math.max(0, items.starTimer - dt);
     if (items.megaTimer > 0) items.megaTimer = Math.max(0, items.megaTimer - dt);
     if (items.boostTimer > 0) items.boostTimer = Math.max(0, items.boostTimer - dt);
+    if (items.sugarTimer > 0) items.sugarTimer = Math.max(0, items.sugarTimer - dt);
     if (items.shrunkTimer > 0) items.shrunkTimer = Math.max(0, items.shrunkTimer - dt);
     if (items.shockwaveVisualTimer > 0) {
       items.shockwaveVisualTimer = Math.max(0, items.shockwaveVisualTimer - dt);
+    }
+
+    if (items.sugarTimer > 0) {
+      player.spinOutTimer = 0;
+      player.bustedProgress = 0;
     }
 
     // Sync player-level convenience flags & visual scale
@@ -160,31 +245,38 @@ export class AbilitySystem {
     let targetScale = baseScale;
     if (items.megaTimer > 0) {
       targetScale = baseScale * 2.3;
-    } else if (items.shrunkTimer > 0) {
+    } else if (items.shrunkTimer > 0 && items.sugarTimer <= 0) {
       targetScale = baseScale * 0.55;
     }
     const prevScale = player.scale || baseScale;
     const blend = Math.min(1, dt * 14);
     player.scale = prevScale + (targetScale - prevScale) * blend;
 
+    player.heldItemId = items.heldItem;
     player.starTimer = items.starTimer;
     player.megaTimer = items.megaTimer;
     player.boostTimer = items.boostTimer;
+    player.sugarTimer = items.sugarTimer;
     player.shrunkTimer = items.shrunkTimer;
     player.starActive = items.starTimer > 0;
     player.megaActive = items.megaTimer > 0;
     player.boostActive = items.boostTimer > 0;
+    player.sugarActive = items.sugarTimer > 0;
     player.shrunkActive = items.shrunkTimer > 0;
     player.activeBuffs = {
       star: items.starTimer > 0,
       mega: items.megaTimer > 0,
       boost: items.boostTimer > 0,
+      sugar: items.sugarTimer > 0,
       shrunk: items.shrunkTimer > 0,
       shockwave: items.shockwaveVisualTimer > 0,
     };
 
-    // 3. Star Power & Mega Giant contact knockouts
-    if (player.alive !== false && (items.starTimer > 0 || items.megaTimer > 0)) {
+    // 3. Star Power, Mega Giant & 3x Sugar Rush Cop-Bowling contact knockouts
+    if (player.alive !== false && (items.starTimer > 0 || items.megaTimer > 0 || items.sugarTimer > 0)) {
+      const isSugarOnly = items.sugarTimer > 0 && items.starTimer <= 0 && items.megaTimer <= 0;
+      const copPad = items.sugarTimer > 0 ? 0.8 : 0.65;
+      const trafficPad = items.sugarTimer > 0 ? 0.8 : 0.5;
       const playerRadius = (player.radius || 2.1) * (player.scale || 1.0);
       const cops = context.cops || [];
       for (let i = 0; i < cops.length; i++) {
@@ -193,12 +285,16 @@ export class AbilitySystem {
         const dx = cop.x - player.x;
         const dz = cop.z - player.z;
         const dist = Math.hypot(dx, dz);
-        const hitDist = playerRadius + (cop.radius || 2.1) + 0.65;
+        const hitDist = playerRadius + (cop.radius || 2.1) + copPad;
         if (dist <= hitDist) {
           const inv = dist > 0.001 ? 1 / dist : 1;
           const nx = dist > 0.001 ? dx * inv : Math.sin(player.angle || 0);
           const nz = dist > 0.001 ? dz * inv : Math.cos(player.angle || 0);
-          this._wreckCop(cop, nx * 42, 24, nz * 42, player, items.megaTimer > 0 ? 'mega_giant' : 'star_power', context);
+          const cause =
+            items.megaTimer > 0 ? 'mega_giant' : items.starTimer > 0 ? 'star_power' : 'sugar_rush';
+          const flingH = isSugarOnly ? 48 : 42;
+          const flingV = isSugarOnly ? 26 : 24;
+          this._wreckCop(cop, nx * flingH, flingV, nz * flingH, player, cause, context);
         }
       }
 
@@ -209,13 +305,13 @@ export class AbilitySystem {
         const dx = car.x - player.x;
         const dz = car.z - player.z;
         const dist = Math.hypot(dx, dz);
-        if (dist <= playerRadius + (car.radius || 2.0) + 0.5) {
+        if (dist <= playerRadius + (car.radius || 2.0) + trafficPad) {
           const inv = dist > 0.001 ? 1 / dist : 1;
           const nx = dist > 0.001 ? dx * inv : Math.sin(player.angle || 0);
           const nz = dist > 0.001 ? dz * inv : Math.cos(player.angle || 0);
-          car.vx = nx * 36;
-          car.vz = nz * 36;
-          car.vy = 15;
+          car.vx = nx * (isSugarOnly ? 44 : 36);
+          car.vz = nz * (isSugarOnly ? 44 : 36);
+          car.vy = isSugarOnly ? 18 : 15;
           car.spinTimer = 1.6;
           car.panic = true;
           car._flungCooldown = 0.8;
@@ -225,8 +321,8 @@ export class AbilitySystem {
             x: car.x,
             y: (car.y || 0) + 0.8,
             z: car.z,
-            color: car.color || '#f59e0b',
-            intensity: 0.85,
+            color: isSugarOnly ? '#f472b6' : car.color || '#f59e0b',
+            intensity: isSugarOnly ? 0.95 : 0.85,
           });
         }
       }
@@ -286,6 +382,7 @@ export class AbilitySystem {
       items.charges = 0;
       items.rouletteDisplayId = null;
     }
+    player.heldItemId = items.heldItem;
 
     const angle = player.angle || 0;
     const fx = Math.sin(angle);
@@ -309,21 +406,35 @@ export class AbilitySystem {
 
     switch (abilityId) {
       case 'homing_rocket': {
-        const spawnX = px + fx * (pr + 2.1);
-        const spawnZ = pz + fz * (pr + 2.1);
-        const speed = 78;
-        netEvent.x = spawnX;
-        netEvent.z = spawnZ;
-        this._spawnHomingShell({
+        netEvent.twinRpg = true;
+        netEvent.playerRadius = pr;
+        this._spawnTwinRpg({
           ownerId: player.id || 'local',
           ownerName: player.name || 'Player',
           ownerRef: player,
-          x: spawnX,
-          y: Math.max(0.65, py + 0.65),
-          z: spawnZ,
+          x: px,
+          y: py,
+          z: pz,
           angle,
-          speed,
+          playerRadius: pr,
+          context,
         });
+        break;
+      }
+
+      case 'sugar_rush': {
+        items.sugarTimer = 4.5;
+        items.shrunkTimer = 0;
+        player.sugarTimer = 4.5;
+        player.sugarActive = true;
+        player.spinOutTimer = 0;
+        player.bustedProgress = 0;
+        if (player.activeBuffs) player.activeBuffs.sugar = true;
+        const curFwd = (player.vx || 0) * fx + (player.vz || 0) * fz;
+        const nextFwd = Math.max(curFwd + 55, (player.baseSpeed || 46) * 2.35);
+        player.vx = fx * nextFwd;
+        player.vz = fz * nextFwd;
+        player.speed = Math.hypot(player.vx, player.vz);
         break;
       }
 
@@ -477,16 +588,31 @@ export class AbilitySystem {
 
     switch (abilityId) {
       case 'homing_rocket':
-        this._spawnHomingShell({
-          ownerId,
-          ownerName,
-          ownerRef: null,
-          x,
-          y: Math.max(0.65, y + 0.65),
-          z,
-          angle,
-          speed: 78,
-        });
+      case 'rpg_rocket':
+        if (payload.twinRpg === false) {
+          this._spawnHomingShell({
+            ownerId,
+            ownerName,
+            ownerRef: null,
+            x,
+            y: Math.max(0.65, y + 0.65),
+            z,
+            angle,
+            speed: 88,
+          });
+        } else {
+          this._spawnTwinRpg({
+            ownerId,
+            ownerName,
+            ownerRef: null,
+            x,
+            y,
+            z,
+            angle,
+            playerRadius: Number(payload.playerRadius) || 2.1,
+            context,
+          });
+        }
         break;
 
       case 'banana_bunch':
@@ -546,16 +672,39 @@ export class AbilitySystem {
 
       case 'star_power':
       case 'mega_giant':
-      case 'triple_boost': {
+      case 'triple_boost':
+      case 'sugar_rush': {
         const remotes = context.remotePlayers || [];
         const match = Array.isArray(remotes)
           ? remotes.find((rp) => rp.id === ownerId)
           : remotes?.get?.(ownerId);
         if (match) {
           if (!match.items) match.items = this.createPlayerItemState();
-          if (abilityId === 'star_power') match.items.starTimer = 8.0;
-          if (abilityId === 'mega_giant') match.items.megaTimer = 9.0;
-          if (abilityId === 'triple_boost') match.items.boostTimer = 1.65;
+          if (!match.activeBuffs) match.activeBuffs = {};
+          if (abilityId === 'star_power') {
+            match.items.starTimer = 8.0;
+            match.starTimer = 8.0;
+            match.starActive = true;
+            match.activeBuffs.star = true;
+          }
+          if (abilityId === 'mega_giant') {
+            match.items.megaTimer = 9.0;
+            match.megaTimer = 9.0;
+            match.megaActive = true;
+            match.activeBuffs.mega = true;
+          }
+          if (abilityId === 'triple_boost') {
+            match.items.boostTimer = 1.65;
+            match.boostTimer = 1.65;
+            match.boostActive = true;
+            match.activeBuffs.boost = true;
+          }
+          if (abilityId === 'sugar_rush') {
+            match.items.sugarTimer = 4.5;
+            match.sugarTimer = 4.5;
+            match.sugarActive = true;
+            match.activeBuffs.sugar = true;
+          }
         }
         break;
       }
@@ -575,12 +724,105 @@ export class AbilitySystem {
     });
   }
 
-  _spawnHomingShell({ ownerId, ownerName, ownerRef, x, y, z, angle, speed = 78 }) {
+  _pickTopTwoTargets(x, z, angle, ownerId, context = {}) {
+    const candidates = this._collectTargetCandidates(ownerId, context);
+    if (candidates.length === 0) return [null, null];
+
+    const fx = Math.sin(angle);
+    const fz = Math.cos(angle);
+    const scored = [];
+
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const ent = cand.entity;
+      if (!ent) continue;
+      const tx = ent.x - x;
+      const tz = ent.z - z;
+      const dist = Math.hypot(tx, tz);
+      if (dist > 140 || dist < 0.01) continue;
+      const dot = (tx / dist) * fx + (tz / dist) * fz;
+      if (dot <= -0.35) continue;
+
+      const frontWeight = dot > 0.3 ? 0.66 : dot > 0.0 ? 0.86 : 1.15;
+      const rivalWeight = cand.kind === 'player' && dot > 0.15 ? 0.88 : 1.0;
+      scored.push({
+        entity: ent,
+        kind: cand.kind,
+        dist,
+        dot,
+        score: dist * frontWeight * rivalWeight,
+      });
+    }
+
+    scored.sort((a, b) => a.score - b.score);
+    const first = scored[0]?.entity || null;
+    const second = scored[1]?.entity || first;
+    return [first, second];
+  }
+
+  _spawnTwinRpg({ ownerId, ownerName, ownerRef, x, y, z, angle = 0, playerRadius = 2.1, context = {} }) {
+    const fx = Math.sin(angle);
+    const fz = Math.cos(angle);
+    const perpX = Math.cos(angle);
+    const perpZ = -Math.sin(angle);
+    const fwdDist = playerRadius + 1.85;
+    const baseY = Math.max(0.85, (y || 0) + 1.05);
+
+    const [target1, target2] = this._pickTopTwoTargets(x, z, angle, ownerId, context);
+    const barrels = [
+      { lateral: -1.15, barrelSide: -1, spread: -0.09, target: target1 },
+      { lateral: 1.15, barrelSide: 1, spread: 0.09, target: target2 },
+    ];
+
+    const spawned = [];
+    for (let i = 0; i < barrels.length; i++) {
+      const b = barrels[i];
+      const sx = x + fx * fwdDist + perpX * b.lateral;
+      const sz = z + fz * fwdDist + perpZ * b.lateral;
+      const launchAngle = angle + b.spread;
+      spawned.push(
+        this._spawnRpgRocket({
+          ownerId,
+          ownerName,
+          ownerRef,
+          x: sx,
+          y: baseY,
+          z: sz,
+          angle: launchAngle,
+          speed: 88,
+          turnRate: 7.2,
+          blastRadius: 9.5,
+          barrelSide: b.barrelSide,
+          preferredTarget: b.target,
+        })
+      );
+    }
+    return spawned;
+  }
+
+  _spawnRpgRocket({
+    ownerId,
+    ownerName,
+    ownerRef,
+    x,
+    y,
+    z,
+    angle = 0,
+    speed = 88,
+    turnRate = 7.2,
+    blastRadius = 9.5,
+    barrelSide = -1,
+    preferredTarget = null,
+  }) {
+    const preferredTargetId = preferredTarget ? this._getEntityId(preferredTarget) : null;
     const proj = {
       id: this.nextProjectileId++,
-      type: 'homing_rocket',
+      type: 'rpg_rocket',
       kind: 'homing_rocket',
       abilityId: 'homing_rocket',
+      barrelSide,
+      preferredTargetId,
+      preferredTarget: preferredTarget || null,
       ownerId,
       ownerName,
       ownerRef: ownerRef || null,
@@ -591,9 +833,11 @@ export class AbilitySystem {
       vy: 0,
       vz: Math.cos(angle) * speed,
       speed,
+      turnRate,
+      blastRadius,
       angle,
       spin: 0,
-      radius: 1.35,
+      radius: 1.4,
       ttl: 5.5,
       maxTtl: 5.5,
       age: 0,
@@ -601,6 +845,23 @@ export class AbilitySystem {
     };
     this.projectiles.push(proj);
     return proj;
+  }
+
+  _spawnHomingShell({ ownerId, ownerName, ownerRef, x, y, z, angle, speed = 88 }) {
+    return this._spawnRpgRocket({
+      ownerId,
+      ownerName,
+      ownerRef,
+      x,
+      y,
+      z,
+      angle,
+      speed,
+      turnRate: 7.2,
+      blastRadius: 9.5,
+      barrelSide: 0,
+      preferredTarget: null,
+    });
   }
 
   _spawnBanana({ ownerId, ownerName, x, y, z, vx = 0, vy = 4, vz = 0, angle = 0 }) {
@@ -1074,30 +1335,58 @@ export class AbilitySystem {
         continue;
       }
 
-      if (proj.type === 'homing_rocket' || proj.type === 'homing_shell') {
-        proj.spin = (proj.spin || 0) + dt * 22;
-        const speed = proj.speed || 78;
+      if (proj.type === 'rpg_rocket' || proj.type === 'homing_rocket' || proj.type === 'homing_shell') {
+        proj.spin = (proj.spin || 0) + dt * 24;
+        const speed = proj.speed || 88;
+        const turnRate = proj.turnRate || 7.2;
+        const blastRadius = proj.blastRadius || 9.5;
         const dirLen = Math.hypot(proj.vx, proj.vz) || 1;
         let dxNorm = proj.vx / dirLen;
         let dzNorm = proj.vz / dirLen;
 
-        // Track nearest cop or nearest alive rival player if closer / in front
+        // Maintain lock on assigned preferredTargetId if alive & in cone; otherwise re-acquire
         const candidates = this._collectTargetCandidates(proj.ownerId, context);
         let best = null;
-        let bestScore = Infinity;
-        for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
-          const cand = candidates[cIdx];
-          const tx = cand.entity.x - proj.x;
-          const tz = cand.entity.z - proj.z;
-          const dist = Math.hypot(tx, tz);
-          if (dist > 98 || dist < 0.01) continue;
-          const dot = (tx / dist) * dxNorm + (tz / dist) * dzNorm;
-          const frontWeight = dot > 0.2 ? 0.68 : dot > -0.25 ? 0.95 : 1.35;
-          const rivalWeight = cand.kind === 'player' && dot > 0.15 ? 0.88 : 1.0;
-          const score = dist * frontWeight * rivalWeight;
-          if (score < bestScore) {
-            bestScore = score;
-            best = cand;
+
+        if (proj.preferredTargetId) {
+          for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+            const cand = candidates[cIdx];
+            if (this._getEntityId(cand.entity) === proj.preferredTargetId) {
+              const tx = cand.entity.x - proj.x;
+              const tz = cand.entity.z - proj.z;
+              const dist = Math.hypot(tx, tz);
+              if (dist <= 155 && dist >= 0.01) {
+                const dot = (tx / dist) * dxNorm + (tz / dist) * dzNorm;
+                if (dot > -0.65) {
+                  best = cand;
+                }
+              }
+              break;
+            }
+          }
+        }
+
+        if (!best) {
+          let bestScore = Infinity;
+          for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+            const cand = candidates[cIdx];
+            const tx = cand.entity.x - proj.x;
+            const tz = cand.entity.z - proj.z;
+            const dist = Math.hypot(tx, tz);
+            if (dist > 135 || dist < 0.01) continue;
+            const dot = (tx / dist) * dxNorm + (tz / dist) * dzNorm;
+            if (dot <= -0.35) continue;
+            const frontWeight = dot > 0.25 ? 0.66 : dot > 0 ? 0.88 : 1.2;
+            const rivalWeight = cand.kind === 'player' && dot > 0.15 ? 0.88 : 1.0;
+            const score = dist * frontWeight * rivalWeight;
+            if (score < bestScore) {
+              bestScore = score;
+              best = cand;
+            }
+          }
+          if (best) {
+            proj.preferredTarget = best.entity;
+            proj.preferredTargetId = this._getEntityId(best.entity);
           }
         }
 
@@ -1108,7 +1397,7 @@ export class AbilitySystem {
           let diff = targetAngle - proj.angle;
           while (diff > Math.PI) diff -= Math.PI * 2;
           while (diff < -Math.PI) diff += Math.PI * 2;
-          const maxTurn = 9.5 * dt;
+          const maxTurn = turnRate * dt;
           proj.angle += Math.max(-maxTurn, Math.min(maxTurn, diff));
           dxNorm = Math.sin(proj.angle);
           dzNorm = Math.cos(proj.angle);
@@ -1119,12 +1408,21 @@ export class AbilitySystem {
         proj.x += proj.vx * dt;
         proj.z += proj.vz * dt;
         const g = world?.getGroundHeight ? world.getGroundHeight(proj.x, proj.z) : { y: 0 };
-        proj.y = Math.max(0.55, (g.y || 0) + 0.65);
+        proj.y = Math.max(0.65, (g.y || 0) + 0.75);
 
         if (world?.resolveBuildingCollision) {
           const wall = world.resolveBuildingCollision(proj);
           if (wall?.hit) {
-            this.detonateExplosion(proj.x, proj.y, proj.z, 6.5, proj.ownerId, proj.ownerName, proj.ownerRef, context);
+            this.detonateExplosion(
+              proj.x,
+              proj.y,
+              proj.z,
+              blastRadius,
+              proj.ownerId,
+              proj.ownerName,
+              proj.ownerRef,
+              context
+            );
             this.projectiles.splice(i, 1);
             continue;
           }
@@ -1136,8 +1434,17 @@ export class AbilitySystem {
           const cop = cops[cIdx];
           if (!cop || cop.wrecked || cop.alive === false || cop.type === 'heli') continue;
           if (Math.hypot(cop.x - proj.x, cop.z - proj.z) <= proj.radius + (cop.radius || 2.0)) {
-            this._wreckCop(cop, dxNorm * 32, 27, dzNorm * 32, proj.ownerRef, 'homing_rocket', context);
-            this.detonateExplosion(proj.x, proj.y, proj.z, 7.5, proj.ownerId, proj.ownerName, proj.ownerRef, context);
+            this._wreckCop(cop, dxNorm * 36, 28, dzNorm * 36, proj.ownerRef, 'homing_rocket', context);
+            this.detonateExplosion(
+              proj.x,
+              proj.y,
+              proj.z,
+              blastRadius,
+              proj.ownerId,
+              proj.ownerName,
+              proj.ownerRef,
+              context
+            );
             hitSomething = true;
             break;
           }
@@ -1148,10 +1455,13 @@ export class AbilitySystem {
           if (local && local.id !== proj.ownerId && local.alive !== false) {
             const dist = Math.hypot(local.x - proj.x, local.z - proj.z);
             if (dist <= proj.radius + (local.radius || 2.0) * (local.scale || 1)) {
-              const protectedBuff = (local.items?.starTimer || 0) > 0 || (local.items?.megaTimer || 0) > 0;
+              const protectedBuff =
+                (local.items?.starTimer || 0) > 0 ||
+                (local.items?.megaTimer || 0) > 0 ||
+                (local.items?.sugarTimer || 0) > 0;
               if (!protectedBuff) {
-                local.vx += dxNorm * 32;
-                local.vz += dzNorm * 32;
+                local.vx += dxNorm * 34;
+                local.vz += dzNorm * 34;
                 local.vy = 19;
                 local.spinOutTimer = 1.35;
                 local.lastBumpedBy = { id: proj.ownerId, name: proj.ownerName || 'Rival', time: context.time || 0 };
@@ -1165,7 +1475,7 @@ export class AbilitySystem {
                   z: local.z,
                 });
               }
-              this.detonateExplosion(proj.x, proj.y, proj.z, 7.0, proj.ownerId, proj.ownerName, null, context);
+              this.detonateExplosion(proj.x, proj.y, proj.z, blastRadius, proj.ownerId, proj.ownerName, null, context);
               hitSomething = true;
             }
           }
@@ -1178,7 +1488,16 @@ export class AbilitySystem {
           for (const rp of remotes) {
             if (!rp || rp.id === proj.ownerId || rp.alive === false) continue;
             if (Math.hypot(rp.x - proj.x, rp.z - proj.z) <= proj.radius + (rp.radius || 2.0)) {
-              this.detonateExplosion(proj.x, proj.y, proj.z, 7.0, proj.ownerId, proj.ownerName, proj.ownerRef, context);
+              this.detonateExplosion(
+                proj.x,
+                proj.y,
+                proj.z,
+                blastRadius,
+                proj.ownerId,
+                proj.ownerName,
+                proj.ownerRef,
+                context
+              );
               hitSomething = true;
               break;
             }
@@ -1247,7 +1566,10 @@ export class AbilitySystem {
             if (!sameOwnerBlocked) {
               const dist = Math.hypot(lp.x - proj.x, lp.z - proj.z);
               if (dist <= proj.radius + (lp.radius || 2.0) * (lp.scale || 1)) {
-                const protectedBuff = (lp.items?.starTimer || 0) > 0 || (lp.items?.megaTimer || 0) > 0;
+                const protectedBuff =
+                  (lp.items?.starTimer || 0) > 0 ||
+                  (lp.items?.megaTimer || 0) > 0 ||
+                  (lp.items?.sugarTimer || 0) > 0;
                 if (!protectedBuff) {
                   lp.spinOutTimer = 1.6;
                   lp.vx *= 0.62;

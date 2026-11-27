@@ -235,9 +235,11 @@ export class Simulation {
           charges: 0,
           rouletteTimer: 0,
           rouletteDisplayId: null,
+          forcedResultId: null,
           starTimer: 0,
           megaTimer: 0,
           boostTimer: 0,
+          sugarTimer: 0,
           shrunkTimer: 0,
           shockwaveVisualTimer: 0,
         };
@@ -270,6 +272,8 @@ export class Simulation {
       ragdollTimer: 0,
       drifting: false,
       driftAngle: 0,
+      driftCharge: 0,
+      driftSparkTier: 0,
       airborne: false,
       grounded: true,
       airTime: 0,
@@ -299,15 +303,18 @@ export class Simulation {
       propsSmashed: 0,
       stars: Math.max(1, Math.min(5, Math.round(settings.startStars || 1))),
       items,
+      heldItemId: null,
       starTimer: 0,
       megaTimer: 0,
       boostTimer: 0,
+      sugarTimer: 0,
       shrunkTimer: 0,
       starActive: false,
       megaActive: false,
       boostActive: false,
+      sugarActive: false,
       shrunkActive: false,
-      activeBuffs: { star: false, mega: false, boost: false, shrunk: false, shockwave: false },
+      activeBuffs: { star: false, mega: false, boost: false, sugar: false, shrunk: false, shockwave: false },
       lastBumpedBy: null,
       _dmgCooldown: 0,
       _pvpCooldown: 0,
@@ -334,6 +341,10 @@ export class Simulation {
       const defaultRadius = mode === 'runner' ? 1.25 : veh.radius;
 
       if (!rp) {
+        const sugarOn = Boolean(snap.activeBuffs?.sugar || snap.sugarActive || (snap.sugarTimer || 0) > 0);
+        const rpItems = this.abilitySystem ? this.abilitySystem.createPlayerItemState() : {};
+        if (sugarOn) rpItems.sugarTimer = Math.max(Number(snap.sugarTimer) || 0, 0.25);
+        if (snap.heldItemId || snap.heldItem) rpItems.heldItem = snap.heldItemId || snap.heldItem;
         rp = {
           id,
           name: snap.name || 'Player',
@@ -361,6 +372,8 @@ export class Simulation {
           wheelSpin: 0,
           stridePhase: 0,
           drifting: Boolean(snap.drifting),
+          driftSparkTier: Number(snap.driftSparkTier) || 0,
+          heldItemId: snap.heldItemId || snap.heldItem || null,
           radius: defaultRadius,
           mass: mode === 'runner' ? 0.65 : veh.mass,
           scaleMult: 1.0,
@@ -371,12 +384,20 @@ export class Simulation {
           survivalTime: Number(snap.survivalTime) || 0,
           stars: Number(snap.stars) || 1,
           score: Number(snap.score) || 0,
-          activeBuffs: snap.activeBuffs || { star: false, mega: false, boost: false, shrunk: false },
+          activeBuffs: {
+            star: Boolean(snap.activeBuffs?.star || snap.starActive),
+            mega: Boolean(snap.activeBuffs?.mega || snap.megaActive),
+            boost: Boolean(snap.activeBuffs?.boost || snap.boostActive),
+            sugar: sugarOn,
+            shrunk: Boolean(snap.activeBuffs?.shrunk || snap.shrunkActive),
+          },
           starActive: Boolean(snap.activeBuffs?.star || snap.starActive),
           megaActive: Boolean(snap.activeBuffs?.mega || snap.megaActive),
           boostActive: Boolean(snap.activeBuffs?.boost || snap.boostActive),
+          sugarActive: sugarOn,
+          sugarTimer: sugarOn ? Math.max(Number(snap.sugarTimer) || 0, 0.25) : 0,
           shrunkActive: Boolean(snap.activeBuffs?.shrunk || snap.shrunkActive),
-          items: this.abilitySystem ? this.abilitySystem.createPlayerItemState() : {},
+          items: rpItems,
         };
         this._remoteById.set(id, rp);
       } else {
@@ -395,6 +416,10 @@ export class Simulation {
         rp.speed = Number.isFinite(snap.speed) ? snap.speed : Math.hypot(rp.vx, rp.vz);
         if (Number.isFinite(snap.angle)) rp.targetAngle = snap.angle;
         if (snap.drifting !== undefined) rp.drifting = Boolean(snap.drifting);
+        if (snap.driftSparkTier !== undefined) rp.driftSparkTier = Number(snap.driftSparkTier) || 0;
+        if (snap.heldItemId !== undefined || snap.heldItem !== undefined) {
+          rp.heldItemId = snap.heldItemId ?? snap.heldItem ?? null;
+        }
         if (Number.isFinite(snap.hp)) rp.hp = snap.hp;
         if (Number.isFinite(snap.maxHp)) rp.maxHp = snap.maxHp;
         if (snap.alive !== undefined) rp.alive = Boolean(snap.alive);
@@ -402,18 +427,35 @@ export class Simulation {
         if (Number.isFinite(snap.stars)) rp.stars = snap.stars;
         if (Number.isFinite(snap.score)) rp.score = snap.score;
         if (snap.activeBuffs) {
-          rp.activeBuffs = snap.activeBuffs;
+          rp.activeBuffs = { ...rp.activeBuffs, ...snap.activeBuffs };
           rp.starActive = Boolean(snap.activeBuffs.star);
           rp.megaActive = Boolean(snap.activeBuffs.mega);
           rp.boostActive = Boolean(snap.activeBuffs.boost);
+          rp.sugarActive = Boolean(snap.activeBuffs.sugar ?? snap.sugarActive);
           rp.shrunkActive = Boolean(snap.activeBuffs.shrunk);
+        } else if (snap.sugarActive !== undefined) {
+          rp.sugarActive = Boolean(snap.sugarActive);
+          if (rp.activeBuffs) rp.activeBuffs.sugar = rp.sugarActive;
         }
-        rp.scale = rp.megaActive ? 2.3 : rp.shrunkActive ? 0.55 : Number(snap.scale) || 1.0;
+        if (Number.isFinite(snap.sugarTimer)) {
+          rp.sugarTimer = snap.sugarTimer;
+          if (snap.sugarTimer > 0) {
+            rp.sugarActive = true;
+            if (rp.activeBuffs) rp.activeBuffs.sugar = true;
+          }
+        } else {
+          rp.sugarTimer = rp.sugarActive ? Math.max(rp.sugarTimer || 0, 0.25) : 0;
+        }
+        rp.scale = rp.megaActive ? 2.3 : rp.shrunkActive && !rp.sugarActive ? 0.55 : Number(snap.scale) || 1.0;
         if (rp.items) {
           rp.items.starTimer = rp.starActive ? Math.max(rp.items.starTimer || 0, 0.25) : 0;
           rp.items.megaTimer = rp.megaActive ? Math.max(rp.items.megaTimer || 0, 0.25) : 0;
           rp.items.boostTimer = rp.boostActive ? Math.max(rp.items.boostTimer || 0, 0.25) : 0;
-          rp.items.shrunkTimer = rp.shrunkActive ? Math.max(rp.items.shrunkTimer || 0, 0.25) : 0;
+          rp.items.sugarTimer = rp.sugarActive
+            ? Math.max(rp.items.sugarTimer || 0, Number(snap.sugarTimer) || 0.25)
+            : 0;
+          rp.items.shrunkTimer = rp.shrunkActive && !rp.sugarActive ? Math.max(rp.items.shrunkTimer || 0, 0.25) : 0;
+          if (rp.heldItemId !== undefined) rp.items.heldItem = rp.heldItemId;
         }
       }
     }
@@ -463,7 +505,7 @@ export class Simulation {
       : Array.from(remotePlayers?.values?.() || []);
 
     const lRadius = (localPlayer.radius || 2.1) * (localPlayer.scale || 1.0);
-    const localPower = Boolean(localPlayer.starActive || localPlayer.megaActive);
+    const localPower = Boolean(localPlayer.starActive || localPlayer.megaActive || localPlayer.sugarActive);
 
     for (let i = 0; i < list.length; i++) {
       const rp = list[i];
@@ -488,7 +530,7 @@ export class Simulation {
       if (localPlayer._pvpCooldown > 0) continue;
       localPlayer._pvpCooldown = 0.22;
 
-      const remotePower = Boolean(rp.starActive || rp.megaActive);
+      const remotePower = Boolean(rp.starActive || rp.megaActive || rp.sugarActive);
       const relVx = localPlayer.vx - (rp.vx || 0);
       const relVz = localPlayer.vz - (rp.vz || 0);
       const closing = -(relVx * nx + relVz * nz);
@@ -566,7 +608,7 @@ export class Simulation {
     const lp = this.localPlayer;
     if (!lp || !lp.alive || !bump) return;
     if (bump.targetId && bump.targetId !== lp.id) return;
-    const protectedBuff = lp.starActive || lp.megaActive;
+    const protectedBuff = lp.starActive || lp.megaActive || lp.sugarActive;
     if (protectedBuff && !bump.power) return;
 
     lp.vx += Number(bump.vx) || 0;
@@ -792,26 +834,36 @@ export class Simulation {
       ? this.world.getGroundHeight(lp.x, lp.z)
       : { y: 0, surface: 'road', speedFactor: 1.0, rampSlopeX: 0, rampSlopeZ: 0 };
 
-    // Calculate buffed top speed
+    // Calculate buffed top speed (3x Sugar Rush = 2.35x = +135%, exact 3x the +45% mushroom boost!)
+    const sugarOn = Boolean(lp.sugarActive || (lp.items?.sugarTimer || 0) > 0);
+    lp.sugarActive = sugarOn;
     let topSpeed = lp.baseSpeed;
-    if (lp.starActive) topSpeed *= 1.32;
-    if (lp.boostActive) topSpeed *= 1.45;
-    if (lp.megaActive) topSpeed *= 1.14;
-    if (lp.shrunkActive) topSpeed *= 0.52;
+    if (sugarOn) {
+      topSpeed *= 2.35;
+    } else if (lp.boostActive) {
+      topSpeed *= 1.45;
+    }
+    if (lp.starActive) topSpeed *= sugarOn ? 1.08 : 1.32;
+    if (lp.megaActive) topSpeed *= sugarOn ? 1.05 : 1.14;
+    if (lp.shrunkActive && !sugarOn) topSpeed *= 0.52;
 
-    const ignoreOffroadSlow = lp.starActive || lp.boostActive || lp.megaActive || lp.characterMode === 'runner';
+    const ignoreOffroadSlow =
+      sugarOn || lp.starActive || lp.boostActive || lp.megaActive || lp.characterMode === 'runner';
     const surfaceFactor = ignoreOffroadSlow ? 1.0 : gBefore.speedFactor ?? 1.0;
     lp.maxSpeed = topSpeed * surfaceFactor;
 
     // Spin-out override (from banana peel or homing shell)
-    if (lp.spinOutTimer > 0) {
+    if (lp.spinOutTimer > 0 && !sugarOn) {
       lp.spinOutTimer = Math.max(0, lp.spinOutTimer - dt);
       lp.angle = wrapAngle(lp.angle + 13.5 * dt);
       lp.vx *= Math.pow(0.32, dt);
       lp.vz *= Math.pow(0.32, dt);
       lp.drifting = lp.grounded && lp.characterMode !== 'runner';
+      lp.driftCharge = 0;
+      lp.driftSparkTier = 0;
     } else {
-      // Steering rotation
+      if (sugarOn) lp.spinOutTimer = 0;
+      // Steering rotation (with personal steerSensitivity preference, never overwritten by lobbyRules)
       const preSpeed = Math.hypot(lp.vx, lp.vz);
       const fwdPre = lp.vx * Math.sin(lp.angle) + lp.vz * Math.cos(lp.angle);
       const reverseSign = fwdPre < -2.0 ? -1 : 1;
@@ -820,7 +872,8 @@ export class Simulation {
           ? 1.0
           : 0.42 + 0.58 * Math.min(1, preSpeed / 13);
       const airControl = lp.airborne ? 0.45 : 1.0;
-      const turnRate = lp.handling * steerMobility * airControl;
+      const steerSens = Math.max(0.65, Math.min(1.5, Number(this.settings.steerSensitivity) || 1.0));
+      const turnRate = lp.handling * steerMobility * airControl * steerSens;
       lp.angle = wrapAngle(lp.angle + steerCmd * reverseSign * turnRate * dt);
 
       const fx = Math.sin(lp.angle);
@@ -834,7 +887,7 @@ export class Simulation {
       if (lp.grounded || !lp.airborne) {
         if (!braking) {
           // Smashy Road auto-acceleration forward!
-          const accelBoost = lp.boostActive ? 2.25 : lp.starActive ? 1.55 : 1.0;
+          const accelBoost = sugarOn ? 3.6 : lp.boostActive ? 2.25 : lp.starActive ? 1.55 : 1.0;
           const driveAccel = lp.accel * accelBoost;
           if (vFwd < lp.maxSpeed) {
             vFwd = Math.min(lp.maxSpeed, vFwd + driveAccel * dt);
@@ -858,14 +911,23 @@ export class Simulation {
           // Higher drift factor (0.83..0.96) lets the rear swing out cleanly during hard turns
           const grip = 1.9 + (1.0 - lp.drift) * 16.0;
           vLat *= Math.exp(-grip * dt);
-          // Slight forward carry when drifting hard so speed stays thrilling around corners
-          if (Math.abs(steerCmd) > 0.2 && vFwd > 12) {
-            vFwd = Math.min(lp.maxSpeed, vFwd + lp.accel * 0.16 * dt);
+          // Mario Kart cornering momentum preservation so continuous drifts stay fast (>18) & thrilling!
+          if (!braking && Math.abs(steerCmd) > 0.2 && vFwd > 10) {
+            const cornerCarry = Math.abs(vLat) * turnRate * 0.56 + lp.accel * 0.24;
+            vFwd = Math.min(lp.maxSpeed, vFwd + cornerCarry * dt);
           }
         }
 
         lp.vx = fx * vFwd + lx * vLat;
         lp.vz = fz * vFwd + lz * vLat;
+
+        // Soft cap unboosted cornering speed so lateral+forward slip never exceeds maxSpeed
+        const newHorizSpd = Math.hypot(lp.vx, lp.vz);
+        if (!sugarOn && !lp.boostActive && newHorizSpd > lp.maxSpeed && newHorizSpd > 0.001) {
+          const capScale = lp.maxSpeed / newHorizSpd;
+          lp.vx *= capScale;
+          lp.vz *= capScale;
+        }
       }
 
       lp.driftAngle = Math.atan2(vLat, Math.abs(vFwd) + 0.1);
@@ -975,31 +1037,141 @@ export class Simulation {
       return;
     }
 
-    // Solid building collisions
+    // Solid building collisions (+ 3x Sugar Rush Wall-Ricochet Cushion!)
     if (this.world?.resolveBuildingCollision) {
+      const preHitX = lp.x;
+      const preHitZ = lp.z;
+      const preHitVx = lp.vx;
+      const preHitVz = lp.vz;
+      const preHitSpeed = Math.hypot(preHitVx, preHitVz);
       const hitRes = this.world.resolveBuildingCollision(lp);
       if (hitRes?.hit) {
-        const imp = hitRes.impactSpeed || 0;
-        if (imp > 9) {
+        if (lp.sugarActive) {
+          // Sugar Wall-Ricochet: bounce cleanly along wall/tangent at 0.82 speed retention with ZERO HP damage!
+          let wnx = 0;
+          let wnz = 0;
+          if (Number.isFinite(hitRes.nx) && Number.isFinite(hitRes.nz) && Math.hypot(hitRes.nx, hitRes.nz) > 0.001) {
+            const nl = Math.hypot(hitRes.nx, hitRes.nz);
+            wnx = hitRes.nx / nl;
+            wnz = hitRes.nz / nl;
+          } else if (Math.hypot(lp.x - preHitX, lp.z - preHitZ) > 0.0001) {
+            const dxP = lp.x - preHitX;
+            const dzP = lp.z - preHitZ;
+            const nl = Math.hypot(dxP, dzP);
+            wnx = dxP / nl;
+            wnz = dzP / nl;
+          } else if (Math.hypot(lp.vx - preHitVx, lp.vz - preHitVz) > 0.001) {
+            const dvx = lp.vx - preHitVx;
+            const dvz = lp.vz - preHitVz;
+            const nl = Math.hypot(dvx, dvz);
+            wnx = dvx / nl;
+            wnz = dvz / nl;
+          } else {
+            wnx = -Math.sin(lp.angle);
+            wnz = -Math.cos(lp.angle);
+          }
+
+          const vDotN = preHitVx * wnx + preHitVz * wnz;
+          const tanVx = preHitVx - vDotN * wnx;
+          const tanVz = preHitVz - vDotN * wnz;
+          const tanLen = Math.hypot(tanVx, tanVz);
+
+          let dirX;
+          let dirZ;
+          if (tanLen > preHitSpeed * 0.22 && tanLen > 0.01) {
+            dirX = tanVx / tanLen + wnx * 0.36;
+            dirZ = tanVz / tanLen + wnz * 0.36;
+          } else {
+            // Head-on wall hit: deflect cleanly off normal + tangent so player never stalls into flat wall
+            dirX = -wnz * 0.62 + wnx * 0.78;
+            dirZ = wnx * 0.62 + wnz * 0.78;
+          }
+          const dirLen = Math.hypot(dirX, dirZ) || 1;
+          const retainedSpeed = Math.max(preHitSpeed * 0.82, (lp.baseSpeed || 44) * 1.15);
+          lp.vx = (dirX / dirLen) * (preHitSpeed > 1 ? preHitSpeed * 0.82 : retainedSpeed);
+          lp.vz = (dirZ / dirLen) * (preHitSpeed > 1 ? preHitSpeed * 0.82 : retainedSpeed);
+          lp.angle = lerpAngle(lp.angle, Math.atan2(lp.vx, lp.vz), 0.65);
+          lp.speed = Math.hypot(lp.vx, lp.vz);
+
           this._emit({
             type: 'smash',
             x: lp.x,
             y: lp.y + 0.8,
             z: lp.z,
-            color: lp.primaryColor,
-            intensity: Math.min(1.2, imp / 38),
+            color: '#f472b6',
+            intensity: 0.9,
           });
-        }
-        if (imp > 25 && !lp.starActive && !lp.megaActive && lp._dmgCooldown <= 0) {
-          const dmg = Math.max(1, Math.round(((imp - 25) * 0.38) / Math.sqrt(Math.max(0.6, lp.mass))));
-          lp.hp = Math.max(0, lp.hp - dmg);
-          lp._dmgCooldown = 0.38;
-          if (lp.characterMode === 'runner' && imp > 30) {
-            lp.ragdollTimer = 0.6;
-            lp.vy = Math.max(lp.vy, 7.5);
+        } else {
+          const imp = hitRes.impactSpeed || 0;
+          if (imp > 9) {
+            this._emit({
+              type: 'smash',
+              x: lp.x,
+              y: lp.y + 0.8,
+              z: lp.z,
+              color: lp.primaryColor,
+              intensity: Math.min(1.2, imp / 38),
+            });
           }
+          if (imp > 25 && !lp.starActive && !lp.megaActive && lp._dmgCooldown <= 0) {
+            const dmg = Math.max(1, Math.round(((imp - 25) * 0.38) / Math.sqrt(Math.max(0.6, lp.mass))));
+            lp.hp = Math.max(0, lp.hp - dmg);
+            lp._dmgCooldown = 0.38;
+            if (lp.characterMode === 'runner' && imp > 30) {
+              lp.ragdollTimer = 0.6;
+              lp.vy = Math.max(lp.vy, 7.5);
+            }
+          }
+          lp.speed = Math.hypot(lp.vx, lp.vz);
         }
-        lp.speed = Math.hypot(lp.vx, lp.vz);
+      }
+    }
+
+    // Mario Kart Drift Sparks & Mini-Turbo state machine
+    if (lp.spinOutTimer <= 0) {
+      const chargingDrift =
+        lp.drifting &&
+        lp.grounded &&
+        lp.characterMode !== 'runner' &&
+        Math.abs(lp.steerInput) > 0.2 &&
+        lp.speed > 18;
+
+      if (chargingDrift) {
+        lp.driftCharge = (lp.driftCharge || 0) + dt;
+        lp.driftSparkTier = lp.driftCharge >= 1.55 ? 2 : lp.driftCharge >= 0.75 ? 1 : 0;
+      } else if ((lp.driftSparkTier || 0) >= 1 && (!lp.drifting || Math.abs(lp.steerInput) <= 0.2)) {
+        const tier = lp.driftSparkTier;
+        const burstDur = tier === 2 ? 0.95 : 0.55;
+        if (!lp.items) {
+          lp.items = this.abilitySystem ? this.abilitySystem.createPlayerItemState() : { boostTimer: 0 };
+        }
+        lp.items.boostTimer = Math.max(lp.items.boostTimer || 0, burstDur);
+        lp.boostTimer = lp.items.boostTimer;
+        lp.boostActive = true;
+        lp.score += tier * 35;
+
+        if (!lp.sugarActive) {
+          const fxB = Math.sin(lp.angle);
+          const fzB = Math.cos(lp.angle);
+          const curFwdB = lp.vx * fxB + lp.vz * fzB;
+          const burstSpd = Math.max(curFwdB + (tier === 2 ? 16 : 10), lp.baseSpeed * (tier === 2 ? 1.38 : 1.24));
+          lp.vx = fxB * burstSpd;
+          lp.vz = fzB * burstSpd;
+          lp.speed = Math.hypot(lp.vx, lp.vz);
+        }
+
+        this._emit({
+          type: 'mini_turbo',
+          tier,
+          x: lp.x,
+          y: lp.y,
+          z: lp.z,
+        });
+        lp.driftCharge = 0;
+        lp.driftSparkTier = 0;
+      } else if (!lp.drifting || Math.abs(lp.steerInput) <= 0.2) {
+        lp.driftCharge = 0;
+        lp.driftSparkTier = 0;
       }
     }
 
@@ -1050,7 +1222,23 @@ export class Simulation {
       });
     }
 
-    // Mario Kart '?' Item Box pickups
+    // Mario Kart '?' Item Box & Dedicated Sugar Mystery Box pickups
+    if (this.world?.collectSugarBoxes) {
+      const pickedSugar = this.world.collectSugarBoxes(lp);
+      if (pickedSugar > 0) {
+        lp.score += 75 * pickedSugar;
+        this._emit({
+          type: 'pickup_box',
+          sugar: true,
+          playerId: lp.id,
+          x: lp.x,
+          y: lp.y,
+          z: lp.z,
+        });
+        this.abilitySystem?.triggerSugarBox?.(lp, context);
+      }
+    }
+
     if (this.world?.collectItemBoxes) {
       const picked = this.world.collectItemBoxes(lp);
       if (picked > 0) {
@@ -1065,6 +1253,20 @@ export class Simulation {
         this.abilitySystem?.triggerItemBox?.(lp, this._computeRankBias(lp));
       }
     }
+
+    // Sync activeBuffs & convenience mirrors after physics / pickups / mini-turbo
+    lp.heldItemId = lp.items?.heldItem || null;
+    lp.sugarTimer = lp.items?.sugarTimer || 0;
+    lp.sugarActive = lp.sugarTimer > 0;
+    lp.boostTimer = lp.items?.boostTimer || 0;
+    lp.boostActive = lp.boostTimer > 0;
+    if (!lp.activeBuffs) lp.activeBuffs = {};
+    lp.activeBuffs.star = Boolean(lp.starActive);
+    lp.activeBuffs.mega = Boolean(lp.megaActive);
+    lp.activeBuffs.boost = Boolean(lp.boostActive);
+    lp.activeBuffs.sugar = Boolean(lp.sugarActive);
+    lp.activeBuffs.shrunk = Boolean(lp.shrunkActive);
+    lp.activeBuffs.shockwave = Boolean((lp.items?.shockwaveVisualTimer || 0) > 0);
   }
 
   _updateWantedStars() {
@@ -1434,10 +1636,11 @@ export class Simulation {
         const dz = lp.z - cop.z;
         const dist = Math.hypot(dx, dz);
         if (dist < minDist) {
-          if (lp.starActive || lp.megaActive) {
+          if (lp.starActive || lp.megaActive || lp.sugarActive) {
             const nx = dist > 0.001 ? dx / dist : 1;
             const nz = dist > 0.001 ? dz / dist : 0;
-            this.abilitySystem?._wreckCop?.(cop, -nx * 40, 23, -nz * 40, lp, 'power_contact', context);
+            const cause = lp.sugarActive && !lp.starActive && !lp.megaActive ? 'sugar_rush' : 'power_contact';
+            this.abilitySystem?._wreckCop?.(cop, -nx * 44, 25, -nz * 44, lp, cause, context);
             continue;
           }
 
@@ -1635,6 +1838,25 @@ export class Simulation {
         if (dist < minD) {
           const nx = dist > 0.001 ? dx / dist : 1;
           const nz = dist > 0.001 ? dz / dist : 0;
+          if (lp.sugarActive) {
+            // Sugar Cop-Bowling flings civilian traffic sky-high without slowing player!
+            car.vx = -nx * 44;
+            car.vz = -nz * 44;
+            car.vy = 18;
+            car.spinTimer = 1.6;
+            car.panic = true;
+            car._flungCooldown = 0.8;
+            lp.score += 45;
+            this._emit({
+              type: 'smash',
+              x: car.x,
+              y: (car.y || 0) + 0.8,
+              z: car.z,
+              color: '#f472b6',
+              intensity: 0.95,
+            });
+            continue;
+          }
           const overlap = minD - dist;
           lp.x += nx * overlap * 0.4;
           lp.z += nz * overlap * 0.4;
@@ -1684,8 +1906,9 @@ export class Simulation {
       return;
     }
 
-    // BUSTED check: speed < 6 while >= 1 active ground cop within 6.5 units (unless Star or Mega)
-    const immuneToArrest = lp.starActive || lp.megaActive;
+    // BUSTED check: speed < 6 while >= 1 active ground cop within 6.5 units (unless Star, Mega, or Sugar Rush)
+    const immuneToArrest = lp.starActive || lp.megaActive || lp.sugarActive;
+    if (lp.sugarActive) lp.bustedProgress = 0;
     let arrestingCops = 0;
     if (!immuneToArrest && lp.speed < 6.0) {
       for (let i = 0; i < this.cops.length; i++) {
