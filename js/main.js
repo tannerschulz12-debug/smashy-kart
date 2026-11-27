@@ -1549,7 +1549,6 @@ class SmashyKartApp {
     document.getElementById('hud').classList.remove('hidden');
 
     this.mode = 'playing_solo';
-    this._showChaosToast('🚓 OUTRUN THE COPS & GRAB ? BOXES!');
   }
 
   _beginPartyCountdown(msg) {
@@ -1620,11 +1619,10 @@ class SmashyKartApp {
     document.getElementById('spectator-bar').classList.add('hidden');
     document.getElementById('touch-controls').classList.remove('hidden');
     document.getElementById('hud').classList.remove('hidden');
-    document.getElementById('survivor-strip').classList.remove('hidden');
+    document.getElementById('survivor-strip').classList.add('hidden');
 
     this.countdownLeft = msg.countdownSec || 3.0;
     this.mode = 'countdown';
-    this._updateSurvivorStrip();
   }
 
   _exitToMainMenu() {
@@ -1706,7 +1704,18 @@ class SmashyKartApp {
     if (this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'spectating') {
       if (this.net.roomCode) {
         const snaps = this.net.getInterpolatedRemotePlayers(nowMs);
-        this.sim.syncRemotePlayers(snaps, this.net.playerId);
+        const activeIds = this.net.roomState?.players
+          ? new Set(this.net.roomState.players.map((p) => p.id))
+          : null;
+        this.sim.syncRemotePlayers(snaps, this.net.playerId, activeIds);
+      }
+
+      let spectateTarget = null;
+      if (this.mode === 'spectating') {
+        const aliveRemotes = this.sim.remotePlayers.filter((rp) => rp.alive !== false);
+        if (aliveRemotes.length > 0) {
+          spectateTarget = aliveRemotes[this.spectateIndex % aliveRemotes.length];
+        }
       }
 
       const input =
@@ -1714,7 +1723,7 @@ class SmashyKartApp {
           ? { left: false, right: false, brake: false, useItem: false, horn: false, steerAxis: null }
           : this._gatherGameplayInput();
 
-      const events = this.sim.update(dt, input, this._elapsedTime);
+      const events = this.sim.update(dt, input, this._elapsedTime, spectateTarget);
       for (const ev of events) {
         this._handleSimEvent(ev);
       }
@@ -1748,7 +1757,6 @@ class SmashyKartApp {
       }
 
       this._updateHud();
-      if (this.net.roomCode) this._updateSurvivorStrip();
     }
   }
 
@@ -1788,8 +1796,9 @@ class SmashyKartApp {
       }
       case 'roulette_lock': {
         this.sound.playEvent('roulette_lock', 1.0);
-        const ab = ABILITIES.find((a) => a.id === ev.abilityId);
-        if (ab) this._showChaosToast(`${ab.icon} GOT ${ab.name.toUpperCase()}!`);
+        const slotEl = document.getElementById('hud-item-slot');
+        slotEl?.classList.add('locked-pop');
+        setTimeout(() => slotEl?.classList.remove('locked-pop'), 420);
         break;
       }
       case 'item_used': {
@@ -1822,7 +1831,7 @@ class SmashyKartApp {
         break;
       }
       case 'star_up': {
-        this._showChaosToast(`⭐ ${ev.stars}-STAR WANTED: ${(ev.label || 'BACKUP INBOUND').toUpperCase()}!`);
+        this._showChaosToast(`⭐ ${ev.stars}★ ${ev.label || 'Backup Inbound'}`);
         break;
       }
       case 'horn': {
@@ -1873,13 +1882,10 @@ class SmashyKartApp {
       document.getElementById('touch-controls').classList.add('hidden');
 
       const aliveRemotes = this.sim.remotePlayers.filter((rp) => rp.alive !== false);
-      if (aliveRemotes.length >= 2) {
-        // Enter live Spectator Cam while remaining friends battle to see who lasts longest!
-        this.mode = 'spectating';
+      this.mode = 'spectating';
+      if (aliveRemotes.length >= 1) {
         document.getElementById('spectator-bar').classList.remove('hidden');
         document.getElementById('spectator-status').textContent = lp?.eliminatedText || 'YOU ARE OUT!';
-      } else {
-        this.mode = 'spectating';
       }
       return;
     }
@@ -2084,7 +2090,7 @@ class SmashyKartApp {
     const el = document.getElementById('chaos-toast');
     el.textContent = text;
     el.classList.remove('hidden');
-    this.toastTimer = 2.6;
+    this.toastTimer = 1.75;
   }
 
   _renderFrame(dt) {
@@ -2094,7 +2100,11 @@ class SmashyKartApp {
       if (aliveRemotes.length > 0) {
         const target = aliveRemotes[this.spectateIndex % aliveRemotes.length];
         focusEntity = target;
-        document.getElementById('spectator-watching').textContent = `Watching ${target.name || 'Survivor'}`;
+        const realName =
+          target.name ||
+          this.net.roomState?.players?.find((p) => p.id === target.id)?.name ||
+          'Player';
+        document.getElementById('spectator-watching').textContent = `Watching ${realName}`;
       }
     }
 
@@ -2127,10 +2137,10 @@ class SmashyKartApp {
       this._elapsedTime
     );
 
-    this._renderFloatingNametags();
+    this._renderFloatingNametags(focusEntity);
   }
 
-  _renderFloatingNametags() {
+  _renderFloatingNametags(focusEntity) {
     const container = document.getElementById('world-labels');
     if (this.mode === 'attract' || this.sim.remotePlayers.length === 0) {
       if (container.innerHTML !== '') container.innerHTML = '';
@@ -2140,62 +2150,62 @@ class SmashyKartApp {
     const vw = window.innerWidth || 390;
     const vh = window.innerHeight || 844;
     const pad = {
-      left: 62,
-      right: 68,
-      top: 108,
-      bottom: 106,
+      left: 8,
+      right: 8,
+      top: 74,
+      bottom: 10,
     };
 
-    const refX = this.sim.localPlayer?.x ?? 0;
-    const refZ = this.sim.localPlayer?.z ?? 0;
     const placedOffscreen = [];
     let html = '';
 
     for (const rp of this.sim.remotePlayers) {
       if (rp.alive === false) continue;
+      if (this.mode === 'spectating' && focusEntity && rp.id === focusEntity.id) {
+        // Still label the car you're spectating right above their roof
+      }
       const wp = this.renderer.projectWaypoint(
         rp.x,
         (rp.y || 0) + 4.1 * (rp.scale || 1),
         rp.z,
         pad
       );
-      const imgUrl = this._safeImgSrc(this.remoteAvatarCache.get(rp.avatarId || `net_${rp.id}`));
+      const rosterPlayer = this.net.roomState?.players?.find((p) => p.id === rp.id);
+      const username = rp.name && rp.name !== 'Friend' ? rp.name : rosterPlayer?.name || rp.name || 'Player';
       const borderCol = /^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '')
         ? rp.primaryColor
         : '#facc15';
-      const distMeters = Math.round(Math.hypot(rp.x - refX, rp.z - refZ));
 
       if (wp.onScreen) {
         html += `
           <div class="player-tag" style="left:${wp.x.toFixed(1)}px;top:${wp.y.toFixed(1)}px;border-color:${borderCol}">
-            ${imgUrl ? `<img src="${imgUrl}" alt="" />` : ''}
-            <span>${this._escapeHtml(rp.name || 'Friend')}</span>
+            <span>${this._escapeHtml(username)}</span>
           </div>
         `;
       } else {
-        // Off-screen directional corner/edge tracker — nudge gently if multiple friends share the same corner!
+        // Flush outer-edge directional username tag (anchored inward from whichever screen edge it touches!)
         let tx = wp.x;
         let ty = wp.y;
         for (let pass = 0; pass < placedOffscreen.length; pass++) {
           const prev = placedOffscreen[pass];
-          if (Math.abs(tx - prev.x) < 78 && Math.abs(ty - prev.y) < 32) {
-            if (ty + 34 <= vh - pad.bottom) {
-              ty += 34;
-            } else if (ty - 34 >= pad.top) {
-              ty -= 34;
+          if (Math.abs(tx - prev.x) < 70 && Math.abs(ty - prev.y) < 28) {
+            if (ty + 28 <= vh - pad.bottom) {
+              ty += 28;
+            } else if (ty - 28 >= pad.top) {
+              ty -= 28;
             } else {
-              tx = Math.max(pad.left, Math.min(vw - pad.right, tx + (tx < vw * 0.5 ? 82 : -82)));
+              tx = Math.max(pad.left, Math.min(vw - pad.right, tx + (tx < vw * 0.5 ? 74 : -74)));
             }
           }
         }
         placedOffscreen.push({ x: tx, y: ty });
+        const rxPct = Math.round(((tx - pad.left) / Math.max(1, vw - pad.left - pad.right)) * 100);
+        const ryPct = Math.round(((ty - pad.top) / Math.max(1, vh - pad.top - pad.bottom)) * 100);
         const deg = Math.round((wp.angleRad * 180) / Math.PI);
         html += `
-          <div class="player-tag offscreen" style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;border-color:${borderCol}">
+          <div class="player-tag offscreen" style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;transform:translate(-${rxPct}%, -${ryPct}%);border-color:${borderCol}">
             <span class="tag-arrow" style="transform:rotate(${deg}deg)">➤</span>
-            ${imgUrl ? `<img src="${imgUrl}" alt="" />` : ''}
-            <span>${this._escapeHtml(rp.name || 'Friend')}</span>
-            <span class="tag-dist">${distMeters}m</span>
+            <span>${this._escapeHtml(username)}</span>
           </div>
         `;
       }
