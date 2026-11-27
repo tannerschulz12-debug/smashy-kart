@@ -68,7 +68,14 @@ async function runInternetPartyTest() {
     assert.equal(cd1.seed, 999111);
     assert.equal(cd2.seed, 999111);
 
-    // 1-hop peer bump & state relay
+    // 1-hop peer state + bump relay (verify real username is preserved in player_state, NEVER "Friend"!)
+    const stateRecvP = waitForEvent(phone2, 'player_state');
+    phone1.sendPlayerState({ name: 'Tanner', x: 14, y: 0, z: 28, vx: 12, vy: 0, vz: 30, angle: 0.2, speed: 32 }, true);
+    const stateRecv = await stateRecvP;
+    assert.equal(stateRecv.name, 'Tanner', 'Remote player_state must carry real username');
+    const interp = phone2.getInterpolatedRemotePlayers();
+    assert.equal(interp[0]?.name, 'Tanner', 'Interpolated remote snapshot must preserve real username');
+
     const bumpP = waitForEvent(phone2, 'pvp_bump');
     phone1.sendPvpBump({ fromId: phone1.playerId, fromName: 'Tanner', vx: 30, vy: 6, vz: -12 });
     const bump = await bumpP;

@@ -172,12 +172,12 @@ async function runAllChecks() {
   const pad = { left: 60, right: 60, top: 100, bottom: 100 };
   const wpOnScreen = mockRenderer.projectWaypoint(0, 2, 5, pad);
   assert.equal(wpOnScreen.onScreen, true, 'Close friend in front should be onScreen');
-  const wpBehind = mockRenderer.projectWaypoint(0, 2, -400, pad);
+  const wpBehind = mockRenderer.projectWaypoint(0, 2, -400, { left: 10, right: 10, top: 76, bottom: 12 });
   assert.equal(wpBehind.onScreen, false, 'Friend 400m behind should be offScreen');
-  assert.equal(Math.round(wpBehind.y), 844 - 100, 'Friend directly behind in chase cam must pin to bottom edge');
-  const wpFarEast = mockRenderer.projectWaypoint(-400, 2, 20, pad);
+  assert.equal(Math.round(wpBehind.y), 844 - 12, 'Friend directly behind in chase cam must pin flush to bottom edge');
+  const wpFarEast = mockRenderer.projectWaypoint(-400, 2, 20, { left: 10, right: 10, top: 76, bottom: 12 });
   assert.equal(wpFarEast.onScreen, false);
-  assert.ok(wpFarEast.x >= 60 && wpFarEast.x <= 330, 'Off-screen X must stay clamped inside safe border');
+  assert.ok(wpFarEast.x >= 10 && wpFarEast.x <= 380, 'Off-screen X must stay clamped inside outer rim');
 
   console.log('2. Checking all 12 vehicle blueprints...');
   for (const v of VEHICLES) {

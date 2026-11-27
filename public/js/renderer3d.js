@@ -1362,11 +1362,14 @@ export class Renderer3D {
       this.camFov = ((isBoost ? 56 : 50) * Math.PI) / 180;
     } else {
       // Authentic Smashy Road angled isometric-perspective overhead camera!
-      const leadX = clamp(vx * 0.26, -12, 12);
-      const leadZ = clamp(vz * 0.26, -12, 12);
-      desiredTargetX = fx + leadX;
+      const rawLeadX = clamp(vx * 0.22, -10, 10);
+      const rawLeadZ = clamp(vz * 0.22, -10, 10);
+      const leadBlend = 1.0 - Math.exp(-Math.max(0.001, dt) * 7.0);
+      this.smoothLeadX = (this.smoothLeadX || 0) + (rawLeadX - (this.smoothLeadX || 0)) * leadBlend;
+      this.smoothLeadZ = (this.smoothLeadZ || 0) + (rawLeadZ - (this.smoothLeadZ || 0)) * leadBlend;
+      desiredTargetX = fx + this.smoothLeadX;
       desiredTargetY = fy * 0.45;
-      desiredTargetZ = fz + leadZ;
+      desiredTargetZ = fz + this.smoothLeadZ;
 
       desiredEyeX = desiredTargetX - 21.0 * zoom;
       desiredEyeY = desiredTargetY + 46.0 * zoom;
@@ -1466,20 +1469,20 @@ export class Renderer3D {
   projectWaypoint(x, y, z, pad = {}) {
     const w = this.cssWidth || 390;
     const h = this.cssHeight || 844;
-    const minX = pad.left ?? 56;
-    const maxX = Math.max(minX + 20, w - (pad.right ?? 56));
-    const minY = pad.top ?? 102;
-    const maxY = Math.max(minY + 20, h - (pad.bottom ?? 96));
+    const minX = pad.left ?? 10;
+    const maxX = Math.max(minX + 20, w - (pad.right ?? 10));
+    const minY = pad.top ?? 76;
+    const maxY = Math.max(minY + 20, h - (pad.bottom ?? 12));
 
     const direct = this.projectToScreen(x, y, z);
     if (
       direct.visible &&
-      direct.x >= minX &&
-      direct.x <= maxX &&
-      direct.y >= minY &&
-      direct.y <= maxY
+      direct.x >= 18 &&
+      direct.x <= w - 18 &&
+      direct.y >= 54 &&
+      direct.y <= h - 18
     ) {
-      return { x: direct.x, y: direct.y, onScreen: true, angleRad: 0 };
+      return { x: direct.x, y: direct.y, onScreen: true, angleRad: 0, rx: 0.5, ry: 1.0 };
     }
 
     // Off-screen or behind camera: cast a guaranteed-front ray from camTarget toward (x, y, z)
@@ -1515,8 +1518,10 @@ export class Renderer3D {
     const edgeX = clamp(cx + vx * t, minX, maxX);
     const edgeY = clamp(cy + vy * t, minY, maxY);
     const angleRad = Math.atan2(vy, vx);
+    const rx = clamp((edgeX - minX) / Math.max(1, maxX - minX), 0, 1);
+    const ry = clamp((edgeY - minY) / Math.max(1, maxY - minY), 0, 1);
 
-    return { x: edgeX, y: edgeY, onScreen: false, angleRad };
+    return { x: edgeX, y: edgeY, onScreen: false, angleRad, rx, ry };
   }
 
   // ==================== Particle & Skid FX ====================

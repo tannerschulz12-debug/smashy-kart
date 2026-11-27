@@ -1639,21 +1639,32 @@ export class MultiplayerClient {
 
   _recordRemoteSnapshot(playerId, state) {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const rosterEntry = this.roomState?.players?.find((p) => p.id === playerId) || null;
     let bucket = this.remoteSnapshots.get(playerId);
+    const enriched = {
+      ...state,
+      id: playerId,
+      name: state.name || bucket?.latest?.name || rosterEntry?.name || 'Player',
+      avatarId: state.avatarId || bucket?.latest?.avatarId || rosterEntry?.avatarId || `net_${playerId}`,
+      primaryColor: state.primaryColor || bucket?.latest?.primaryColor || rosterEntry?.primaryColor,
+      accentColor: state.accentColor || bucket?.latest?.accentColor || rosterEntry?.accentColor,
+      vehicleId: state.vehicleId || bucket?.latest?.vehicleId || rosterEntry?.vehicleId,
+      characterMode: state.characterMode || bucket?.latest?.characterMode || rosterEntry?.characterMode,
+    };
     if (!bucket) {
-      bucket = { history: [], latest: state };
+      bucket = { history: [], latest: enriched };
       this.remoteSnapshots.set(playerId, bucket);
     }
-    bucket.latest = state;
-    bucket.history.push({ t: now, state });
-    if (bucket.history.length > 8) {
+    bucket.latest = enriched;
+    bucket.history.push({ t: now, state: enriched });
+    if (bucket.history.length > 14) {
       bucket.history.shift();
     }
   }
 
   getInterpolatedRemotePlayers(nowMs) {
     const now = nowMs ?? (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    const renderTime = now - 75;
+    const renderTime = now - 115; // 115ms jitter buffer eliminates cellular/Wi-Fi spectator stutter!
     const results = [];
 
     for (const [id, bucket] of this.remoteSnapshots.entries()) {
@@ -1663,11 +1674,16 @@ export class MultiplayerClient {
 
       if (hist.length === 1 || renderTime >= hist[hist.length - 1].t) {
         const last = hist[hist.length - 1];
-        const extrapSec = Math.min(0.12, Math.max(0, (renderTime - last.t) / 1000));
+        const extrapSec = Math.min(0.3, Math.max(0, (renderTime - last.t) / 1000));
+        const damp = Math.pow(0.94, extrapSec * 10);
+        const lvx = (last.state.vx || 0) * damp;
+        const lvz = (last.state.vz || 0) * damp;
         results.push({
           ...last.state,
-          x: last.state.x + (last.state.vx || 0) * extrapSec,
-          z: last.state.z + (last.state.vz || 0) * extrapSec,
+          vx: lvx,
+          vz: lvz,
+          x: last.state.x + lvx * extrapSec,
+          z: last.state.z + lvz * extrapSec,
         });
         continue;
       }
@@ -1688,8 +1704,16 @@ export class MultiplayerClient {
       while (dAngle > Math.PI) dAngle -= Math.PI * 2;
       while (dAngle < -Math.PI) dAngle += Math.PI * 2;
 
+      const ivx = (a.state.vx || 0) + ((b.state.vx || 0) - (a.state.vx || 0)) * t;
+      const ivy = (a.state.vy || 0) + ((b.state.vy || 0) - (a.state.vy || 0)) * t;
+      const ivz = (a.state.vz || 0) + ((b.state.vz || 0) - (a.state.vz || 0)) * t;
+
       results.push({
         ...b.state,
+        vx: ivx,
+        vy: ivy,
+        vz: ivz,
+        speed: Math.hypot(ivx, ivz),
         x: a.state.x + (b.state.x - a.state.x) * t,
         y: (a.state.y || 0) + ((b.state.y || 0) - (a.state.y || 0)) * t,
         z: a.state.z + (b.state.z - a.state.z) * t,
@@ -1818,6 +1842,7 @@ export class MultiplayerClient {
     this._sendRaw({
       type: 'player_state',
       state: {
+        name: String(player.name || this._lastProfile?.name || 'Player').slice(0, 16),
         x: Number(player.x.toFixed(2)),
         y: Number((player.y || 0).toFixed(2)),
         z: Number(player.z.toFixed(2)),

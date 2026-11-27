@@ -314,7 +314,7 @@ export class Simulation {
     };
   }
 
-  syncRemotePlayers(remoteSnapshots, localId = this.localPlayer?.id) {
+  syncRemotePlayers(remoteSnapshots, localId = this.localPlayer?.id, activeRosterIds = null) {
     if (!remoteSnapshots) return this.remotePlayers;
     const list = Array.isArray(remoteSnapshots)
       ? remoteSnapshots
@@ -322,13 +322,11 @@ export class Simulation {
         ? Array.from(remoteSnapshots.values())
         : Object.values(remoteSnapshots);
 
-    const seen = new Set();
     for (let i = 0; i < list.length; i++) {
       const snap = list[i];
       if (!snap) continue;
       const id = snap.id || snap.playerId;
       if (!id || id === localId) continue;
-      seen.add(id);
 
       let rp = this._remoteById.get(id);
       const veh = VEHICLES.find((v) => v.id === snap.vehicleId) || VEHICLES[0];
@@ -338,7 +336,7 @@ export class Simulation {
       if (!rp) {
         rp = {
           id,
-          name: snap.name || 'Friend',
+          name: snap.name || 'Player',
           isLocal: false,
           isRemote: true,
           characterMode: mode,
@@ -420,8 +418,10 @@ export class Simulation {
       }
     }
 
-    for (const id of this._remoteById.keys()) {
-      if (!seen.has(id)) this._remoteById.delete(id);
+    if (activeRosterIds instanceof Set) {
+      for (const id of this._remoteById.keys()) {
+        if (!activeRosterIds.has(id)) this._remoteById.delete(id);
+      }
     }
 
     this.remotePlayers = Array.from(this._remoteById.values());
@@ -429,22 +429,24 @@ export class Simulation {
   }
 
   _interpolateRemotePlayers(dt) {
-    const alpha = Math.min(1, dt * 14);
+    const posBlend = 1.0 - Math.exp(-Math.max(0.001, dt) * 18.0);
+    const angBlend = 1.0 - Math.exp(-Math.max(0.001, dt) * 16.0);
     for (let i = 0; i < this.remotePlayers.length; i++) {
       const rp = this.remotePlayers[i];
-      const predX = rp.targetX + rp.vx * 0.03;
-      const predZ = rp.targetZ + rp.vz * 0.03;
-      const jumpDist = Math.hypot(predX - rp.x, predZ - rp.z);
-      if (jumpDist > 45) {
+      const jumpDist = Math.hypot(rp.targetX - rp.x, rp.targetZ - rp.z);
+      if (jumpDist > 55) {
         rp.x = rp.targetX;
         rp.y = rp.targetY;
         rp.z = rp.targetZ;
         rp.angle = rp.targetAngle;
       } else {
-        rp.x += (predX - rp.x) * alpha;
-        rp.y += (rp.targetY - rp.y) * alpha;
-        rp.z += (predZ - rp.z) * alpha;
-        rp.angle = lerpAngle(rp.angle, rp.targetAngle, alpha);
+        // Smooth velocity feed-forward + exponential error convergence (zero packet-boundary stutter!)
+        rp.x += rp.vx * dt * 0.22;
+        rp.z += rp.vz * dt * 0.22;
+        rp.x += (rp.targetX - rp.x) * posBlend;
+        rp.y += (rp.targetY - rp.y) * posBlend;
+        rp.z += (rp.targetZ - rp.z) * posBlend;
+        rp.angle = lerpAngle(rp.angle, rp.targetAngle, angBlend);
       }
       rp.wheelSpin = (rp.wheelSpin || 0) + rp.speed * dt * 0.6;
       rp.stridePhase = (rp.stridePhase || 0) + rp.speed * dt * 0.55;
@@ -682,7 +684,7 @@ export class Simulation {
     return Math.min(1, bias);
   }
 
-  update(dt, input = {}, time = 0) {
+  update(dt, input = {}, time = 0, spectateTarget = null) {
     const safeDt = Math.max(0.0001, Math.min(0.05, Number(dt) || 0.016));
     this.events = [];
 
@@ -741,17 +743,18 @@ export class Simulation {
       lp.drifting = false;
     }
 
-    // 4. Stream world around local player
-    this.world?.update?.(safeDt, lp.x, lp.z);
-
-    // 5. Interpolate remote players & apply PvP collisions
+    // 4. Interpolate remote players & apply PvP collisions
     this._interpolateRemotePlayers(safeDt);
     this.applyPvPCollision(lp, this.remotePlayers);
 
+    // 5. Stream world, traffic & police around active focus (spectated survivor when eliminated!)
+    const focusAnchor = !lp.alive && spectateTarget ? spectateTarget : lp;
+    this.world?.update?.(safeDt, focusAnchor.x, focusAnchor.z);
+
     // 6. Update Wanted level, Police AI, Civilian Traffic, Projectiles & Hazards
     this._updateWantedStars();
-    this._updateTraffic(safeDt, lp, context);
-    this._updateCops(safeDt, lp, context);
+    this._updateTraffic(safeDt, focusAnchor, context);
+    this._updateCops(safeDt, focusAnchor, context);
     this._updateHazards(safeDt);
     this.abilitySystem?.updateProjectiles?.(safeDt, context);
 
