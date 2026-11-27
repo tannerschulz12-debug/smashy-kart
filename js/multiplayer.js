@@ -680,7 +680,6 @@ class MqttWssClient {
   }
 
   publish(topic, obj) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const tBytes = textEncoder.encode(topic);
     const pBytes = textEncoder.encode(JSON.stringify(obj));
     const body = concatUint8(
@@ -689,11 +688,50 @@ class MqttWssClient {
       pBytes
     );
     const pkt = concatUint8(new Uint8Array([0x30, ...encodeMqttVarLen(body.length)]), body);
-    this.ws.send(pkt);
+    if (!this._txQueue) this._txQueue = [];
+    this._txQueue.push(pkt);
+    this._drainTxQueue();
+  }
+
+  _drainTxQueue() {
+    if (this._txTimer) return;
+    if (!this._txQueue || this._txQueue.length === 0) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const now = Date.now();
+    const minGap = (this._lastLargeSendAt && now - this._lastLargeSendAt < 45) ? 35 : 14;
+    const elapsed = now - (this._lastSendAt || 0);
+    if (elapsed < minGap) {
+      this._txTimer = setTimeout(() => {
+        this._txTimer = null;
+        this._drainTxQueue();
+      }, minGap - elapsed);
+      return;
+    }
+
+    const pkt = this._txQueue.shift();
+    this._lastSendAt = now;
+    if (pkt.length > 4096) this._lastLargeSendAt = now;
+    try {
+      this.ws.send(pkt);
+    } catch {
+      // ignore closed socket race
+    }
+    if (this._txQueue.length > 0) {
+      this._txTimer = setTimeout(() => {
+        this._txTimer = null;
+        this._drainTxQueue();
+      }, pkt.length > 4096 ? 35 : 14);
+    }
   }
 
   close() {
     this._stopPing();
+    if (this._txTimer) {
+      clearTimeout(this._txTimer);
+      this._txTimer = null;
+    }
+    this._txQueue = [];
     this._subWaiters.clear();
     if (this.ws) {
       const w = this.ws;
@@ -862,6 +900,7 @@ export class MultiplayerClient {
 
   async connect(explicitUrl) {
     if (this._useCloudMode() && !explicitUrl) {
+      this._shouldReconnect = true;
       if (this.mqtt && this.mqtt.connected) {
         this.connected = true;
         return this;
@@ -872,11 +911,24 @@ export class MultiplayerClient {
           () => {
             this.connected = false;
             this._emit('disconnected', {});
+            if (this._shouldReconnect && this.roomCode) {
+              this._reconnectTimer = setTimeout(async () => {
+                if (!this._shouldReconnect || !this.roomCode) return;
+                try {
+                  await this.connect();
+                  if (this.mqtt?.connected && this.roomCode) {
+                    await this.mqtt.subscribe(this._roomTopic(this.roomCode));
+                    this.mqtt._drainTxQueue?.();
+                  }
+                } catch {}
+              }, 650);
+            }
           }
         );
       }
       await this.mqtt.connect(this.cloudBrokers);
       this.connected = true;
+      this.mqtt._drainTxQueue?.();
       this._emit('connected', { url: this.mqtt.brokerUrl, cloud: true });
       this._emit('welcome', { type: 'welcome', playerId: this.playerId });
       return this;
