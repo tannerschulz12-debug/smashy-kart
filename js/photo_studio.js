@@ -2,6 +2,7 @@
 const DB_NAME = 'smashy_kart_people_v1';
 const STORE_NAME = 'people';
 const CUTOUT_SIZE = 256;
+const SESSION_MAX_DIM = 384;
 
 const STARTER_SPECS = [
   {
@@ -793,6 +794,258 @@ export class PhotoStudio {
 
     const finalCanvas = shape === 'full' ? canvas : applyStickerOutline(canvas, 3);
     return exportCompactDataUrl(finalCanvas, 32000);
+  }
+
+  async prepareCutoutSession(imgSource, { magicCutout = true, tolerance = 38 } = {}) {
+    const drawable = await resolveDrawableImage(imgSource);
+    const origW = drawable.naturalWidth || drawable.videoWidth || drawable.width || CUTOUT_SIZE;
+    const origH = drawable.naturalHeight || drawable.videoHeight || drawable.height || CUTOUT_SIZE;
+    const scale = Math.max(origW, origH) > SESSION_MAX_DIM
+      ? SESSION_MAX_DIM / Math.max(1, origW, origH)
+      : 1;
+    const w = Math.max(1, Math.round(origW * scale));
+    const h = Math.max(1, Math.round(origH * scale));
+
+    const rawCanvas = createCanvas2D(w, h);
+    if (!rawCanvas) {
+      return {
+        sourceCanvas: null,
+        rawCanvas: null,
+        width: w,
+        height: h,
+        magicCutout: Boolean(magicCutout),
+        tolerance: Number(tolerance) ?? 38,
+        fallbackSrc: typeof imgSource === 'string' ? imgSource : '',
+      };
+    }
+
+    const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true });
+    rawCtx.clearRect(0, 0, w, h);
+    rawCtx.drawImage(drawable, 0, 0, w, h);
+
+    if (!magicCutout) {
+      return {
+        sourceCanvas: rawCanvas,
+        rawCanvas,
+        width: w,
+        height: h,
+        magicCutout: false,
+        tolerance: Number(tolerance) ?? 38,
+      };
+    }
+
+    const workCanvas = createCanvas2D(w, h);
+    const ctx = workCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(rawCanvas, 0, 0, w, h);
+
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+    const total = w * h;
+    const cleanTol = Math.max(4, Math.min(95, Number(tolerance) ?? 38));
+
+    const labL = new Float32Array(total);
+    const labA = new Float32Array(total);
+    const labB = new Float32Array(total);
+    for (let p = 0, i = 0; p < total; p++, i += 4) {
+      if (data[i + 3] > 8) {
+        const [l, a, b] = rgbToLab(data[i], data[i + 1], data[i + 2]);
+        labL[p] = l;
+        labA[p] = a;
+        labB[p] = b;
+      }
+    }
+
+    const visited = new Uint8Array(total);
+    const bgMask = new Uint8Array(total);
+    const queue = new Int32Array(total);
+    let qHead = 0;
+    let qTail = 0;
+    let hadOpaqueBorderSeed = false;
+    const seeds = [];
+
+    const trySeed = (sx, sy) => {
+      if (sx < 0 || sx >= w || sy < 0 || sy >= h) return;
+      const idx = sy * w + sx;
+      if (visited[idx]) return;
+      if (data[idx * 4 + 3] <= 8) {
+        visited[idx] = 1;
+        bgMask[idx] = 1;
+        return;
+      }
+      hadOpaqueBorderSeed = true;
+      visited[idx] = 1;
+      bgMask[idx] = 1;
+      queue[qTail++] = idx;
+      if (seeds.length < 28) {
+        seeds.push([labL[idx], labA[idx], labB[idx]]);
+      }
+    };
+
+    const stepX = Math.max(2, Math.floor(w / 64));
+    const stepY = Math.max(2, Math.floor(h / 64));
+    for (let x = 0; x < w; x += stepX) {
+      trySeed(x, 0);
+      if (h > 2) trySeed(x, 1);
+    }
+    const maxSideY = Math.floor(h * 0.8);
+    for (let y = 0; y <= maxSideY; y += stepY) {
+      trySeed(0, y);
+      trySeed(w - 1, y);
+    }
+
+    let removedCount = 0;
+    if (hadOpaqueBorderSeed && seeds.length > 0) {
+      const seedTol = cleanTol;
+      const stepTol = Math.max(8, cleanTol * 0.44);
+      const neighborOffsets = [-1, 1, -w, w];
+
+      while (qHead < qTail) {
+        const cur = queue[qHead++];
+        const cx = cur % w;
+        const cl = labL[cur];
+        const ca = labA[cur];
+        const cb = labB[cur];
+
+        for (let d = 0; d < 4; d++) {
+          const off = neighborOffsets[d];
+          if ((off === -1 && cx === 0) || (off === 1 && cx === w - 1)) continue;
+          const next = cur + off;
+          if (next < 0 || next >= total || visited[next]) continue;
+          if (data[next * 4 + 3] <= 8) {
+            visited[next] = 1;
+            bgMask[next] = 1;
+            continue;
+          }
+
+          const nl = labL[next];
+          const na = labA[next];
+          const nb = labB[next];
+
+          if (labDistance(cl, ca, cb, nl, na, nb) <= stepTol) {
+            let minSeedDist = Infinity;
+            for (let s = 0; s < seeds.length; s++) {
+              const sd = labDistance(seeds[s][0], seeds[s][1], seeds[s][2], nl, na, nb);
+              if (sd < minSeedDist) minSeedDist = sd;
+            }
+            if (minSeedDist <= seedTol) {
+              visited[next] = 1;
+              bgMask[next] = 1;
+              queue[qTail++] = next;
+            }
+          }
+        }
+      }
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const p = y * w + x;
+          if (bgMask[p]) {
+            if (data[p * 4 + 3] > 0) removedCount++;
+            data[p * 4 + 3] = 0;
+          } else if (data[p * 4 + 3] > 0) {
+            let bgNeighbors = 0;
+            if (x > 0 && bgMask[p - 1]) bgNeighbors++;
+            if (x < w - 1 && bgMask[p + 1]) bgNeighbors++;
+            if (y > 0 && bgMask[p - w]) bgNeighbors++;
+            if (y < h - 1 && bgMask[p + w]) bgNeighbors++;
+            if (bgNeighbors >= 3) {
+              data[p * 4 + 3] = Math.round(data[p * 4 + 3] * 0.45);
+            } else if (bgNeighbors === 2) {
+              data[p * 4 + 3] = Math.round(data[p * 4 + 3] * 0.78);
+            }
+          }
+        }
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    // Apply crisp 3px white sticker outline once onto the cached session canvas
+    const sourceCanvas = removedCount > 0 ? applyStickerOutline(workCanvas, 3) : workCanvas;
+    return {
+      sourceCanvas,
+      rawCanvas,
+      width: w,
+      height: h,
+      magicCutout: true,
+      tolerance: cleanTol,
+    };
+  }
+
+  prepareEditableSource(imgSource, options = {}) {
+    return this.prepareCutoutSession(imgSource, options);
+  }
+
+  renderSessionPreview(
+    targetCanvas,
+    session,
+    { zoom = 1.1, offsetX = 0, offsetY = 0, shape = 'cutout', pixelOffsets = false, normalizedOffsets = false } = {}
+  ) {
+    if (!targetCanvas || !session) return false;
+    const src =
+      shape === 'full'
+        ? session.rawCanvas || session.sourceCanvas
+        : session.sourceCanvas || session.rawCanvas;
+    if (!src) return false;
+
+    const tw = targetCanvas.width || CUTOUT_SIZE;
+    const th = targetCanvas.height || CUTOUT_SIZE;
+    const size = Math.min(tw, th);
+    const ctx = targetCanvas.getContext('2d');
+    if (!ctx) return false;
+
+    const cleanZoom = Math.max(0.4, Math.min(4.0, Number(zoom) || 1.0));
+    const rawOffX = Number(offsetX) || 0;
+    const rawOffY = Number(offsetY) || 0;
+    const isNormalized =
+      normalizedOffsets === true ||
+      (pixelOffsets !== true && Math.abs(rawOffX) <= 1.0 && Math.abs(rawOffY) <= 1.0);
+    const panX = isNormalized ? rawOffX * (size * 0.5) : rawOffX;
+    const panY = isNormalized ? rawOffY * (size * 0.5) : rawOffY;
+
+    const srcW = session.width || src.width || CUTOUT_SIZE;
+    const srcH = session.height || src.height || CUTOUT_SIZE;
+    const pad = shape === 'full' ? 0 : 6;
+    const innerSize = size - pad * 2;
+    const coverScale = Math.max(innerSize / srcW, innerSize / srcH) * cleanZoom;
+    const drawW = srcW * coverScale;
+    const drawH = srcH * coverScale;
+    const dx = (tw - drawW) * 0.5 + panX;
+    const dy = (th - drawH) * 0.5 + panY;
+
+    ctx.clearRect(0, 0, tw, th);
+    ctx.save();
+    if (shape === 'circle') {
+      ctx.beginPath();
+      ctx.arc(tw * 0.5, th * 0.5, size * 0.5 - 8, 0, Math.PI * 2);
+      ctx.clip();
+    } else if (shape === 'cutout') {
+      ctx.beginPath();
+      ctx.roundRect(pad, pad, innerSize, innerSize, 18);
+      ctx.clip();
+    }
+    ctx.drawImage(src, dx, dy, drawW, drawH);
+    ctx.restore();
+
+    if (shape === 'circle') {
+      ctx.save();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(tw * 0.5, th * 0.5, size * 0.5 - 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    return true;
+  }
+
+  exportSessionDataUrl(session, opts = {}) {
+    if (!session) return '';
+    const outCanvas = createCanvas2D(CUTOUT_SIZE, CUTOUT_SIZE);
+    if (!outCanvas) {
+      return session.fallbackSrc || '';
+    }
+    this.renderSessionPreview(outCanvas, session, opts);
+    return exportCompactDataUrl(outCanvas, 32000);
   }
 
   getCopAvatarPool() {

@@ -20,6 +20,22 @@ const FLOATS_PER_INSTANCE = 13; // pos(3), scale(3), rot(3), color+emissive/alph
 const MAX_INSTANCES = 45000;
 const SHADOW_MAP_SIZE = 2048;
 const SHADOW_ORTHO_HALF = 96.0;
+const MAX_STATIC_CHUNK_CACHE = 260;
+
+// Vehicle-specific cockpit/roofline POV eye heights for tall trucks so windshields/roofs never obstruct POV!
+const POV_VEHICLE_EYE_Y = {
+  monster: 2.72,
+  van: 2.48,
+  pickup: 2.22,
+  dozer: 2.68,
+};
+
+function lerpAngle(a, b, t) {
+  let diff = (b - a + Math.PI) % (Math.PI * 2);
+  if (diff < 0) diff += Math.PI * 2;
+  diff -= Math.PI;
+  return a + diff * t;
+}
 
 // Sun direction chosen for classic 3-tone Smashy/Crossy isometric contrast:
 // Top (+Y) bright, South (-Z) warm sunlit, West (-X) cool sky-shaded, diagonal street shadows!
@@ -687,7 +703,22 @@ function buildChunkStaticInstanceData(chunk, world, biome) {
       // Raised sidewalk slab
       col.addBox(lotCX, 0.08, lotCZ, lotW + 4.4, 0.16, lotD + 4.4, biome.sidewalk);
 
-      if (district === 'stunt_park' || district === 'gas_station') {
+      if (district === 'airport') {
+        // Sleek dark airport stunt tarmac + white runway centerline, piano-key thresholds & neon edge lights!
+        col.addBox(lotCX, 0.13, lotCZ, lotW, 0.1, lotD, '#334155');
+        for (let rz = lotBounds.minZ + 4.5; rz <= lotBounds.maxZ - 4.5; rz += 6.8) {
+          col.addBox(lotCX, 0.19, rz, 0.42, 0.04, 3.4, '#f8fafc', 0, 0, 0, 0.25);
+          col.addBox(lotBounds.minX + 1.8, 0.21, rz, 0.34, 0.12, 0.34, '#22d3ee', 0, 0, 0, 0.92);
+          col.addBox(lotBounds.maxX - 1.8, 0.21, rz, 0.34, 0.12, 0.34, '#f472b6', 0, 0, 0, 0.92);
+        }
+        // Runway threshold piano keys
+        for (let tx = -12; tx <= 12; tx += 3.0) {
+          if (Math.abs(tx) < lotW * 0.44) {
+            col.addBox(lotCX + tx, 0.19, lotBounds.minZ + 2.2, 1.35, 0.04, 2.8, '#ffffff', 0, 0, 0, 0.2);
+            col.addBox(lotCX + tx, 0.19, lotBounds.maxZ - 2.2, 1.35, 0.04, 2.8, '#ffffff', 0, 0, 0, 0.2);
+          }
+        }
+      } else if (district === 'stunt_park' || district === 'gas_station') {
         col.addBox(lotCX, 0.13, lotCZ, lotW, 0.1, lotD, '#64748b');
       } else {
         // 2x2 subtle checkerboard grass/sand/snow sub-quadrants for crisp visual texture
@@ -729,21 +760,36 @@ function buildChunkStaticInstanceData(chunk, world, biome) {
     }
   }
 
-  // Ramps with bright yellow boost chevrons!
+  // Ramps with bright yellow (or pink/cyan mega-ramp!) boost chevrons!
   for (const ramp of chunk.ramps) {
     const slopeAngle = Math.atan2(ramp.height, ramp.length);
     const hyp = Math.hypot(ramp.length, ramp.height);
-    col.addBox(ramp.x, ramp.height * 0.5 - 0.16, ramp.z, ramp.w, 0.36, hyp, '#334155', ramp.angle, -slopeAngle, 0);
+    const isMegaRamp = ramp.height >= 4.5;
+    col.addBox(
+      ramp.x,
+      ramp.height * 0.5 - 0.16,
+      ramp.z,
+      ramp.w,
+      0.38,
+      hyp,
+      isMegaRamp ? '#1e293b' : '#334155',
+      ramp.angle,
+      -slopeAngle,
+      0
+    );
     // Support wedge base under high end
     const backX = ramp.x + ramp.dirX * (ramp.length * 0.35);
     const backZ = ramp.z + ramp.dirZ * (ramp.length * 0.35);
     col.addBox(backX, ramp.height * 0.42, backZ, ramp.w * 0.94, ramp.height * 0.84, ramp.length * 0.28, '#475569', ramp.angle);
-    // Yellow chevron stripes along ramp surface
-    for (const u of [-0.25, 0.05, 0.32]) {
-      const sy = ramp.height * (u + 0.5) + 0.05;
+    // Boost chevron stripes along ramp surface
+    const chevrons = isMegaRamp ? [-0.32, -0.08, 0.16, 0.38] : [-0.25, 0.05, 0.32];
+    for (let ci = 0; ci < chevrons.length; ci++) {
+      const u = chevrons[ci];
+      const sy = ramp.height * (u + 0.5) + 0.06;
       const sx = ramp.x + ramp.dirX * (ramp.length * u);
       const sz = ramp.z + ramp.dirZ * (ramp.length * u);
-      col.addBox(sx, sy, sz, ramp.w * 0.72, 0.06, 1.15, '#facc15', ramp.angle, -slopeAngle, 0, 0.45);
+      const chevCol = isMegaRamp ? (ci % 2 === 0 ? '#f472b6' : '#22d3ee') : '#facc15';
+      col.addBox(sx, sy, sz, ramp.w * 0.74, 0.07, 1.2, chevCol, ramp.angle, -slopeAngle, 0, isMegaRamp ? 0.82 : 0.45);
     }
   }
 
@@ -758,7 +804,7 @@ function buildChunkStaticInstanceData(chunk, world, biome) {
     }
   }
 
-  // Buildings (Skyscrapers, Houses, Desert Mesas, Diners, Snow Cabins)
+  // Buildings (Skyscrapers, Houses, Control Towers, Hangars, Desert Mesas, Diners, Snow Cabins)
   for (const b of chunk.buildings) {
     emitBuildingStaticBoxes(col, b);
   }
@@ -767,6 +813,35 @@ function buildChunkStaticInstanceData(chunk, world, biome) {
 }
 
 function emitBuildingStaticBoxes(col, b) {
+  if (b.style === 'control_tower') {
+    // Voxel Air-Traffic Control Tower: tapered concrete shaft + 360° cyan glass cab + spinning-look radar beacon!
+    const shaftH = b.height * 0.74;
+    const cabH = b.height * 0.18;
+    col.addBox(b.x, 2.2, b.z, b.w, 4.4, b.d, '#cbd5e1');
+    col.addBox(b.x, shaftH * 0.5, b.z, b.w * 0.62, shaftH, b.d * 0.62, b.color);
+    col.addBox(b.x, shaftH + 0.35, b.z, b.w * 1.12, 0.7, b.d * 1.12, '#dc2626');
+    col.addBox(b.x, shaftH + 0.7 + cabH * 0.5, b.z, b.w * 1.04, cabH, b.d * 1.04, '#38bdf8', 0, 0, 0, 0.45);
+    col.addBox(b.x, shaftH + 0.7 + cabH + 0.35, b.z, b.w * 1.16, 0.7, b.d * 1.16, '#ffffff');
+    // Radar mast + warning beacon
+    const topY = shaftH + 1.05 + cabH;
+    col.addBox(b.x, topY + 1.8, b.z, 0.48, 3.6, 0.48, '#94a3b8');
+    col.addBox(b.x, topY + 2.6, b.z, 3.6, 0.52, 0.42, '#f8fafc', 0.4, 0, 0, 0.35);
+    col.addBox(b.x, topY + 3.9, b.z, 0.75, 0.75, 0.75, '#ef4444', 0, 0, 0, 0.95);
+    return;
+  }
+
+  if (b.style === 'hangar') {
+    // Wide Airport Stunt Hangar with arched stepped roof & neon trim
+    const wallH = b.height * 0.72;
+    col.addBox(b.x, wallH * 0.5, b.z, b.w, wallH, b.d, b.color);
+    col.addBox(b.x, wallH + 0.55, b.z, b.w * 0.94, 1.1, b.d * 1.02, b.roofColor);
+    col.addBox(b.x, wallH + 1.45, b.z, b.w * 0.72, 0.9, b.d * 1.02, b.roofColor);
+    col.addBox(b.x, wallH + 0.15, b.z, b.w + 0.3, 0.28, b.d + 0.3, b.accentColor, 0, 0, 0, 0.55);
+    // Open-look hangar bay door recess
+    col.addBox(b.x - b.w * 0.5 - 0.06, wallH * 0.44, b.z, 0.14, wallH * 0.82, b.d * 0.76, '#0f172a');
+    return;
+  }
+
   if (b.style === 'mesa') {
     // Terraced Desert Sandstone Mesa!
     const h1 = b.height * 0.48;
@@ -866,7 +941,16 @@ export class Renderer3D {
     // Camera & matrices
     this.camEye = [0, 44, -36];
     this.camTarget = [0, 0, 0];
+    this.camUp = [0, 1, 0];
     this.camFov = (42 * Math.PI) / 180;
+    this.currentCameraMode = 'smashy';
+    this.povFocusId = null;
+    this.povFocusEntity = null;
+    this.povYaw = 0;
+    this.povPitch = 0;
+    this.povBank = 0;
+    this.currentPovFovDeg = 76;
+    this._lastCamMode = 'smashy';
     this.cameraInitialized = false;
     this.shakePhase = 0;
 
@@ -897,8 +981,9 @@ export class Renderer3D {
     this.skidQuadCount = 0;
     this.skidWriteCursor = 0;
 
-    // Chunk static cache keyed by `${seed}:${biomeId}:${chunk.key}`
+    // Chunk static cache (with LRU eviction; staticChunkCache & chunkStaticCache point to the same Map)
     this.chunkStaticCache = new Map();
+    this.staticChunkCache = this.chunkStaticCache;
     this.cachedSeedKey = '';
 
     if (gl) {
@@ -1100,7 +1185,18 @@ export class Renderer3D {
   }
 
   _createBuiltInTextures() {
-    if (typeof document === 'undefined') return;
+    if (typeof document === 'undefined') {
+      // Headless / mock-GL procedural RGBA fallback for built-in textures
+      const makeSolid = (r, g, b) => ({
+        width: 4,
+        height: 4,
+        data: new Uint8Array(Array.from({ length: 16 }, () => [r, g, b, 255]).flat()),
+      });
+      this._uploadGLTexture('default_hero', makeSolid(253, 230, 138));
+      this._uploadGLTexture('__item_question__', makeSolid(255, 190, 11));
+      this._uploadGLTexture('__item_sugar__', makeSolid(244, 114, 182));
+      return;
+    }
 
     // 1. Crisp illustrated 'default_hero' alpha-cutout driver character!
     const heroCanvas = document.createElement('canvas');
@@ -1184,6 +1280,62 @@ export class Renderer3D {
       qctx.fillText('?', 64, 68);
     }
     this.registerPhotoTexture('__item_question__', qCanvas);
+
+    // 3. Vibrant Cotton-Candy Pink & Electric Cyan Swirl '3X' Sugar Mystery Box texture!
+    const sCanvas = document.createElement('canvas');
+    sCanvas.width = 128;
+    sCanvas.height = 128;
+    const sctx = sCanvas.getContext('2d');
+    if (sctx) {
+      const sgrad = sctx.createLinearGradient(0, 0, 128, 128);
+      sgrad.addColorStop(0.0, '#f472b6');
+      sgrad.addColorStop(0.32, '#ec4899');
+      sgrad.addColorStop(0.55, '#fde047');
+      sgrad.addColorStop(0.78, '#22d3ee');
+      sgrad.addColorStop(1.0, '#06b6d4');
+      sctx.fillStyle = sgrad;
+      sctx.fillRect(0, 0, 128, 128);
+
+      // Diagonal candy-swirl stripes
+      sctx.save();
+      sctx.translate(64, 64);
+      for (let i = 0; i < 8; i++) {
+        sctx.rotate(Math.PI / 4);
+        sctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.28)' : 'rgba(34,211,238,0.24)';
+        sctx.beginPath();
+        sctx.moveTo(0, 0);
+        sctx.lineTo(92, -16);
+        sctx.lineTo(92, 16);
+        sctx.closePath();
+        sctx.fill();
+      }
+      sctx.restore();
+
+      // Sparkling neon inner frame
+      sctx.strokeStyle = '#ffffff';
+      sctx.lineWidth = 7;
+      sctx.strokeRect(8, 8, 112, 112);
+      sctx.strokeStyle = '#22d3ee';
+      sctx.lineWidth = 3;
+      sctx.strokeRect(14, 14, 100, 100);
+
+      // Bold '3X' lightning-candy emblem!
+      sctx.font = '900 56px system-ui, -apple-system, sans-serif';
+      sctx.textAlign = 'center';
+      sctx.textBaseline = 'middle';
+      sctx.lineWidth = 9;
+      sctx.strokeStyle = '#500724';
+      sctx.strokeText('3X', 64, 58);
+      sctx.fillStyle = '#ffffff';
+      sctx.fillText('3X', 64, 58);
+
+      sctx.font = '900 22px system-ui, -apple-system, sans-serif';
+      sctx.lineWidth = 5;
+      sctx.strokeText('SUGAR', 64, 98);
+      sctx.fillStyle = '#fde047';
+      sctx.fillText('SUGAR', 64, 98);
+    }
+    this.registerPhotoTexture('__item_sugar__', sCanvas);
   }
 
   _ensureFallbackAvatarTexture(avatarId) {
@@ -1318,26 +1470,50 @@ export class Renderer3D {
     this._updateCameraMatrices();
   }
 
-  setCamera(focusEntity, cameraMode = 'smashy', shakeAmount = 0, dt = 0.016) {
+  setCamera(focusEntity, cameraMode = 'smashy', shakeAmount = 0, dt = 0.016, extraOpts = {}) {
+    const safeDt = Math.max(0.001, Number(dt) || 0.016);
     const fx = focusEntity?.x || 0;
     const fy = focusEntity?.y || 0;
     const fz = focusEntity?.z || 0;
     const vx = focusEntity?.vx || 0;
+    const vy = focusEntity?.vy || 0;
     const vz = focusEntity?.vz || 0;
     const speed = Math.hypot(vx, vz);
     const angle = focusEntity?.angle || 0;
 
+    this.currentCameraMode = cameraMode;
+    this.povFocusId = cameraMode === 'pov' ? (focusEntity?.id ?? '__local__') : null;
+    this.povFocusEntity = cameraMode === 'pov' ? (focusEntity || null) : null;
+
     const isMega =
       (focusEntity?.megaTimer ?? focusEntity?.items?.megaTimer ?? (focusEntity?.activeBuffs?.mega ? 1 : 0)) > 0;
+    const isShrunk =
+      (focusEntity?.shrunkTimer ?? focusEntity?.items?.shrunkTimer ?? (focusEntity?.activeBuffs?.shrunk ? 1 : 0)) > 0;
     const isBoost =
+      Boolean(focusEntity?.boostActive) ||
       (focusEntity?.boostTimer ?? focusEntity?.items?.boostTimer ?? (focusEntity?.activeBuffs?.boost ? 1 : 0)) > 0;
+    const isStar =
+      Boolean(focusEntity?.starActive) ||
+      (focusEntity?.starTimer ?? focusEntity?.items?.starTimer ?? (focusEntity?.activeBuffs?.star ? 1 : 0)) > 0;
+    const isSugar =
+      Boolean(focusEntity?.sugarActive) ||
+      (focusEntity?.sugarTimer ?? focusEntity?.items?.sugarTimer ?? (focusEntity?.activeBuffs?.sugar ? 1 : 0)) > 0;
+
+    let entityScale =
+      focusEntity?.isLocal === false && focusEntity?.scale
+        ? focusEntity.scale
+        : focusEntity?.scaleMult || focusEntity?.scale || 1.0;
+    if (focusEntity?.isLocal !== false) {
+      if (isMega) entityScale *= 2.3;
+      if (isShrunk) entityScale *= 0.52;
+    }
 
     const zoom =
       1.0 +
       clamp(speed / 160, 0, 0.28) +
       clamp(fy / 45, 0, 0.28) +
       (isMega ? 0.34 : 0) +
-      (isBoost ? 0.08 : 0);
+      (isSugar ? 0.16 : isBoost ? 0.08 : 0);
 
     let desiredEyeX;
     let desiredEyeY;
@@ -1346,52 +1522,123 @@ export class Renderer3D {
     let desiredTargetY;
     let desiredTargetZ;
 
-    if (cameraMode === 'chase') {
-      // Dynamic Mario Kart 3D behind-the-car chase camera!
-      const backX = -Math.sin(angle);
-      const backZ = -Math.cos(angle);
-      const dist = 17.5 * zoom;
-      const height = 9.2 * zoom;
-      desiredEyeX = fx + backX * dist;
-      desiredEyeY = Math.max(2.5, fy + height);
-      desiredEyeZ = fz + backZ * dist;
+    if (cameraMode === 'pov') {
+      // First-Person Point-of-View Cockpit / Runner Camera!
+      const enteringPov = !this.cameraInitialized || this._lastCamMode !== 'pov';
+      const yawBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 20.0);
+      const pitchBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 14.0);
+      const targetPitch = clamp(vy * 0.018, -0.28, 0.32);
 
-      desiredTargetX = fx - backX * 8.5;
-      desiredTargetY = fy + 2.2;
-      desiredTargetZ = fz - backZ * 8.5;
-      this.camFov = ((isBoost ? 56 : 50) * Math.PI) / 180;
+      this.povYaw = enteringPov ? angle : lerpAngle(this.povYaw ?? angle, angle, yawBlend);
+      this.povPitch = enteringPov
+        ? targetPitch
+        : (this.povPitch || 0) + (targetPitch - (this.povPitch || 0)) * pitchBlend;
+
+      const charMode = focusEntity?.characterMode || 'car_driver';
+      const baseEyeY =
+        charMode === 'runner'
+          ? 2.45
+          : charMode === 'photo_car'
+            ? 2.22
+            : POV_VEHICLE_EYE_Y[focusEntity?.vehicleId] ?? 1.88;
+      const eyeH = baseEyeY * entityScale;
+      const fwdOffset = (focusEntity?.vehicleId === 'van' ? 0.55 : 0.32) * entityScale;
+      const fwdX = Math.sin(this.povYaw);
+      const fwdZ = Math.cos(this.povYaw);
+
+      desiredEyeX = fx + fwdX * fwdOffset;
+      desiredEyeY = fy + eyeH;
+      desiredEyeZ = fz + fwdZ * fwdOffset;
+
+      const lookDist = 28.0;
+      const lookPitch = -0.09 + this.povPitch;
+      desiredTargetX = desiredEyeX + fwdX * lookDist;
+      desiredTargetY = desiredEyeY + Math.sin(lookPitch) * lookDist;
+      desiredTargetZ = desiredEyeZ + fwdZ * lookDist;
+
+      // Dynamic POV FOV: base (extraOpts.povFov || 76)°, widening to 92° on Sugar Rush and 85° on Boost/Star!
+      const basePovFov = clamp(Number(extraOpts?.povFov) || 76, 58, 96);
+      const targetFovDeg = isSugar
+        ? Math.max(basePovFov, 92)
+        : isBoost || isStar
+          ? Math.max(basePovFov, 85)
+          : basePovFov;
+      const fovBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 12.0);
+      this.currentPovFovDeg = enteringPov
+        ? targetFovDeg
+        : (this.currentPovFovDeg || basePovFov) + (targetFovDeg - (this.currentPovFovDeg || basePovFov)) * fovBlend;
+      this.camFov = (this.currentPovFovDeg * Math.PI) / 180;
+
+      // Subtle lateral drift camera bank/lean around forward axis
+      const rawBank = clamp(-(focusEntity?.steerInput ?? focusEntity?.steer ?? 0) * 0.065, -0.08, 0.08);
+      this.povBank = enteringPov ? rawBank : (this.povBank || 0) + (rawBank - (this.povBank || 0)) * yawBlend;
+      this.camUp = [
+        Math.cos(this.povYaw) * Math.sin(this.povBank),
+        Math.cos(this.povBank),
+        -Math.sin(this.povYaw) * Math.sin(this.povBank),
+      ];
+
+      // Lock eye directly to cockpit seat so car hood never outruns camera at 3x Sugar Rush speeds!
+      this.cameraInitialized = true;
+      this.camEye[0] = desiredEyeX;
+      this.camEye[1] = desiredEyeY;
+      this.camEye[2] = desiredEyeZ;
+      this.camTarget[0] = desiredTargetX;
+      this.camTarget[1] = desiredTargetY;
+      this.camTarget[2] = desiredTargetZ;
     } else {
-      // Authentic Smashy Road angled isometric-perspective overhead camera!
-      const rawLeadX = clamp(vx * 0.22, -10, 10);
-      const rawLeadZ = clamp(vz * 0.22, -10, 10);
-      const leadBlend = 1.0 - Math.exp(-Math.max(0.001, dt) * 7.0);
-      this.smoothLeadX = (this.smoothLeadX || 0) + (rawLeadX - (this.smoothLeadX || 0)) * leadBlend;
-      this.smoothLeadZ = (this.smoothLeadZ || 0) + (rawLeadZ - (this.smoothLeadZ || 0)) * leadBlend;
-      desiredTargetX = fx + this.smoothLeadX;
-      desiredTargetY = fy * 0.45;
-      desiredTargetZ = fz + this.smoothLeadZ;
+      this.camUp = [0, 1, 0];
+      if (cameraMode === 'chase') {
+        // Dynamic Mario Kart 3D behind-the-car chase camera!
+        const backX = -Math.sin(angle);
+        const backZ = -Math.cos(angle);
+        const dist = 17.5 * zoom;
+        const height = 9.2 * zoom;
+        desiredEyeX = fx + backX * dist;
+        desiredEyeY = Math.max(2.5, fy + height);
+        desiredEyeZ = fz + backZ * dist;
 
-      desiredEyeX = desiredTargetX - 21.0 * zoom;
-      desiredEyeY = desiredTargetY + 46.0 * zoom;
-      desiredEyeZ = desiredTargetZ - 36.0 * zoom;
-      this.camFov = (40 * Math.PI) / 180;
+        desiredTargetX = fx - backX * 8.5;
+        desiredTargetY = fy + 2.2;
+        desiredTargetZ = fz - backZ * 8.5;
+        this.camFov = ((isSugar ? 64 : isBoost ? 56 : 50) * Math.PI) / 180;
+      } else {
+        // Authentic Smashy Road angled isometric-perspective overhead camera!
+        const rawLeadX = clamp(vx * 0.22, -10, 10);
+        const rawLeadZ = clamp(vz * 0.22, -10, 10);
+        const leadBlend = 1.0 - Math.exp(-safeDt * 7.0);
+        this.smoothLeadX = (this.smoothLeadX || 0) + (rawLeadX - (this.smoothLeadX || 0)) * leadBlend;
+        this.smoothLeadZ = (this.smoothLeadZ || 0) + (rawLeadZ - (this.smoothLeadZ || 0)) * leadBlend;
+        desiredTargetX = fx + this.smoothLeadX;
+        desiredTargetY = fy * 0.45;
+        desiredTargetZ = fz + this.smoothLeadZ;
+
+        desiredEyeX = desiredTargetX - 21.0 * zoom;
+        desiredEyeY = desiredTargetY + 46.0 * zoom;
+        desiredEyeZ = desiredTargetZ - 36.0 * zoom;
+        this.camFov = (40 * Math.PI) / 180;
+      }
+
+      const snap = !this.cameraInitialized || this._lastCamMode === 'pov';
+      const alpha = snap ? 1.0 : 1.0 - Math.exp(-safeDt * 8.5);
+      this.cameraInitialized = true;
+
+      this.camEye[0] += (desiredEyeX - this.camEye[0]) * alpha;
+      this.camEye[1] += (desiredEyeY - this.camEye[1]) * alpha;
+      this.camEye[2] += (desiredEyeZ - this.camEye[2]) * alpha;
+
+      this.camTarget[0] += (desiredTargetX - this.camTarget[0]) * alpha;
+      this.camTarget[1] += (desiredTargetY - this.camTarget[1]) * alpha;
+      this.camTarget[2] += (desiredTargetZ - this.camTarget[2]) * alpha;
     }
 
-    const alpha = !this.cameraInitialized ? 1.0 : 1.0 - Math.exp(-Math.max(0.001, dt) * 8.5);
-    this.cameraInitialized = true;
+    this._lastCamMode = cameraMode;
 
-    this.camEye[0] += (desiredEyeX - this.camEye[0]) * alpha;
-    this.camEye[1] += (desiredEyeY - this.camEye[1]) * alpha;
-    this.camEye[2] += (desiredEyeZ - this.camEye[2]) * alpha;
-
-    this.camTarget[0] += (desiredTargetX - this.camTarget[0]) * alpha;
-    this.camTarget[1] += (desiredTargetY - this.camTarget[1]) * alpha;
-    this.camTarget[2] += (desiredTargetZ - this.camTarget[2]) * alpha;
-
-    // Screen shake impulse
+    // Screen shake impulse (scaled gently in POV so hood shake feels punchy without disorienting)
     if (shakeAmount > 0.001) {
-      this.shakePhase += Math.max(0.01, dt) * 52.0;
-      const mag = clamp(shakeAmount, 0, 3.5);
+      this.shakePhase += Math.max(0.01, safeDt) * 52.0;
+      const shakeScale = cameraMode === 'pov' ? 0.28 : 1.0;
+      const mag = clamp(shakeAmount, 0, 3.5) * shakeScale;
       this.shakeOffset = [
         Math.sin(this.shakePhase * 1.7) * mag * 0.65,
         Math.cos(this.shakePhase * 2.3) * mag * 0.45,
@@ -1411,16 +1658,24 @@ export class Renderer3D {
 
     const eye = [this.camEye[0] + sx, this.camEye[1] + sy, this.camEye[2] + sz];
     const target = [this.camTarget[0] + sx, this.camTarget[1] + sy, this.camTarget[2] + sz];
+    const isPov = this.currentCameraMode === 'pov';
+    const nearClip = isPov ? 0.42 : 1.5;
+    const farClip = 880.0;
 
-    mat4LookAt(this.viewMatrix, eye, target, [0, 1, 0]);
-    mat4Perspective(this.projMatrix, this.camFov, this.cssWidth / this.cssHeight, 1.5, 650.0);
+    mat4LookAt(this.viewMatrix, eye, target, this.camUp || [0, 1, 0]);
+    mat4Perspective(this.projMatrix, this.camFov, this.cssWidth / this.cssHeight, nearClip, farClip);
     mat4Multiply(this.viewProjMatrix, this.projMatrix, this.viewMatrix);
   }
 
   _updateLightMatrices(focusX, focusZ) {
     // Texel-snap light target in light-space so shadow edges never shimmer while driving!
     const dist = 140.0;
-    const rawTarget = [focusX, 0, focusZ];
+    const leadFwd = this.currentCameraMode === 'pov' ? 46.0 : 0.0;
+    const rawTarget = [
+      focusX + Math.sin(this.povYaw || 0) * leadFwd,
+      0,
+      focusZ + Math.cos(this.povYaw || 0) * leadFwd,
+    ];
     const rawEye = [
       rawTarget[0] + SUN_DIR[0] * dist,
       rawTarget[1] + SUN_DIR[1] * dist,
@@ -1845,10 +2100,19 @@ export class Renderer3D {
       const chunks = world.getVisibleChunks(focusX, focusZ);
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        let staticArr = this.chunkStaticCache.get(chunk.key);
-        if (!staticArr) {
+        let staticArr = this.staticChunkCache.get(chunk.key);
+        if (staticArr) {
+          // Refresh LRU order
+          this.staticChunkCache.delete(chunk.key);
+          this.staticChunkCache.set(chunk.key, staticArr);
+        } else {
           staticArr = buildChunkStaticInstanceData(chunk, world, biome);
-          this.chunkStaticCache.set(chunk.key, staticArr);
+          this.staticChunkCache.set(chunk.key, staticArr);
+          while (this.staticChunkCache.size > MAX_STATIC_CHUNK_CACHE) {
+            const oldestKey = this.staticChunkCache.keys().next().value;
+            if (oldestKey === undefined) break;
+            this.staticChunkCache.delete(oldestKey);
+          }
         }
         this._appendCachedStaticChunk(staticArr);
 
@@ -2061,9 +2325,10 @@ export class Renderer3D {
     gl.uniform3fv(this.voxelUniforms.sunColor, biome.sunColor);
     gl.uniform3fv(this.voxelUniforms.ambientColor, biome.ambientColor);
     gl.uniform3fv(this.voxelUniforms.fogColor, biome.fogColor);
+    const isPovFog = this.currentCameraMode === 'pov';
     gl.uniform3fv(this.voxelUniforms.camPos, this.camEye);
-    gl.uniform1f(this.voxelUniforms.fogNear, 145.0);
-    gl.uniform1f(this.voxelUniforms.fogFar, 315.0);
+    gl.uniform1f(this.voxelUniforms.fogNear, isPovFog ? 235.0 : 165.0);
+    gl.uniform1f(this.voxelUniforms.fogFar, isPovFog ? 540.0 : 355.0);
     gl.uniform1i(this.voxelUniforms.translucentMode, 0);
     gl.uniform1i(this.voxelUniforms.texturedMode, 0);
 
