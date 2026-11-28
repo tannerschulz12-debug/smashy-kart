@@ -43,7 +43,12 @@ export class Simulation {
   constructor(world, abilitySystem, settings = {}) {
     this.world = world;
     this.abilitySystem = abilitySystem;
-    this.settings = { ...createDefaultSettings(), ...(settings || {}) };
+    this.settings = {
+      ...createDefaultSettings(),
+      ...(abilitySystem?.settings || {}),
+      ...(settings || {}),
+    };
+    this.abilitySystem?.updateSettings?.(this.settings);
     this.seed = this.settings.worldSeed || 777123;
     this._rng = makeRng(this.seed);
 
@@ -94,6 +99,17 @@ export class Simulation {
       if (this.localPlayer) {
         this.localPlayer.bustedProgress = 0;
         this.localPlayer.stars = 0;
+      }
+    }
+    if (
+      this.settings.instantCopMissileReload &&
+      this.localPlayer &&
+      this.localPlayer.playerRole === 'cop' &&
+      (this.localPlayer.copVehicleId === 'cop_heli' || this.localPlayer.copVehicleId === 'cop_tank')
+    ) {
+      this.localPlayer.copMissileCooldown = 0;
+      if (this.localPlayer.items) {
+        this.localPlayer.items.copMissileCooldown = 0;
       }
     }
     this.abilitySystem?.updateSettings?.(this.settings);
@@ -942,12 +958,25 @@ export class Simulation {
       this.abilitySystem.updatePlayerItemState(lp, safeDt, context);
     }
 
-    // 2. Handle discrete item activation & horn input (edge-triggered so 1 tap = 1 charge)
+    // 2. Handle discrete item activation & horn input (supports queued useItemCount taps + edge-triggered boolean)
+    const rawUseItemCount = Number(input?.useItemCount);
+    const useItemCount = Number.isFinite(rawUseItemCount)
+      ? Math.max(0, Math.min(8, Math.floor(rawUseItemCount)))
+      : 0;
     const useItemNow = Boolean(input?.useItem);
-    if (lp.alive && useItemNow && !this._prevUseItem && this.abilitySystem) {
-      this.abilitySystem.useHeldItem(lp, context);
+    if (useItemCount > 0) {
+      if (lp.alive && this.abilitySystem) {
+        for (let t = 0; t < useItemCount && lp.alive; t++) {
+          this.abilitySystem.useHeldItem(lp, context);
+        }
+      }
+      this._prevUseItem = false;
+    } else {
+      if (lp.alive && useItemNow && !this._prevUseItem && this.abilitySystem) {
+        this.abilitySystem.useHeldItem(lp, context);
+      }
+      this._prevUseItem = useItemNow;
     }
-    this._prevUseItem = useItemNow;
 
     const hornNow = Boolean(input?.horn);
     if (lp.alive && hornNow && !this._prevHorn) {

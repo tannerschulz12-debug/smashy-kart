@@ -559,6 +559,10 @@
               <input id="perm-allow-cops" type="checkbox" checked />
               <span><strong>Allow Players to Play as Police</strong> (Helicopter / Tank / SWAT / Cruiser)</span>
             </label>
+            <label class="switch-row highlight-switch instant-reload-switch">
+              <input id="perm-instant-cop-reload" type="checkbox" />
+              <span><strong>🚀 Instant Heli &amp; Tank Missile Reload</strong> — Heli &amp; Tank shoot missiles as fast as you tap (no 2s cooldown)</span>
+            </label>
             <label class="switch-row highlight-switch">
               <input id="perm-share-sounds" type="checkbox" checked />
               <span><strong>🔊 Share My Custom Voices &amp; Sounds With Everyone</strong> (Everyone in this lobby hears the screams, horns &amp; crashes YOU recorded)</span>
@@ -698,7 +702,7 @@
       <div id="garage-cop-section" class="garage-section cop-fleet-section">
         <div class="section-bar compact-bar">
           <h3>🚔 Police Precinct Fleet (Tap Any Unit to Play as Cop)</h3>
-          <span class="fleet-hint-pill">🎯 2.0s Soft-Tracking Missiles on Heli &amp; Tank</span>
+          <span id="fleet-missile-hint-pill" class="fleet-hint-pill">🎯 2.0s Soft-Tracking Missiles on Heli &amp; Tank</span>
         </div>
         <div id="cop-vehicle-grid" class="cop-vehicle-grid"></div>
       </div>
@@ -792,6 +796,14 @@
             <span class="ai-cops-switch-copy">
               <strong>🚔 AI Police Chasing You (ON / OFF)</strong>
               <small id="lbl-ai-cops-state" class="ai-cops-sub">ON — 5-Star Police Pursuit</small>
+            </span>
+          </label>
+
+          <label class="switch-row instant-reload-switch" for="chk-instant-cop-reload">
+            <input id="chk-instant-cop-reload" type="checkbox" />
+            <span class="ai-cops-switch-copy">
+              <strong>🚀 Instant Heli &amp; Tank Missile Reload (ON / OFF)</strong>
+              <span id="lbl-instant-cop-reload" class="instant-reload-sub">OFF — 2.0s Missile Cooldown</span>
             </span>
           </label>
 

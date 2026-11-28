@@ -521,6 +521,7 @@ function defaultCloudRoomSettings() {
     itemBoxDensity: 1.2,
     sugarBoxRate: 1.0,
     nukeKillDoubleOdds: true,
+    instantCopMissileReload: false,
     gravityMult: 1.0,
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems,
@@ -577,6 +578,11 @@ function sanitizeCloudRoomSettings(current = {}, patch = {}) {
     next.nukeKillDoubleOdds = Boolean(patch.nukeKillDoubleOdds);
   } else {
     next.nukeKillDoubleOdds = next.nukeKillDoubleOdds !== false;
+  }
+  if (patch.instantCopMissileReload !== undefined) {
+    next.instantCopMissileReload = Boolean(patch.instantCopMissileReload);
+  } else {
+    next.instantCopMissileReload = Boolean(next.instantCopMissileReload);
   }
   if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
     next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
@@ -1382,7 +1388,7 @@ export class MultiplayerClient {
   _publishCloud(code, packet) {
     if (!this.mqtt || !code) return;
     const isHighFreqState = packet?.env === 'peer' && packet?.msg?.type === 'player_state';
-    if (isHighFreqState && !this.mqtt.connected) return;
+    if (isHighFreqState && (!this.mqtt.connected || (this.mqtt._txQueue?.length || 0) >= 4)) return;
     this.mqtt.publish(this._roomTopic(code), packet, 0);
   }
 

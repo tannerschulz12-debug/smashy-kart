@@ -610,6 +610,7 @@ export function createDefaultSettings() {
     avatarId: 'default_hero',
     customCopsEnabled: true,
     aiCopsEnabled: true,         // true = AI police spawn & chase; false = 0 AI cops!
+    instantCopMissileReload: false, // true = 0s instant missile reload for Police Heli & Tank!
     // Garage stat multipliers (0.6 .. 1.6)
     speedMult: 1.0,
     driftMult: 1.0,
