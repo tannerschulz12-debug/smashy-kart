@@ -435,8 +435,26 @@ class SmashyKartApp {
 
   _registerServiceWorkerAndInstallFlow() {
     if ('serviceWorker' in navigator) {
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      let swReloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || swReloading) return;
+        if (this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'countdown') return;
+        swReloading = true;
+        window.location.reload();
+      });
       const registerSw = () => {
-        navigator.serviceWorker.register('./sw.js').catch(() => {});
+        navigator.serviceWorker
+          .register('./sw.js', { updateViaCache: 'none' })
+          .then((reg) => {
+            reg.update().catch(() => {});
+            document.addEventListener('visibilitychange', () => {
+              if (document.visibilityState === 'visible') {
+                reg.update().catch(() => {});
+              }
+            });
+          })
+          .catch(() => {});
       };
       if (document.readyState === 'complete') {
         registerSw();
@@ -2451,7 +2469,7 @@ class SmashyKartApp {
       );
     });
 
-    document.getElementById('chk-instant-cop-reload')?.addEventListener('change', (e) => {
+    const onInstantReloadToggle = (e) => {
       if (this.net.roomCode && !this.net.isHost) {
         this._refreshAllUiFromSettings();
         this._showChaosToast('🔒 Instant Missile Reload is controlled by the Lobby Host!');
@@ -2479,7 +2497,9 @@ class SmashyKartApp {
           ? '⚡ Instant Heli & Tank Missile Reload ON — shoot as fast as you tap!'
           : '⏳ Heli & Tank Missile Reload back to 2.0s'
       );
-    });
+    };
+    document.getElementById('chk-instant-cop-reload')?.addEventListener('change', onInstantReloadToggle);
+    document.getElementById('chk-garage-instant-reload')?.addEventListener('change', onInstantReloadToggle);
 
     bindSlider('rng-cop-intensity', 'copIntensity');
     bindSlider('rng-start-stars', 'startStars');
@@ -3365,6 +3385,21 @@ class SmashyKartApp {
       lblInstantReload.textContent = instantReloadOn
         ? `ON — 0s Instant Rapid-Fire!${worldLockSuffix}`
         : `OFF — 2.0s Missile Cooldown${worldLockSuffix}`;
+    }
+
+    const chkGarageInstant = document.getElementById('chk-garage-instant-reload');
+    if (chkGarageInstant) {
+      chkGarageInstant.checked = instantReloadOn;
+      chkGarageInstant.disabled = guestWorldLocked;
+      const gWrap = chkGarageInstant.closest('.instant-reload-switch');
+      gWrap?.classList.toggle('is-on', instantReloadOn);
+      gWrap?.classList.toggle('is-disabled', guestWorldLocked);
+    }
+    const lblGarageInstant = document.getElementById('lbl-garage-instant-reload');
+    if (lblGarageInstant) {
+      lblGarageInstant.textContent = instantReloadOn
+        ? `ON — 0s Instant Rapid-Fire!${worldLockSuffix}`
+        : `OFF — 2.0s Missile Cooldown (Turn ON to shoot as fast as you tap!)${worldLockSuffix}`;
     }
 
     const permInstantReload = document.getElementById('perm-instant-cop-reload');
