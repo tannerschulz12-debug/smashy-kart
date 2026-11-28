@@ -3457,6 +3457,7 @@ class SmashyKartApp {
   _openLobbyModal() {
     document.getElementById('lobby-modal').classList.remove('hidden');
     document.getElementById('lobby-error').classList.add('hidden');
+    document.getElementById('lobby-status')?.classList.add('hidden');
     const inRoom = Boolean(this.net.roomCode);
     document.getElementById('lobby-entry').classList.toggle('hidden', inRoom);
     document.getElementById('lobby-room').classList.toggle('hidden', !inRoom);
@@ -3465,14 +3466,46 @@ class SmashyKartApp {
     }
   }
 
+  _setLobbyStatus(msg) {
+    const el = document.getElementById('lobby-status');
+    if (!el) return;
+    if (!msg) {
+      el.classList.add('hidden');
+      el.textContent = '';
+      return;
+    }
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  }
+
+  _updateLobbyConnPill(stateOverride = null) {
+    const pill = document.getElementById('lobby-conn-pill');
+    if (!pill) return;
+    const isCloud = Boolean(this.net._useCloudMode?.());
+    const st = stateOverride || (this.net.connected ? 'online' : 'reconnecting');
+    pill.classList.remove('online', 'reconnecting', 'lan');
+    if (st === 'reconnecting') {
+      pill.classList.add('reconnecting');
+      pill.textContent = '🟡 Reconnecting lobby...';
+    } else if (isCloud) {
+      pill.classList.add('online');
+      pill.textContent = '🟢 Live on Internet (Anyone can join)';
+    } else {
+      pill.classList.add('lan');
+      pill.textContent = '📶 Home Wi-Fi Only (Same Wi-Fi needed)';
+    }
+  }
+
   async _joinPartyRoom(code) {
     const clean = String(code || '').trim().toUpperCase();
     if (!clean) return;
     document.getElementById('lobby-error').classList.add('hidden');
+    this._setLobbyStatus(`🔍 Connecting to room ${clean}...`);
     this._requestWakeLock();
     try {
       await this.net.joinRoom(clean, this._buildLocalNetProfile());
     } catch {
+      this._setLobbyStatus('');
       this._showLobbyError('Could not connect to party relay. Check your internet connection and try again!');
     }
   }
@@ -3574,7 +3607,12 @@ class SmashyKartApp {
     });
 
     this.net.on('error', (err) => {
+      this._setLobbyStatus('');
       this._showLobbyError(err?.message || 'Lobby error.');
+    });
+
+    this.net.on('connection_status', (info) => {
+      this._updateLobbyConnPill(info?.state || 'online');
     });
 
     this.net.on('kicked', (msg) => {
@@ -3608,9 +3646,11 @@ class SmashyKartApp {
       }
       const basePath = window.location.pathname || '/';
       window.history.replaceState({}, '', `${basePath}?room=${encodeURIComponent(msg.code)}`);
+      this._setLobbyStatus('');
       document.getElementById('lobby-entry').classList.add('hidden');
       document.getElementById('lobby-room').classList.remove('hidden');
       if (msg.room) this._renderLobbyRoom(msg.room);
+      this._updateLobbyConnPill('online');
       this._updateSoundLobbyBanner();
     });
 
@@ -4020,6 +4060,7 @@ class SmashyKartApp {
     const shareUrl = this.net.getShareUrl(room.code);
     document.getElementById('room-share-url').value = shareUrl;
     document.getElementById('room-qr-box').innerHTML = this.net.getQrCodeSvg(room.code, { margin: 3 });
+    this._updateLobbyConnPill();
 
     const rules = room.settings?.lobbyRules || this.settings.lobbyRules || {};
     const isHost = Boolean(this.net.isHost);

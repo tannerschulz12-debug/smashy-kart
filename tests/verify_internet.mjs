@@ -68,7 +68,11 @@ async function runInternetPartyTest() {
     assert.equal(code.length, 4);
 
     const joinerJoinedP = waitForEvent(phone2, 'room_joined');
-    const hostSeesTwoP = waitForEvent(phone1, 'room_state', (r) => r.players?.length === 2);
+    const hostSeesTwoP = waitForEvent(
+      phone1,
+      'room_state',
+      (r) => r.players?.length === 2 && Boolean(r.players[1]?.avatarDataUrl)
+    );
     await phone2.joinRoom(code, {
       name: 'FriendPhone',
       characterMode: 'runner',
