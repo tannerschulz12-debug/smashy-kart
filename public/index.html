@@ -3,12 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Smashy Kart" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#161a22" />
+  <meta name="theme-color" content="#0d142e" />
   <title>Smashy Kart: Wanted</title>
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
-  <link rel="apple-touch-icon" href="./icon.svg" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
@@ -37,13 +40,14 @@
           <span class="star">★</span>
         </div>
         <div class="hp-pill">
-          <span class="hp-label">CAR</span>
+          <span id="hud-hp-label" class="hp-label">CAR</span>
           <div class="hp-track"><div id="hp-fill" class="hp-fill"></div></div>
         </div>
         <div id="busted-alert" class="busted-alert hidden">
           <div class="busted-title">BOXED IN! ESCAPE!</div>
           <div class="busted-track"><div id="busted-fill" class="busted-fill"></div></div>
         </div>
+        <canvas id="hud-minimap" class="hud-minimap" width="112" height="112" aria-label="Live GPS radar minimap"></canvas>
         <div id="active-buffs" class="active-buffs"></div>
       </div>
 
@@ -54,15 +58,33 @@
             <div class="score-readout"><span id="hud-score">0</span> PTS</div>
           </div>
           <div class="hud-quick-btns">
-            <button id="btn-quick-cam" class="icon-btn" type="button" title="Switch Camera (C / V)" aria-label="Switch Camera Angle">🎥</button>
-            <button id="btn-ingame-settings" class="icon-btn" type="button" title="Personal Settings" aria-label="Open Personal Settings">⚙️</button>
-            <button id="btn-pause" class="icon-btn" type="button" title="Exit to Menu" aria-label="Pause or Menu">✕</button>
+            <button id="btn-quick-cam" class="icon-btn has-keycap" type="button" title="Switch Camera" aria-label="Switch Camera Angle">
+              <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="2.5" y="6.5" width="13" height="11" rx="2.5" />
+                <path d="M15.5 10.5l5-3v9l-5-3z" />
+              </svg>
+              <kbd id="keycap-cam" class="hud-keycap corner-cap">C</kbd>
+            </button>
+            <button id="btn-ingame-settings" class="icon-btn" type="button" title="Personal Settings" aria-label="Open Personal Settings">
+              <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="3.2" />
+                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33h.08a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51h.08a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v.08a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+              </svg>
+            </button>
+            <button id="btn-pause" class="icon-btn" type="button" title="Exit to Menu" aria-label="Pause or Menu">
+              <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
           </div>
         </div>
-        <div id="hud-speedo" class="hud-speedo">
-          <span id="hud-speedo-val" class="speedo-val">0</span>
-          <span class="speedo-unit">MPH</span>
-          <span id="hud-drift-spark" class="drift-spark-pill hidden">⚡ DRIFT</span>
+        <div class="hud-telemetry-row">
+          <div id="hud-fps" class="hud-fps hidden">60 FPS</div>
+          <div id="hud-speedo" class="hud-speedo">
+            <span id="hud-speedo-val" class="speedo-val">0</span>
+            <span id="hud-speedo-unit" class="speedo-unit">MPH</span>
+            <span id="hud-drift-spark" class="drift-spark-pill hidden">⚡ DRIFT</span>
+          </div>
         </div>
       </div>
     </div>
@@ -85,108 +107,329 @@
       <button id="btn-next-spectate" class="arcade-btn small cyan" type="button">Switch Camera</button>
     </div>
 
-    <!-- Mobile & Touch Controls -->
+    <!-- Customizable Mobile, Claw & Desktop HUD Controls -->
     <div id="touch-controls" class="touch-controls">
-      <!-- Split-screen Smashy Road steering zones -->
+      <!-- Invisible/Subtle Split-Screen Tap Zones (active when touchStyle === 'split') -->
       <div id="split-steer" class="split-steer">
         <div id="steer-left-zone" class="steer-zone left">
-          <span class="steer-hint">◀</span>
+          <span class="steer-hint" aria-hidden="true">◀</span>
         </div>
         <div id="steer-right-zone" class="steer-zone right">
-          <span class="steer-hint">▶</span>
+          <span class="steer-hint" aria-hidden="true">▶</span>
         </div>
       </div>
 
-      <!-- Optional Thumb Joystick -->
-      <div id="joystick-zone" class="joystick-zone hidden">
+      <!-- 1. Steer Left Widget -->
+      <div id="hud-widget-steerLeft" class="hud-widget" data-hud-widget="steerLeft" data-hud-label="Steer Left" style="left: 10%; top: 84%;">
+        <button id="btn-steer-left" class="hud-pad-btn" type="button" aria-label="Steer Left">
+          <svg class="hud-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M14.5 6.5L8.5 12l6 5.5" />
+          </svg>
+          <kbd id="keycap-steerLeft" class="hud-keycap">A</kbd>
+        </button>
+      </div>
+
+      <!-- 2. Steer Right Widget -->
+      <div id="hud-widget-steerRight" class="hud-widget" data-hud-widget="steerRight" data-hud-label="Steer Right" style="left: 24%; top: 84%;">
+        <button id="btn-steer-right" class="hud-pad-btn" type="button" aria-label="Steer Right">
+          <svg class="hud-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9.5 6.5l6 5.5-6 5.5" />
+          </svg>
+          <kbd id="keycap-steerRight" class="hud-keycap">D</kbd>
+        </button>
+      </div>
+
+      <!-- 3. Thumb Joystick Widget -->
+      <div id="joystick-zone" class="hud-widget joystick-zone hidden" data-hud-widget="joystick" data-hud-label="Joystick" style="left: 15%; top: 80%;">
         <div id="joystick-base" class="joystick-base">
           <div id="joystick-stick" class="joystick-stick"></div>
         </div>
       </div>
 
-      <!-- Right-Thumb Action Buttons (Side-Only Mario Kart Mystery Box + Horn/Brake) -->
-      <div class="action-cluster">
+      <!-- 4. High-Contrast Tactile Brake / Drift Pedal Widget -->
+      <div id="hud-widget-brake" class="hud-widget" data-hud-widget="brake" data-hud-label="Brake / Drift" style="left: 74%; top: 86%;">
+        <button id="btn-brake" class="brake-pedal-btn" type="button" aria-label="Brake and Drift">
+          <span class="pedal-treads" aria-hidden="true"></span>
+          <span class="pedal-title">BRAKE</span>
+          <span class="pedal-sub">DRIFT</span>
+          <kbd id="keycap-brake" class="hud-keycap">S</kbd>
+        </button>
+      </div>
+
+      <!-- 5. Manual Gas Pedal Widget (shown when Auto-Accelerate is unchecked or in HUD Editor) -->
+      <div id="hud-widget-gas" class="hud-widget hidden" data-hud-widget="gas" data-hud-label="Gas Pedal" style="left: 89%; top: 86%;">
+        <button id="btn-gas" class="gas-pedal-btn" type="button" aria-label="Accelerate Gas Pedal">
+          <span class="pedal-treads" aria-hidden="true"></span>
+          <span class="pedal-title">GAS</span>
+          <span class="pedal-sub">DRIVE</span>
+          <kbd id="keycap-gas" class="hud-keycap">W</kbd>
+        </button>
+      </div>
+
+      <!-- 6. Side Mystery Box Item Button Widget -->
+      <div id="hud-widget-useItem" class="hud-widget" data-hud-widget="useItem" data-hud-label="Use Item" style="left: 88%; top: 65%;">
         <button id="btn-use-item" class="use-item-btn disabled" type="button" aria-label="Use held ability">
           <span id="btn-use-item-icon" class="use-icon">?</span>
           <span id="btn-use-item-label" class="use-label">ITEM</span>
           <span id="btn-use-item-charges" class="use-charges hidden">x3</span>
+          <kbd id="keycap-useItem" class="hud-keycap">SPACE</kbd>
         </button>
-        <div class="mini-actions">
-          <button id="btn-brake" class="mini-action-btn" type="button">BRAKE</button>
-          <button id="btn-horn" class="mini-action-btn horn" type="button">📢</button>
-        </div>
+      </div>
+
+      <!-- 7. Horn / Shockwave Taunt Widget -->
+      <div id="hud-widget-horn" class="hud-widget" data-hud-widget="horn" data-hud-label="Horn" style="left: 62%; top: 88%;">
+        <button id="btn-horn" class="horn-btn" type="button" aria-label="Honk Horn">
+          <svg class="hud-svg horn-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M11 5.5L6.5 9H3.5v6h3L11 18.5v-13z" />
+            <path d="M15.5 9a4.5 4.5 0 010 6" />
+            <path d="M18.5 6.5a8 8 0 010 11" />
+          </svg>
+          <kbd id="keycap-horn" class="hud-keycap">H</kbd>
+        </button>
       </div>
     </div>
   </div>
 
-  <!-- ======================== HOME / TITLE SCREEN ======================== -->
+  <!-- ======================== FULL-SCREEN HUD LAYOUT EDITOR ======================== -->
+  <div id="hud-layout-editor" class="hud-layout-editor hidden" role="dialog" aria-label="HUD Button Layout Editor">
+    <div class="hud-editor-grid-bg" aria-hidden="true"></div>
+    <div id="hud-editor-toolbar" class="hud-editor-toolbar">
+      <div class="hud-editor-head">
+        <strong class="hud-editor-title">DRAG ANY BUTTON TO REPOSITION</strong>
+        <span id="hud-editor-selected-name" class="hud-editor-selected">Brake / Drift Pedal</span>
+      </div>
+
+      <div class="seg-row tight" id="hud-preset-btns">
+        <button type="button" class="seg-btn active" data-hpreset="thumbs">👍 Thumbs</button>
+        <button type="button" class="seg-btn" data-hpreset="claw">🦅 4-Finger Claw</button>
+        <button type="button" class="seg-btn" data-hpreset="lefty">🫲 Lefty</button>
+      </div>
+
+      <div class="hud-editor-sliders">
+        <div class="slider-row compact">
+          <label for="rng-widget-scale">Button Size <span id="val-widget-scale">100%</span></label>
+          <input id="rng-widget-scale" type="range" min="0.7" max="1.6" step="0.05" value="1.0" />
+        </div>
+        <div class="slider-row compact">
+          <label for="rng-widget-opacity">Opacity <span id="val-widget-opacity">95%</span></label>
+          <input id="rng-widget-opacity" type="range" min="0.4" max="1.0" step="0.05" value="0.95" />
+        </div>
+      </div>
+
+      <div class="hud-editor-actions">
+        <button id="btn-hud-editor-reset" class="arcade-btn small dark" type="button">↺ Reset</button>
+        <button id="btn-hud-editor-done" class="arcade-btn small gold" type="button">✓ Save Layout</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================== MOBILE ARCADE HOME SCREEN ======================== -->
   <div id="home-screen" class="screen-overlay">
-    <div class="home-shell">
-      <header class="brand-header">
-        <div class="wanted-badge">★ 5-STAR PARTY CHASE ★</div>
-        <h1 class="game-title">SMASHY KART</h1>
-        <p class="game-subtitle">Put your own people on cars, grab rainbow <strong>?</strong> abilities, and outlast your friends.</p>
-      </header>
-
-      <!-- Live Character Preview Card -->
-      <div class="hero-loadout-card">
-        <div class="loadout-avatar-wrap">
-          <img id="home-avatar-img" class="loadout-avatar-img" alt="Selected character" />
-          <button id="btn-quick-photo" class="pill-edit-btn" type="button">Upload Photo</button>
-        </div>
-        <div class="loadout-details">
-          <input id="home-player-name" class="name-input" type="text" maxlength="16" placeholder="Your Name" value="Tanner" />
-          <div class="mode-pills" id="home-mode-pills">
-            <button type="button" class="mode-pill active" data-mode="car_driver">On a Car</button>
-            <button type="button" class="mode-pill" data-mode="photo_car">Look Like a Car</button>
-            <button type="button" class="mode-pill" data-mode="runner">Just Myself</button>
+    <!-- Top Cluster: Racer Profile + App/Settings Actions + 3D Police Siren Marquee -->
+    <div class="home-top-cluster">
+      <div class="home-topbar">
+        <div class="racer-profile-pill">
+          <div class="racer-avatar-frame">
+            <img id="home-avatar-img" class="loadout-avatar-img" alt="Selected racer" />
+            <button id="btn-quick-photo" class="avatar-cam-badge" type="button" title="Upload Face Photo" aria-label="Upload Face Photo">
+              <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 8.5h3l1.8-2h6.4l1.8 2h3a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0120 19.5H4A1.5 1.5 0 012.5 18v-8A1.5 1.5 0 014 8.5z" />
+                <circle cx="12" cy="13.5" r="3.2" />
+              </svg>
+            </button>
           </div>
-          <div class="loadout-summary" id="home-loadout-summary">Getaway Coupe · Sunny Metro City · All 8 Items</div>
+          <div class="racer-identity">
+            <input id="home-player-name" class="name-input racer-name-input" type="text" maxlength="16" placeholder="Your Name" value="Tanner" aria-label="Your Racer Name" />
+            <div id="solo-best-bar" class="solo-best-bar">
+              <svg class="trophy-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 4h10v5a5 5 0 01-10 0V4z" />
+                <path d="M7 6H4.5a2 2 0 000 4H7M17 6h2.5a2 2 0 010 4H17" />
+                <path d="M12 14v4M8.5 18h7" />
+              </svg>
+              <strong id="best-time-label">0.0s</strong>
+              <span class="best-sep" aria-hidden="true">·</span>
+              <strong id="best-score-label">0</strong>
+              <span class="best-pts">PTS</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="home-top-actions">
+          <button id="btn-install-app" class="install-app-pill" type="button" title="Add Smashy Kart to Home Screen">
+            <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="6" y="2.5" width="12" height="19" rx="2.5" />
+              <path d="M12 8v6M9.5 11.5L12 14l2.5-2.5M10 18.5h4" />
+            </svg>
+            <span>Add App</span>
+          </button>
+          <button id="btn-home-settings" class="home-gear-btn" type="button" data-open-modal="settings-modal" title="Personal Settings" aria-label="Open Personal Settings">
+            <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33h.08a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51h.08a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v.08a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+            </svg>
+          </button>
         </div>
       </div>
 
-      <!-- Primary Play Actions -->
+      <!-- Arcade Marquee Titleplate (No kicker above h1, no paragraph!) -->
+      <header class="arcade-marquee">
+        <div class="marquee-title-row">
+          <span class="siren-cap siren-red" aria-hidden="true"></span>
+          <h1 class="game-title">SMASHY KART</h1>
+          <span class="siren-cap siren-blue" aria-hidden="true"></span>
+        </div>
+        <div class="championship-plate">5-STAR CHASE · 16-PLAYER PARTY</div>
+      </header>
+    </div>
+
+    <!-- Middle ~50% Viewport Stays Completely Clear for Live 3D Police Chase! -->
+
+    <!-- Bottom Thumb Dock: Live 3D Stage Switcher + Tactile CTAs + 4-Icon Studio Dock -->
+    <div class="home-bottom-dock">
+      <div class="stage-switcher-bar">
+        <div class="role-pills" id="home-role-pills" role="group" aria-label="Choose Team">
+          <button type="button" class="role-pill active" data-role="runner">🏎️ Getaway</button>
+          <button type="button" class="role-pill cop-pill" data-role="cop">🚔 Police</button>
+        </div>
+
+        <div class="car-stepper">
+          <button id="btn-prev-car" class="stage-step-btn" type="button" aria-label="Previous Vehicle">
+            <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <button id="home-car-name" class="stage-car-name" type="button" data-open-modal="garage-modal" title="Tap to Open Garage">Getaway Coupe</button>
+          <button id="btn-next-car" class="stage-step-btn" type="button" aria-label="Next Vehicle">
+            <svg class="ui-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+          </button>
+        </div>
+
+        <div class="mode-pills stage-mode-pills" id="home-mode-pills">
+          <button type="button" class="mode-pill active" data-mode="car_driver">On Car</button>
+          <button type="button" class="mode-pill" data-mode="photo_car">Photo Car</button>
+          <button type="button" class="mode-pill" data-mode="runner">On Foot</button>
+        </div>
+
+        <div id="home-cop-perk-badge" class="cop-perk-badge hidden">🚁 Flies + 🎯 2s Missiles</div>
+
+        <button id="btn-cycle-biome" class="stage-biome-btn" type="button" title="Switch Map Theme">🏙️ City</button>
+        <span id="home-loadout-summary" class="sr-only">Getaway Coupe · Sunny Metro City · All 9 Items</span>
+      </div>
+
       <div class="primary-cta-row">
-        <button id="btn-open-lobby" class="arcade-btn giant gold" type="button">
-          <span class="btn-main-text">PLAY WITH FRIENDS</span>
-          <span class="btn-sub-text">Phone Party Lobby · QR Invite · Last One Standing</span>
+        <button id="btn-open-lobby" class="arcade-btn giant gold cta-paddle" type="button">
+          <span class="cta-emblem" aria-hidden="true">
+            <svg class="ui-svg" viewBox="0 0 24 24">
+              <rect x="3" y="3" width="7" height="7" rx="1.5" />
+              <rect x="14" y="3" width="7" height="7" rx="1.5" />
+              <rect x="3" y="14" width="7" height="7" rx="1.5" />
+              <path d="M14 14h3v3h-3zM18 14h3v3h-3zM14 18h3v3h-3zM18 18h3v3h-3z" />
+            </svg>
+          </span>
+          <span class="cta-copy">
+            <span class="btn-main-text">PLAY WITH FRIENDS</span>
+            <span class="btn-sub-text">Up to 16 Players · QR Party</span>
+          </span>
         </button>
-        <button id="btn-play-solo" class="arcade-btn giant red" type="button">
-          <span class="btn-main-text">PLAY SOLO NOW</span>
-          <span class="btn-sub-text">Instant 1-Player Smashy Chase</span>
+
+        <button id="btn-play-solo" class="arcade-btn giant red cta-paddle" type="button">
+          <span class="cta-emblem" aria-hidden="true">
+            <svg class="ui-svg" viewBox="0 0 24 24">
+              <path d="M13 2L4.5 13.5h6.5L10 22l9.5-12H13L13 2z" />
+            </svg>
+          </span>
+          <span class="cta-copy">
+            <span class="btn-main-text">PLAY SOLO NOW</span>
+            <span class="btn-sub-text">Instant 5-Star Police Chase</span>
+          </span>
         </button>
       </div>
 
-      <!-- 5 Workshop / Customizer Buttons -->
-      <div class="workshop-grid">
+      <nav class="workshop-dock" aria-label="Customization Studios">
         <button class="workshop-btn" type="button" data-open-modal="people-modal">
-          <span class="ws-icon">📸</span>
-          <span class="ws-title">People &amp; Cops</span>
-          <span class="ws-sub">Upload faces</span>
+          <svg class="ws-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="9.5" cy="8.5" r="3.2" />
+            <path d="M3.5 19.5a6 6 0 0112 0" />
+            <path d="M16.5 7.5h4M18.5 5.5v4" />
+          </svg>
+          <span class="ws-title">Faces &amp; Cops</span>
         </button>
+
         <button class="workshop-btn" type="button" data-open-modal="garage-modal">
-          <span class="ws-icon">🏎️</span>
-          <span class="ws-title">Garage</span>
-          <span class="ws-sub">12 cars &amp; stats</span>
+          <svg class="ws-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 14.5l2-5.5h14l2 5.5v4H3v-4z" />
+            <circle cx="7" cy="18.5" r="2" />
+            <circle cx="17" cy="18.5" r="2" />
+            <path d="M6.5 9l1.5-3h8l1.5 3" />
+          </svg>
+          <span class="ws-title">12 Cars &amp; Tune</span>
         </button>
+
         <button class="workshop-btn" type="button" data-open-modal="world-modal">
-          <span class="ws-icon">🎁</span>
-          <span class="ws-title">World &amp; Items</span>
-          <span class="ws-sub">Maps &amp; ? boxes</span>
+          <svg class="ws-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2.5l8.5 4.8v9.4L12 21.5l-8.5-4.8V7.3L12 2.5z" />
+            <path d="M10.4 9.5a2 2 0 113.1 1.7c-.8.5-1.5 1-1.5 2M12 16.2h.01" />
+          </svg>
+          <span class="ws-title">World &amp; ? Items</span>
         </button>
+
         <button class="workshop-btn" type="button" data-open-modal="sound-modal">
-          <span class="ws-icon">🎙️</span>
-          <span class="ws-title">Custom Sounds</span>
-          <span class="ws-sub">Record voice</span>
+          <svg class="ws-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="10" rx="3" />
+            <path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M8.5 21h7" />
+          </svg>
+          <span class="ws-title">Custom Voices</span>
         </button>
-        <button id="btn-home-settings" class="workshop-btn" type="button" data-open-modal="settings-modal">
-          <span class="ws-icon">⚙️</span>
-          <span class="ws-title">Settings</span>
-          <span class="ws-sub">POV &amp; controls</span>
-        </button>
+      </nav>
+    </div>
+  </div>
+
+  <!-- ======================== INSTALL TO HOME SCREEN MODAL ======================== -->
+  <div id="install-modal" class="modal-backdrop hidden">
+    <div class="modal-panel install-panel">
+      <div class="modal-header">
+        <h2>Add Smashy Kart to Home Screen</h2>
+        <button class="close-modal-btn" type="button" data-close-modal="install-modal">Done</button>
       </div>
 
-      <div id="solo-best-bar" class="solo-best-bar">Best Run: <strong id="best-time-label">0.0s</strong> · Top Score: <strong id="best-score-label">0</strong></div>
+      <div class="install-hero">
+        <img src="./icon-180.png" width="72" height="72" class="install-app-icon" alt="Smashy Kart App Icon" />
+        <div class="install-hero-copy">
+          <strong>Full-Screen Arcade App</strong>
+          <p>Launch instantly from your Home Screen with custom icon and zero browser bars.</p>
+        </div>
+      </div>
+
+      <button id="btn-trigger-native-install" class="arcade-btn gold full install-native-btn hidden" type="button">
+        <span class="btn-main-text">INSTALL APP NOW</span>
+        <span class="btn-sub-text">One-tap Home Screen install</span>
+      </button>
+
+      <div class="install-guide-list">
+        <div class="install-step-row">
+          <div class="install-step-icon" aria-hidden="true">
+            <svg class="ui-svg" viewBox="0 0 24 24">
+              <path d="M12 3v11M8 7l4-4 4 4" />
+              <path d="M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7" />
+            </svg>
+          </div>
+          <div class="install-step-body">
+            <strong>1. Tap Share in Safari</strong>
+            <span>On iPhone or iPad, tap the <strong>Share</strong> icon in Safari's toolbar (or <strong>⋮ Menu</strong> in Chrome).</span>
+          </div>
+        </div>
+
+        <div class="install-step-row">
+          <div class="install-step-icon gold-tint" aria-hidden="true">
+            <svg class="ui-svg" viewBox="0 0 24 24">
+              <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+              <path d="M12 8v8M8 12h8" />
+            </svg>
+          </div>
+          <div class="install-step-body">
+            <strong>2. Tap "Add to Home Screen"</strong>
+            <span>Scroll down and tap <strong>Add to Home Screen</strong>, then tap <strong>Add</strong> in the top corner.</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -203,7 +446,7 @@
         <div class="lobby-split">
           <div class="lobby-box highlight">
             <h3>Start a Room</h3>
-            <p>Creates a 4-letter code and QR code your friends can scan on their phones.</p>
+            <p>Creates a 4-letter code and QR code for up to 16 friends to scan on their phones.</p>
             <button id="btn-create-room" class="arcade-btn gold full" type="button">Create Party Room</button>
           </div>
           <div class="lobby-box">
@@ -224,7 +467,7 @@
           <div id="room-qr-box" class="room-qr-box" aria-label="Scan with phone camera to join"></div>
           <div class="room-invite-info">
             <div class="room-code-pill">ROOM CODE: <strong id="room-code-display">----</strong></div>
-            <p class="invite-help">Scan this QR code with a phone camera or text the link to friends anywhere (Wi-Fi or cell data):</p>
+            <p class="invite-help">Scan this QR code with a phone camera or text the link to up to 16 friends anywhere:</p>
             <div class="invite-link-row">
               <input id="room-share-url" class="share-url-input" type="text" readonly />
               <button id="btn-copy-link" class="arcade-btn small cyan" type="button">Copy Link</button>
@@ -233,17 +476,27 @@
           </div>
         </div>
 
-        <!-- Quick Loadout Switcher right inside Lobby -->
+        <!-- Quick Loadout & Team Switcher right inside Lobby -->
         <div class="lobby-self-strip">
-          <span>Your Mode:</span>
+          <span>Your Team:</span>
+          <div class="role-pills compact" id="lobby-role-pills" role="group" aria-label="Your Party Team">
+            <button type="button" class="role-pill active" data-role="runner">🏎️ Runner</button>
+            <button type="button" class="role-pill cop-pill" data-role="cop">🚔 Police</button>
+          </div>
           <div class="mode-pills compact" id="lobby-mode-pills">
             <button type="button" class="mode-pill active" data-mode="car_driver">On a Car</button>
             <button type="button" class="mode-pill" data-mode="photo_car">Look Like a Car</button>
             <button type="button" class="mode-pill" data-mode="runner">Just Myself</button>
           </div>
+          <div class="cop-unit-pills compact hidden" id="lobby-cop-pills" role="group" aria-label="Select Police Unit">
+            <button type="button" class="cop-unit-pill" data-cop-veh="cop_cruiser">🚔 Cruiser</button>
+            <button type="button" class="cop-unit-pill" data-cop-veh="cop_swat">🛡️ SWAT</button>
+            <button type="button" class="cop-unit-pill active" data-cop-veh="cop_heli">🚁 Heli</button>
+            <button type="button" class="cop-unit-pill" data-cop-veh="cop_tank">🪖 Tank</button>
+          </div>
           <button id="btn-lobby-photo" class="arcade-btn small" type="button" data-open-modal="people-modal">Change Photo</button>
-          <button id="btn-lobby-car" class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Car</button>
-          <button id="btn-lobby-settings" class="arcade-btn small cyan" type="button" data-open-modal="settings-modal">⚙️ My Settings</button>
+          <button id="btn-lobby-car" class="arcade-btn small" type="button" data-open-modal="garage-modal">Pick Vehicle</button>
+          <button id="btn-lobby-settings" class="arcade-btn small cyan" type="button" data-open-modal="settings-modal">My Settings</button>
         </div>
 
         <!-- Lobby Manager Full Control Panel (Host Only) -->
@@ -282,8 +535,16 @@
             </div>
           </div>
 
-          <!-- Guest Permission Switches -->
+          <!-- Guest Permission & AI Police Switches -->
           <div class="perm-switches">
+            <label class="switch-row highlight-switch">
+              <input id="perm-ai-cops" type="checkbox" checked />
+              <span><strong>🚔 AI Police Chasing Players (ON / OFF)</strong> — Turn OFF so zero computer police spawn (pure friends PvP or Human Cops vs. Runners!)</span>
+            </label>
+            <label class="switch-row highlight-switch">
+              <input id="perm-allow-cops" type="checkbox" checked />
+              <span><strong>Allow Players to Play as Police</strong> (Helicopter / Tank / SWAT / Cruiser)</span>
+            </label>
             <label class="switch-row">
               <input id="perm-lock-stats" type="checkbox" checked />
               <span><strong>Lock Equal Speed &amp; Weight</strong> (Stops anyone from boosting their own car's speed or size)</span>
@@ -341,7 +602,7 @@
           <div class="cop-toggle-row">
             <label class="switch-row">
               <input id="toggle-custom-cops" type="checkbox" checked />
-              <span><strong>Put Friends on the Police too!</strong> (Anyone marked "Cop" below drives the cop cars chasing you)</span>
+              <span><strong>Put uploaded faces onto AI police cars</strong> (Anyone marked "Cop Face: ON" above can drive AI cop cars)</span>
             </label>
           </div>
         </div>
@@ -353,7 +614,7 @@
             <canvas id="photo-crop-canvas" width="256" height="256"></canvas>
           </div>
           <div class="photo-stage-bar">
-            <span class="photo-drag-hint">👆 Drag directly on photo to move · Pinch or scroll to zoom</span>
+            <span class="photo-drag-hint">Drag directly on photo to move · Pinch or scroll to zoom</span>
             <button id="btn-center-photo" class="tiny-pill action" type="button">↺ Center &amp; Fit</button>
           </div>
           <input id="photo-person-name" class="name-input full" type="text" maxlength="16" placeholder="Person's Name (e.g. Me, Jake)" />
@@ -383,7 +644,7 @@
           </div>
           <label class="switch-row">
             <input id="chk-person-cop" type="checkbox" checked />
-            <span>Also let police cars use this person's face</span>
+            <span>Put this person's face onto AI police cars (Cop Face: ON)</span>
           </label>
           <div class="editor-btn-row">
             <button id="btn-cancel-photo" class="arcade-btn dark" type="button">Cancel</button>
@@ -403,7 +664,29 @@
       </div>
 
       <div class="garage-section">
-        <h3>Runner Style (Locked In When Round Starts)</h3>
+        <h3>Choose Your Team</h3>
+        <div class="team-cards-row" id="garage-role-cards">
+          <button type="button" class="mode-card active" data-role="runner">
+            <strong>🏎️ Getaway Runner</strong>
+            <span>Drive 12 custom getaway vehicles or sprint on foot</span>
+          </button>
+          <button type="button" class="mode-card cop-team-card" data-role="cop">
+            <strong>🚔 Play as Police Officer</strong>
+            <span>Fly the Attack Helicopter or drive the Tank, SWAT &amp; Interceptor</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="garage-cop-section" class="garage-section cop-fleet-section">
+        <div class="section-bar compact-bar">
+          <h3>🚔 Police Precinct Fleet (Tap Any Unit to Play as Cop)</h3>
+          <span class="fleet-hint-pill">🎯 2.0s Soft-Tracking Missiles on Heli &amp; Tank</span>
+        </div>
+        <div id="cop-vehicle-grid" class="cop-vehicle-grid"></div>
+      </div>
+
+      <div id="garage-runner-mode-section" class="garage-section">
+        <h3>Getaway Runner Style (Locked In When Round Starts)</h3>
         <div class="mode-cards-row" id="garage-mode-cards">
           <button type="button" class="mode-card active" data-mode="car_driver">
             <strong>On a Car</strong>
@@ -420,8 +703,8 @@
         </div>
       </div>
 
-      <div class="garage-section">
-        <h3>12 Blocky Vehicles</h3>
+      <div id="garage-runner-cars-section" class="garage-section">
+        <h3>12 Getaway Vehicles</h3>
         <div id="vehicle-grid" class="vehicle-grid"></div>
       </div>
 
@@ -467,13 +750,17 @@
 
   <!-- ======================== WORLD & MARIO KART ITEMS MODAL ======================== -->
   <div id="world-modal" class="modal-backdrop hidden">
-    <div class="modal-panel wide">
+    <div class="modal-panel wide world-modal-panel">
       <div class="modal-header">
         <h2>World Settings &amp; Mario Kart Item Mixer</h2>
         <button class="close-modal-btn" type="button" data-close-modal="world-modal">Done</button>
       </div>
 
-      <div class="garage-split">
+      <div id="world-guest-lock-note" class="guest-rules-banner hidden">
+        🔒 Connected as Party Guest — Map &amp; Ability Drop Rates are controlled by the Lobby Host!
+      </div>
+
+      <div class="garage-split world-modal-split">
         <div class="garage-col">
           <h3>Map Theme (Huge 4,800x4,800 World)</h3>
           <div class="seg-row" id="biome-btns">
@@ -482,20 +769,34 @@
             <button type="button" class="seg-btn" data-biome="snow">❄️ Alpine Snow</button>
           </div>
 
-          <div class="slider-row">
-            <label>Cop Craziness <span id="val-cop-intensity">Normal (100%)</span></label>
-            <input id="rng-cop-intensity" type="range" min="0.5" max="1.7" step="0.1" value="1.0" />
+          <label class="switch-row ai-cops-world-switch" for="chk-ai-cops">
+            <input id="chk-ai-cops" type="checkbox" checked />
+            <span class="ai-cops-switch-copy">
+              <strong>🚔 AI Police Chasing You (ON / OFF)</strong>
+              <small id="lbl-ai-cops-state" class="ai-cops-sub">ON — 5-Star Police Pursuit</small>
+            </span>
+          </label>
+
+          <div id="ai-cop-sliders-wrap" class="ai-cop-sliders-wrap">
+            <div class="slider-row">
+              <label for="rng-cop-intensity">Cop Craziness <span id="val-cop-intensity">Normal (100%)</span></label>
+              <input id="rng-cop-intensity" type="range" min="0.5" max="1.7" step="0.1" value="1.0" />
+            </div>
+            <div class="slider-row">
+              <label for="rng-start-stars">Starting Wanted Stars <span id="val-start-stars">1 ★</span></label>
+              <input id="rng-start-stars" type="range" min="1" max="5" step="1" value="1" />
+            </div>
           </div>
           <div class="slider-row">
-            <label>Starting Wanted Stars <span id="val-start-stars">1 ★</span></label>
-            <input id="rng-start-stars" type="range" min="1" max="5" step="1" value="1" />
+            <label for="rng-box-density">Rainbow ? Box Drop Rate <span id="val-box-density">120%</span></label>
+            <input id="rng-box-density" type="range" min="0.1" max="5.0" step="0.1" value="1.2" />
           </div>
           <div class="slider-row">
-            <label>Rainbow ? Box Frequency <span id="val-box-density">High (120%)</span></label>
-            <input id="rng-box-density" type="range" min="0.5" max="2.2" step="0.1" value="1.2" />
+            <label for="rng-sugar-rate">Sugar 3x Box Spawn Rate <span id="val-sugar-rate">100%</span></label>
+            <input id="rng-sugar-rate" type="range" min="0" max="5.0" step="0.1" value="1.0" />
           </div>
           <div class="slider-row">
-            <label>Jump Gravity <span id="val-gravity">Normal</span></label>
+            <label for="rng-gravity">Jump Gravity <span id="val-gravity">Normal</span></label>
             <input id="rng-gravity" type="range" min="0.55" max="1.3" step="0.05" value="1.0" />
           </div>
 
@@ -504,86 +805,234 @@
             <div class="seg-row" id="camera-mode-btns">
               <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
               <button type="button" class="seg-btn" data-cam="chase">Behind Chase</button>
-              <button type="button" class="seg-btn" data-cam="pov">First-Person POV</button>
+              <button type="button" class="seg-btn" data-cam="pov">Hood POV</button>
             </div>
           </div>
 
           <div class="control-group">
             <label>Phone Steering Style</label>
             <div class="seg-row" id="touch-style-btns">
-              <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap</button>
+              <button type="button" class="seg-btn active" data-touch="split">Buttons + Split</button>
+              <button type="button" class="seg-btn" data-touch="buttons">Buttons Only</button>
               <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick</button>
             </div>
           </div>
         </div>
 
-        <div class="garage-col">
-          <h3>Mario Kart ? Box Abilities (Tap to Toggle)</h3>
+        <div class="garage-col mixer-col">
+          <div class="mixer-col-head">
+            <h3>Mario Kart ? Box Ability Drop Odds</h3>
+            <span class="mixer-range-pill">0.1% – 1000%</span>
+          </div>
+          <div id="ability-rate-presets" class="ability-rate-presets" role="group" aria-label="Ability Drop Rate Quick Presets">
+            <button type="button" class="rate-preset-chip" data-rpreset="default">↺ Reset 100%</button>
+            <button type="button" class="rate-preset-chip" data-rpreset="equal">⚖️ Exact Equal %</button>
+            <button type="button" class="rate-preset-chip" data-rpreset="boost500">🔥 All 500%</button>
+            <button type="button" class="rate-preset-chip" data-rpreset="rpg1000">🚀 1000% RPG / 0.1% Rest</button>
+            <button type="button" class="rate-preset-chip" data-rpreset="sugar1000">🍭 1000% Sugar</button>
+          </div>
           <div id="ability-mixer-grid" class="ability-mixer-grid"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- ======================== PERSONAL SETTINGS MODAL ======================== -->
+  <!-- ======================== 4-TAB PRO VIDEO-GAME SETTINGS MODAL ======================== -->
   <div id="settings-modal" class="modal-backdrop settings-backdrop hidden">
-    <div class="modal-panel">
+    <div class="modal-panel wide settings-panel">
       <div class="modal-header">
-        <h2>⚙️ Personal Settings</h2>
+        <h2>Personal Settings</h2>
         <button class="close-modal-btn" type="button" data-close-modal="settings-modal">Done</button>
       </div>
-      <p class="modal-lead">Tune your own camera angle, POV field-of-view, steering feel, and HUD — works live mid-chase and in any Party Lobby!</p>
 
-      <div class="settings-stack">
-        <div class="settings-card">
-          <div class="settings-label-row">
-            <label class="settings-heading">Camera Angle</label>
-            <span class="settings-shortcut-hint">Keys: C / V or 🎥</span>
+      <div id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Personal Settings Tabs">
+        <button type="button" class="settings-tab active" data-stab="camera" role="tab">Camera &amp; Display</button>
+        <button type="button" class="settings-tab" data-stab="controls" role="tab">Controls &amp; Claw HUD</button>
+        <button type="button" class="settings-tab" data-stab="keyboard" role="tab">Mac / PC Keybinds</button>
+        <button type="button" class="settings-tab" data-stab="audio" role="tab">Audio &amp; Voice</button>
+      </div>
+
+      <!-- TAB 1: Camera & Display -->
+      <div class="settings-pane" data-stab-pane="camera">
+        <div class="settings-grid-two">
+          <div class="settings-card">
+            <div class="settings-label-row">
+              <span class="settings-heading">Camera Angle</span>
+              <span class="settings-shortcut-hint">Cycle: C / V</span>
+            </div>
+            <div class="seg-row" id="settings-cam-btns">
+              <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
+              <button type="button" class="seg-btn" data-cam="chase">Behind Chase</button>
+              <button type="button" class="seg-btn" data-cam="pov">Hood POV</button>
+            </div>
+
+            <div class="slider-row">
+              <label for="rng-pov-fov">Hood POV Field of View <span id="val-pov-fov">78°</span></label>
+              <input id="rng-pov-fov" type="range" min="62" max="96" step="1" value="78" />
+            </div>
+
+            <div class="slider-row">
+              <label for="rng-cam-shake">Crash &amp; Nitro Camera Shake <span id="val-cam-shake">100%</span></label>
+              <input id="rng-cam-shake" type="range" min="0" max="1.5" step="0.1" value="1.0" />
+            </div>
           </div>
-          <div class="seg-row" id="settings-cam-btns">
-            <button type="button" class="seg-btn active" data-cam="smashy">Smashy Overhead</button>
-            <button type="button" class="seg-btn" data-cam="chase">Behind Chase</button>
-            <button type="button" class="seg-btn" data-cam="pov">First-Person POV</button>
-          </div>
-          <div class="slider-row">
-            <label>POV Field of View <span id="val-pov-fov">76°</span></label>
-            <input id="rng-pov-fov" type="range" min="62" max="92" step="1" value="76" />
+
+          <div class="settings-card">
+            <span class="settings-heading">Graphics &amp; Speed Units</span>
+            <div class="control-group">
+              <label class="sub-field-label">3D Graphics Quality</label>
+              <div class="seg-row" id="settings-gfx-btns">
+                <button type="button" class="seg-btn active" data-gfx="high">High</button>
+                <button type="button" class="seg-btn" data-gfx="balanced">Balanced</button>
+                <button type="button" class="seg-btn" data-gfx="performance">60 FPS Fast</button>
+              </div>
+            </div>
+
+            <div class="control-group">
+              <label class="sub-field-label">Speedometer Units</label>
+              <div class="seg-row" id="settings-unit-btns">
+                <button type="button" class="seg-btn active" data-unit="mph">MPH</button>
+                <button type="button" class="seg-btn" data-unit="kmh">KM/H</button>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="settings-card">
-          <label class="settings-heading">Controls &amp; Steering</label>
-          <div class="seg-row" id="settings-touch-btns">
-            <button type="button" class="seg-btn active" data-touch="split">Left / Right Tap</button>
-            <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick</button>
-          </div>
-          <div class="slider-row">
-            <label>Steering Sensitivity <span id="val-steer-sens">100%</span></label>
-            <input id="rng-steer-sens" type="range" min="0.7" max="1.4" step="0.05" value="1.0" />
-          </div>
-        </div>
-
-        <div class="settings-card">
-          <label class="settings-heading">Audio &amp; HUD Display</label>
-          <div class="slider-row">
-            <label>Master Sound Volume <span id="val-settings-vol">85%</span></label>
-            <input id="rng-settings-vol" type="range" min="0" max="1" step="0.05" value="0.85" />
-          </div>
-          <div class="settings-toggles">
+          <span class="settings-heading">HUD &amp; Visual Overlays</span>
+          <div class="settings-toggles two-col">
+            <label class="switch-row">
+              <input id="chk-show-desktop-btns" type="checkbox" checked />
+              <span>Show On-Screen Buttons on Mac / PC</span>
+            </label>
+            <label class="switch-row">
+              <input id="chk-show-keyhints" type="checkbox" checked />
+              <span>Show Keyboard Keycaps on Buttons ([S], [SPACE])</span>
+            </label>
+            <label class="switch-row">
+              <input id="chk-show-minimap" type="checkbox" checked />
+              <span>Show Live GPS Radar Minimap</span>
+            </label>
             <label class="switch-row">
               <input id="chk-show-speedo" type="checkbox" checked />
-              <span>Show Speedometer &amp; Drift Spark Gauge</span>
+              <span>Show Speedometer &amp; Drift Gauge</span>
+            </label>
+            <label class="switch-row">
+              <input id="chk-show-fps" type="checkbox" />
+              <span>Show FPS Counter</span>
             </label>
             <label class="switch-row">
               <input id="chk-show-quickcam" type="checkbox" checked />
-              <span>Show Quick Camera Button (🎥) in HUD</span>
+              <span>Show Quick Camera Button in HUD</span>
+            </label>
+            <label class="switch-row">
+              <input id="chk-screen-fx" type="checkbox" checked />
+              <span>Speed Streaks &amp; Siren Edge Flash</span>
             </label>
           </div>
         </div>
+      </div>
 
-        <div class="settings-footer-row">
-          <button id="btn-settings-voice-studio" class="arcade-btn small cyan" type="button">🎙️ Open Custom Voice Studio</button>
-          <button id="btn-reset-personal-settings" class="arcade-btn small dark" type="button">↺ Reset Defaults</button>
+      <!-- TAB 2: Controls & Claw HUD -->
+      <div class="settings-pane hidden" data-stab-pane="controls">
+        <div class="settings-card highlight-card">
+          <div class="settings-label-row">
+            <span class="settings-heading">Custom Button Placement &amp; 4-Finger Claw</span>
+            <span class="settings-shortcut-hint">Free Drag + Size</span>
+          </div>
+          <p class="card-helper">Move Brake, Item, Horn, Gas, and Steer buttons anywhere on screen, or load the 4-Finger Claw setup.</p>
+          <button id="btn-open-hud-editor" class="arcade-btn gold full hud-editor-cta" type="button">
+            ✋ Customize Screen Button Positions (Claw / Free Drag)
+          </button>
+
+          <div class="control-group">
+            <label class="sub-field-label">Quick HUD Layout Preset</label>
+            <div class="seg-row" id="settings-hpreset-btns">
+              <button type="button" class="seg-btn active" data-hpreset="thumbs">👍 Classic Thumbs</button>
+              <button type="button" class="seg-btn" data-hpreset="claw">🦅 4-Finger Claw</button>
+              <button type="button" class="seg-btn" data-hpreset="lefty">🫲 Left-Handed</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-grid-two">
+          <div class="settings-card">
+            <span class="settings-heading">Touch Steering Mode</span>
+            <div class="seg-row" id="settings-touch-btns">
+              <button type="button" class="seg-btn active" data-touch="split">Buttons + Split Screen</button>
+              <button type="button" class="seg-btn" data-touch="buttons">Buttons Only</button>
+              <button type="button" class="seg-btn" data-touch="joystick">Thumb Joystick + Buttons</button>
+            </div>
+
+            <div class="settings-toggles">
+              <label class="switch-row">
+                <input id="chk-auto-accel" type="checkbox" checked />
+                <span><strong>Auto-Accelerate</strong> (uncheck for Manual Gas [W] / Pedal)</span>
+              </label>
+              <label class="switch-row">
+                <input id="chk-invert-steer" type="checkbox" />
+                <span>Invert Left / Right Steering</span>
+              </label>
+              <label class="switch-row">
+                <input id="chk-haptics" type="checkbox" checked />
+                <span>Phone Vibration Feedback</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <span class="settings-heading">Steering Response</span>
+            <div class="slider-row">
+              <label for="rng-steer-sens">Steering Sensitivity <span id="val-steer-sens">100%</span></label>
+              <input id="rng-steer-sens" type="range" min="0.7" max="1.4" step="0.05" value="1.0" />
+            </div>
+            <div class="slider-row">
+              <label for="rng-steer-deadzone">Joystick Deadzone <span id="val-steer-deadzone">5%</span></label>
+              <input id="rng-steer-deadzone" type="range" min="0" max="0.22" step="0.02" value="0.05" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: Mac / PC Keybinds -->
+      <div class="settings-pane hidden" data-stab-pane="keyboard">
+        <div class="settings-card">
+          <div class="settings-label-row">
+            <span class="settings-heading">MacBook &amp; PC Keyboard Controls</span>
+            <span class="settings-shortcut-hint">Click any slot to rebind · Esc cancels</span>
+          </div>
+          <div id="keybinds-list" class="keybinds-list"></div>
+          <div class="settings-footer-row">
+            <button id="btn-reset-keybinds" class="arcade-btn small dark" type="button">↺ Reset Default Keyboard Keys</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: Audio & Voice -->
+      <div class="settings-pane hidden" data-stab-pane="audio">
+        <div class="settings-card">
+          <span class="settings-heading">Sound Mixer</span>
+          <div class="slider-row">
+            <label for="rng-settings-vol">Master Volume <span id="val-settings-vol">85%</span></label>
+            <input id="rng-settings-vol" type="range" min="0" max="1" step="0.05" value="0.85" />
+          </div>
+          <div class="slider-row">
+            <label for="rng-engine-vol">Engine &amp; Tire Drift Volume <span id="val-engine-vol">85%</span></label>
+            <input id="rng-engine-vol" type="range" min="0" max="1" step="0.05" value="0.85" />
+          </div>
+          <div class="slider-row">
+            <label for="rng-action-vol">Sirens, Explosions &amp; Items Volume <span id="val-action-vol">100%</span></label>
+            <input id="rng-action-vol" type="range" min="0" max="1" step="0.05" value="1.0" />
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <span class="settings-heading">Custom Voice Clips &amp; Reset</span>
+          <p class="card-helper">Record your own screams, horns, crashes, or turbo yells in the Sound Studio.</p>
+          <div class="settings-footer-row">
+            <button id="btn-settings-voice-studio" class="arcade-btn small cyan" type="button">🎙️ Record Custom Screams &amp; Horns</button>
+            <button id="btn-reset-personal-settings" class="arcade-btn small dark" type="button">↺ Reset All Settings</button>
+          </div>
         </div>
       </div>
     </div>

@@ -22,6 +22,7 @@ const MIME_TYPES = {
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png',
   '.webp': 'image/webp',
   '.jpg': 'image/jpeg',
@@ -113,10 +114,18 @@ function createClosePayload(code = 1000, reason = '') {
   return buf;
 }
 
+const VALID_COP_VEHICLE_IDS = new Set(['cop_cruiser', 'cop_swat', 'cop_heli', 'cop_tank']);
+
 function sanitizeProfile(raw = {}, fallbackName = 'Player') {
   const out = {};
   if (typeof raw.name === 'string') {
     out.name = raw.name.trim().slice(0, 22) || fallbackName;
+  }
+  if (raw.playerRole === 'cop' || raw.playerRole === 'runner') {
+    out.playerRole = raw.playerRole;
+  }
+  if (typeof raw.copVehicleId === 'string' && VALID_COP_VEHICLE_IDS.has(raw.copVehicleId)) {
+    out.copVehicleId = raw.copVehicleId;
   }
   if (
     raw.characterMode === 'car_driver' ||
@@ -150,13 +159,41 @@ function sanitizeProfile(raw = {}, fallbackName = 'Player') {
   return out;
 }
 
+const ROOM_ABILITY_IDS = [
+  'homing_rocket',
+  'sugar_rush',
+  'triple_boost',
+  'star_power',
+  'mega_giant',
+  'banana_bunch',
+  'bomb_toss',
+  'lightning_zap',
+  'super_horn',
+];
+
+function clampServerDropRatePct(val) {
+  if (val === null || val === undefined || val === '') return 100;
+  const num = Number(val);
+  if (!Number.isFinite(num)) return 100;
+  const clamped = Math.max(0.1, Math.min(1000, num));
+  return Math.round(clamped * 10) / 10;
+}
+
+function defaultRoomItemWeights() {
+  const out = {};
+  for (const id of ROOM_ABILITY_IDS) out[id] = 100;
+  return out;
+}
+
 function defaultRoomSettings() {
   return {
     biome: 'city',
+    aiCopsEnabled: true,
     copIntensity: 1.0,
     startStars: 1,
     trafficDensity: 1.0,
     itemBoxDensity: 1.2,
+    sugarBoxRate: 1.0,
     gravityMult: 1.0,
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems: {
@@ -170,11 +207,13 @@ function defaultRoomSettings() {
       lightning_zap: true,
       super_horn: true,
     },
+    itemWeights: defaultRoomItemWeights(),
     lobbyRules: {
       lockStats: true,
       allowCarChoice: true,
       allowModeChoice: true,
       allowCustomPhotos: true,
+      allowPlayerCops: true,
       universalSpeedMult: 1.0,
       universalDriftMult: 1.0,
       universalMassMult: 1.0,
@@ -190,22 +229,30 @@ function sanitizeRoomSettings(current, patch = {}) {
   if (patch.biome === 'city' || patch.biome === 'desert' || patch.biome === 'snow') {
     next.biome = patch.biome;
   }
-  if (Number.isFinite(Number(patch.copIntensity))) {
+  if (patch.aiCopsEnabled !== undefined) {
+    next.aiCopsEnabled = Boolean(patch.aiCopsEnabled);
+  } else if (next.aiCopsEnabled === undefined) {
+    next.aiCopsEnabled = true;
+  }
+  if (patch.copIntensity !== undefined && patch.copIntensity !== null && Number.isFinite(Number(patch.copIntensity))) {
     next.copIntensity = Math.max(0.4, Math.min(2.0, Number(patch.copIntensity)));
   }
-  if (Number.isFinite(Number(patch.startStars))) {
+  if (patch.startStars !== undefined && patch.startStars !== null && Number.isFinite(Number(patch.startStars))) {
     next.startStars = Math.max(1, Math.min(5, Math.round(Number(patch.startStars))));
   }
-  if (Number.isFinite(Number(patch.trafficDensity))) {
+  if (patch.trafficDensity !== undefined && patch.trafficDensity !== null && Number.isFinite(Number(patch.trafficDensity))) {
     next.trafficDensity = Math.max(0, Math.min(2.0, Number(patch.trafficDensity)));
   }
-  if (Number.isFinite(Number(patch.itemBoxDensity))) {
-    next.itemBoxDensity = Math.max(0.3, Math.min(2.5, Number(patch.itemBoxDensity)));
+  if (patch.itemBoxDensity !== undefined && patch.itemBoxDensity !== null && Number.isFinite(Number(patch.itemBoxDensity))) {
+    next.itemBoxDensity = Math.round(Math.max(0.1, Math.min(5.0, Number(patch.itemBoxDensity))) * 100) / 100;
   }
-  if (Number.isFinite(Number(patch.gravityMult))) {
+  if (patch.sugarBoxRate !== undefined && patch.sugarBoxRate !== null && Number.isFinite(Number(patch.sugarBoxRate))) {
+    next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(patch.sugarBoxRate))) * 100) / 100;
+  }
+  if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
     next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
   }
-  if (Number.isFinite(Number(patch.worldSeed))) {
+  if (patch.worldSeed !== undefined && patch.worldSeed !== null && Number.isFinite(Number(patch.worldSeed))) {
     next.worldSeed = Math.floor(Math.abs(Number(patch.worldSeed))) || 777123;
   }
   if (patch.enabledItems && typeof patch.enabledItems === 'object') {
@@ -213,6 +260,17 @@ function sanitizeRoomSettings(current, patch = {}) {
     for (const [k, v] of Object.entries(patch.enabledItems)) {
       next.enabledItems[k] = Boolean(v);
     }
+  }
+  if (patch.itemWeights && typeof patch.itemWeights === 'object') {
+    const mergedWeights = { ...defaultRoomItemWeights(), ...(next.itemWeights || {}) };
+    for (const [k, v] of Object.entries(patch.itemWeights)) {
+      if (ROOM_ABILITY_IDS.includes(k)) {
+        mergedWeights[k] = clampServerDropRatePct(v);
+      }
+    }
+    next.itemWeights = mergedWeights;
+  } else if (!next.itemWeights || typeof next.itemWeights !== 'object') {
+    next.itemWeights = defaultRoomItemWeights();
   }
   if (patch.lobbyRules && typeof patch.lobbyRules === 'object') {
     const curR = next.lobbyRules || {};
@@ -222,6 +280,7 @@ function sanitizeRoomSettings(current, patch = {}) {
       allowCarChoice: pr.allowCarChoice !== undefined ? Boolean(pr.allowCarChoice) : curR.allowCarChoice !== false,
       allowModeChoice: pr.allowModeChoice !== undefined ? Boolean(pr.allowModeChoice) : curR.allowModeChoice !== false,
       allowCustomPhotos: pr.allowCustomPhotos !== undefined ? Boolean(pr.allowCustomPhotos) : curR.allowCustomPhotos !== false,
+      allowPlayerCops: pr.allowPlayerCops !== undefined ? Boolean(pr.allowPlayerCops) : curR.allowPlayerCops !== false,
       universalSpeedMult: Number.isFinite(Number(pr.universalSpeedMult))
         ? Math.max(0.6, Math.min(1.7, Number(pr.universalSpeedMult)))
         : curR.universalSpeedMult ?? 1.0,
@@ -294,10 +353,22 @@ export function createSmashyServer() {
   function serializeRoomPlayer(client, spawnIndex = 0) {
     const room = client.roomCode ? rooms.get(client.roomCode) : null;
     const rules = room?.settings?.lobbyRules || {};
+    const isHost = Boolean(room && room.hostId === client.id);
+    const effectiveRole =
+      rules.allowPlayerCops === false && !isHost
+        ? 'runner'
+        : client.profile.playerRole === 'cop'
+          ? 'cop'
+          : 'runner';
+    const effectiveCopVeh = VALID_COP_VEHICLE_IDS.has(client.profile.copVehicleId)
+      ? client.profile.copVehicleId
+      : 'cop_heli';
     const effectiveMode =
-      rules.allowModeChoice === false
-        ? rules.universalCharacterMode || 'car_driver'
-        : client.profile.characterMode;
+      effectiveRole === 'cop'
+        ? 'car_driver'
+        : rules.allowModeChoice === false
+          ? rules.universalCharacterMode || 'car_driver'
+          : client.profile.characterMode;
     const effectiveVeh =
       rules.allowCarChoice === false
         ? rules.universalVehicleId || 'sedan'
@@ -306,9 +377,11 @@ export function createSmashyServer() {
     return {
       id: client.id,
       playerId: client.id,
-      isHost: Boolean(room && room.hostId === client.id),
+      isHost,
       spawnIndex,
       name: client.profile.name,
+      playerRole: effectiveRole,
+      copVehicleId: effectiveCopVeh,
       characterMode: effectiveMode,
       vehicleId: effectiveVeh,
       primaryColor: client.profile.primaryColor,
@@ -340,7 +413,7 @@ export function createSmashyServer() {
     });
   }
 
-  function computeStandings(room) {
+  function computeStandings(room, preferredWinnerTeam = null) {
     if (!room?.match) return [];
     const now = Date.now();
     const elapsedSec = Math.max(0, (now - room.match.liveStartAt) / 1000);
@@ -352,9 +425,17 @@ export function createSmashyServer() {
       };
     });
 
-    // Sort "Who Lasts Longer": alive survivors first, then longest survivalTime, then score
+    // Sort "Who Lasts Longer" (with winning team prioritized in Cops vs. Runners matches!)
     list.sort((a, b) => {
+      if (preferredWinnerTeam) {
+        const aWinTeam = (a.playerRole === 'cop' ? 'cop' : 'runner') === preferredWinnerTeam;
+        const bWinTeam = (b.playerRole === 'cop' ? 'cop' : 'runner') === preferredWinnerTeam;
+        if (aWinTeam !== bWinTeam) return aWinTeam ? -1 : 1;
+      }
       if (a.alive !== b.alive) return a.alive ? -1 : 1;
+      if (preferredWinnerTeam === 'cop' && (b.copsWrecked || 0) !== (a.copsWrecked || 0)) {
+        return (b.copsWrecked || 0) - (a.copsWrecked || 0);
+      }
       if (Math.abs(b.survivalTime - a.survivalTime) > 0.001) {
         return b.survivalTime - a.survivalTime;
       }
@@ -368,6 +449,8 @@ export function createSmashyServer() {
       id: p.id,
       playerId: p.id,
       name: p.name,
+      playerRole: p.playerRole || 'runner',
+      copVehicleId: p.copVehicleId || 'cop_heli',
       characterMode: p.characterMode,
       vehicleId: p.vehicleId,
       primaryColor: p.primaryColor,
@@ -389,18 +472,32 @@ export function createSmashyServer() {
 
     const participants = Array.from(room.match.participants.values());
     const alive = participants.filter((p) => p.alive);
+    const isTeamVsMatch = Boolean(room.match.isTeamVsMatch);
 
-    // Multiplayer (>=2 players): crown the last player standing as soon as <=1 remains alive!
-    // Solo room (1 player): finish when 0 remain alive.
-    const shouldFinish = (total >= 2 && alive.length <= 1) || alive.length === 0;
+    let shouldFinish = false;
+    let winnerTeam = null;
+
+    if (isTeamVsMatch) {
+      const aliveRunners = alive.filter((p) => p.playerRole !== 'cop');
+      const aliveCops = alive.filter((p) => p.playerRole === 'cop');
+      if (aliveRunners.length === 0 || aliveCops.length === 0) {
+        shouldFinish = true;
+        winnerTeam = aliveRunners.length === 0 && aliveCops.length > 0 ? 'cop' : 'runner';
+      }
+    } else {
+      // Classic Multiplayer (>=2 players): crown last player standing when <=1 remains alive!
+      // Solo room (1 player): finish when 0 remain alive.
+      shouldFinish = (total >= 2 && alive.length <= 1) || alive.length === 0;
+    }
+
     if (!shouldFinish) return;
 
-    if (alive.length === 1) {
-      const maxEliminatedTime = participants
-        .filter((p) => !p.alive)
-        .reduce((mx, p) => Math.max(mx, p.survivalTime || 0), 0);
-      const elapsedSec = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
-      alive[0].survivalTime = Math.max(alive[0].survivalTime || 0, elapsedSec, maxEliminatedTime + 0.05);
+    const maxEliminatedTime = participants
+      .filter((p) => !p.alive)
+      .reduce((mx, p) => Math.max(mx, p.survivalTime || 0), 0);
+    const elapsedSec = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
+    for (const survivor of alive) {
+      survivor.survivalTime = Math.max(survivor.survivalTime || 0, elapsedSec, maxEliminatedTime + 0.05);
     }
 
     room.match.finished = true;
@@ -410,7 +507,7 @@ export function createSmashyServer() {
       room.match.countdownTimer = null;
     }
 
-    const standings = computeStandings(room);
+    const standings = computeStandings(room, winnerTeam);
     const winner = standings[0] || null;
 
     broadcastRoom(room, {
@@ -419,6 +516,7 @@ export function createSmashyServer() {
       roomCode: room.code,
       winnerId: winner ? winner.id : null,
       winnerName: winner ? winner.name : null,
+      winnerTeam,
       standings,
       leaderboard: standings,
     });
@@ -635,17 +733,24 @@ export function createSmashyServer() {
         const playersPayload = [];
 
         let idx = 0;
+        let initialRunners = 0;
+        let initialCops = 0;
         for (const member of room.clients.values()) {
           const spawnIndex = idx++;
+          const serializedPlayer = serializeRoomPlayer(member, spawnIndex);
+          if (serializedPlayer.playerRole === 'cop') initialCops++;
+          else initialRunners++;
           participants.set(member.id, {
             id: member.id,
-            name: member.profile.name,
+            name: serializedPlayer.name,
             spawnIndex,
-            characterMode: member.profile.characterMode,
-            vehicleId: member.profile.vehicleId,
-            primaryColor: member.profile.primaryColor,
-            accentColor: member.profile.accentColor,
-            avatarId: member.profile.avatarId || member.id,
+            playerRole: serializedPlayer.playerRole,
+            copVehicleId: serializedPlayer.copVehicleId,
+            characterMode: serializedPlayer.characterMode,
+            vehicleId: serializedPlayer.vehicleId,
+            primaryColor: serializedPlayer.primaryColor,
+            accentColor: serializedPlayer.accentColor,
+            avatarId: serializedPlayer.avatarId || member.id,
             alive: true,
             survivalTime: 0,
             score: 0,
@@ -654,7 +759,7 @@ export function createSmashyServer() {
             eliminatedReason: null,
             killerName: null,
           });
-          playersPayload.push(serializeRoomPlayer(member, spawnIndex));
+          playersPayload.push(serializedPlayer);
         }
 
         room.match = {
@@ -662,6 +767,7 @@ export function createSmashyServer() {
           createdAt: now,
           liveStartAt: startAt,
           finished: false,
+          isTeamVsMatch: initialRunners >= 1 && initialCops >= 1,
           participants,
           countdownTimer: setTimeout(() => {
             if (room.state === 'countdown' && room.match && !room.match.finished) {
@@ -700,10 +806,21 @@ export function createSmashyServer() {
         if (!room) return;
 
         const st = msg.state && typeof msg.state === 'object' ? msg.state : msg;
+        const rules = room.settings?.lobbyRules || {};
+        const isHost = room.hostId === client.id;
+        const rawRole = st.playerRole || client.profile.playerRole || 'runner';
+        const effectiveRole = rules.allowPlayerCops === false && !isHost ? 'runner' : rawRole === 'cop' ? 'cop' : 'runner';
+        const rawCopVeh = st.copVehicleId || client.profile.copVehicleId || 'cop_heli';
         const cleanState = {
           id: client.id,
           playerId: client.id,
           name: client.profile.name,
+          playerRole: effectiveRole,
+          copVehicleId: VALID_COP_VEHICLE_IDS.has(rawCopVeh) ? rawCopVeh : 'cop_heli',
+          flying: effectiveRole === 'cop' && Boolean(st.flying),
+          groundY: Number(st.groundY) || 0,
+          turretAngle: Number(st.turretAngle) || Number(st.angle) || 0,
+          copMissileCooldown: Math.max(0, Number(st.copMissileCooldown) || 0),
           characterMode: st.characterMode || client.profile.characterMode,
           vehicleId: st.vehicleId || client.profile.vehicleId,
           primaryColor: st.primaryColor || client.profile.primaryColor,
@@ -723,7 +840,7 @@ export function createSmashyServer() {
           maxHp: Number.isFinite(Number(st.maxHp)) ? Number(st.maxHp) : 100,
           alive: st.alive !== false,
           survivalTime: Math.max(0, Number(st.survivalTime) || 0),
-          stars: Math.max(1, Math.min(5, Number(st.stars) || 1)),
+          stars: Number.isFinite(Number(st.stars)) ? Math.max(0, Math.min(5, Number(st.stars))) : 1,
           score: Math.max(0, Number(st.score) || 0),
           copsWrecked: Math.max(0, Number(st.copsWrecked) || 0),
           activeBuffs: st.activeBuffs || null,
@@ -1101,6 +1218,8 @@ export function createSmashyServer() {
       fragmentBytes: 0,
       profile: {
         name: `Player ${num}`,
+        playerRole: 'runner',
+        copVehicleId: 'cop_heli',
         characterMode: 'car_driver',
         vehicleId: 'sedan',
         primaryColor: '#ef4444',

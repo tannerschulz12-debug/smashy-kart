@@ -4,10 +4,25 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import net from 'node:net';
 
-import { WORLD_CONFIG, VEHICLES, ABILITIES, BIOMES, createDefaultSettings } from '../public/js/config.js';
+import {
+  WORLD_CONFIG,
+  VEHICLES,
+  COP_VEHICLES,
+  ABILITIES,
+  BIOMES,
+  DEFAULT_KEYBINDS,
+  HUD_LAYOUT_PRESETS,
+  createDefaultSettings,
+  clampDropRatePct,
+  createDefaultItemWeights,
+  cloneItemWeights,
+  sliderToDropPct,
+  dropPctToSlider,
+  computeAbilityDropOdds,
+} from '../public/js/config.js';
 import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
-import { Renderer3D } from '../public/js/renderer3d.js';
+import { Renderer3D, POV_CAMERA_RIGS } from '../public/js/renderer3d.js';
 import { AbilitySystem } from '../public/js/abilities.js';
 import { Simulation } from '../public/js/physics_ai.js';
 import { renderQrCodeSvg, generateQrMatrix } from '../public/js/multiplayer.js';
@@ -188,11 +203,51 @@ async function runAllChecks() {
   const wpAheadPov = mockRenderer.projectWaypoint(0, 1.8, 25, { left: 10, right: 10, top: 76, bottom: 12 });
   assert.equal(wpAheadPov.onScreen, true, 'Road 25m ahead must project cleanly into First-Person POV view');
 
-  console.log('2. Checking all 12 vehicle blueprints...');
+  console.log('2. Checking all 12 vehicle blueprints (exterior + zero-clipping First-Person Hood POV + attract camera)...');
   for (const v of VEHICLES) {
     const parts = buildVehicleParts(v.id, v.color, v.accent, 0.5);
     assert.ok(parts.length >= 8, `Vehicle ${v.id} has too few voxel parts`);
+
+    const rig = POV_CAMERA_RIGS[v.id];
+    assert.ok(rig && Number.isFinite(rig.eyeY) && Number.isFinite(rig.fwdZ), `Missing POV_CAMERA_RIGS for ${v.id}`);
+    const povParts = buildVehicleParts(v.id, v.color, v.accent, 0.5, { povSelf: true, steer: 0.4, time: 1.0 });
+    assert.ok(povParts.length >= 4, `Vehicle ${v.id} POV hood has too few parts`);
+    const minSafeZ = rig.fwdZ + 0.36;
+    for (const p of povParts) {
+      const partBackZ = p.oz - p.sz * 0.5;
+      assert.ok(
+        partBackZ >= minSafeZ - 0.02,
+        `Vehicle ${v.id} POV part clips near plane (partBackZ=${partBackZ.toFixed(2)} < minSafeZ=${minSafeZ.toFixed(2)})`
+      );
+    }
   }
+  assert.ok(POV_CAMERA_RIGS.photo_car && POV_CAMERA_RIGS.runner, 'photo_car and runner POV rigs must exist');
+  for (const cv of COP_VEHICLES) {
+    const extParts = buildVehicleParts(cv.id, cv.color, cv.accent, 0.5);
+    assert.ok(extParts.length >= 8, `Cop vehicle ${cv.id} exterior has too few parts`);
+    const cRig = POV_CAMERA_RIGS[cv.id];
+    assert.ok(cRig && Number.isFinite(cRig.eyeY) && Number.isFinite(cRig.fwdZ), `Missing POV_CAMERA_RIGS for ${cv.id}`);
+    const cPovParts = buildVehicleParts(cv.id, cv.color, cv.accent, 0.5, { povSelf: true, steer: 0.3, time: 1.0 });
+    assert.ok(cPovParts.length >= 3, `Cop vehicle ${cv.id} POV has too few parts`);
+    const minSafeCopZ = cRig.fwdZ + 0.36;
+    for (const p of cPovParts) {
+      const partBackZ = p.oz - p.sz * 0.5;
+      assert.ok(
+        partBackZ >= minSafeCopZ - 0.02,
+        `Cop vehicle ${cv.id} POV part clips near plane (partBackZ=${partBackZ.toFixed(2)} < minSafeZ=${minSafeCopZ.toFixed(2)})`
+      );
+    }
+  }
+
+  mockRenderer.setCamera({ id: 'local', x: 0, y: 0, z: 0, vx: 0, vz: 25, angle: 0 }, 'attract', 0, 0.5);
+  assert.equal(mockRenderer.povFocusId, null, 'Attract showcase camera must keep roof face cutout visible');
+  mockRenderer.setGraphicsQuality('performance');
+  mockRenderer.setGraphicsQuality('high');
+
+  // Verify Claw HUD preset & Default Keybinds
+  assert.ok(HUD_LAYOUT_PRESETS.claw.brake.yPct <= 30, 'Claw preset must place Brake at top pointer-finger zone');
+  assert.ok(HUD_LAYOUT_PRESETS.claw.useItem.yPct <= 30, 'Claw preset must place Use Item at top pointer-finger zone');
+  assert.ok(DEFAULT_KEYBINDS.brake.includes('KeyS'), 'Default Brake keybind must include KeyS');
 
   console.log('3. Checking Mario Kart AbilitySystem + all 3 locked character modes...');
   const settings = createDefaultSettings();
@@ -241,6 +296,223 @@ async function runAllChecks() {
   }
   assert.ok(sim.localPlayer.sugarActive || sim.localPlayer.items.sugarTimer >= 0, 'Sugar Rush state tracked');
 
+  console.log('3b. Checking 0.1%–1000% ability drop probability math, 500% box density, & 500% Sugar Box spawn rate...');
+  assert.equal(clampDropRatePct(0.01), 0.1);
+  assert.equal(clampDropRatePct(0.1), 0.1);
+  assert.equal(clampDropRatePct(500), 500);
+  assert.equal(clampDropRatePct(1000), 1000);
+  assert.equal(clampDropRatePct(2500), 1000);
+
+  assert.equal(sliderToDropPct(0), 0.1, 'sliderToDropPct(0) must equal 0.1');
+  assert.equal(sliderToDropPct(20), 5, 'sliderToDropPct(20) must equal 5');
+  assert.equal(sliderToDropPct(50), 100, 'sliderToDropPct(50) must equal 100');
+  assert.equal(sliderToDropPct(80), 500, 'sliderToDropPct(80) must equal 500');
+  assert.equal(sliderToDropPct(100), 1000, 'sliderToDropPct(100) must equal 1000');
+
+  assert.equal(dropPctToSlider(0.1), 0);
+  assert.equal(dropPctToSlider(5), 20);
+  assert.equal(dropPctToSlider(100), 50);
+  assert.equal(dropPctToSlider(500), 80);
+  assert.equal(dropPctToSlider(1000), 100);
+
+  const defWeights = createDefaultItemWeights();
+  for (const ab of ABILITIES) {
+    assert.equal(defWeights[ab.id], 100, `Default weight for ${ab.id} must be 100`);
+  }
+  const defaultOdds = computeAbilityDropOdds(settings.enabledItems, defWeights);
+  const oddsSum = Object.values(defaultOdds).reduce((acc, v) => acc + v, 0);
+  assert.ok(Math.abs(oddsSum - 100) < 1e-6, `computeAbilityDropOdds must sum to ~100%, got ${oddsSum}`);
+
+  // Verify World 500% itemBoxDensity (>= 2.5x boxes vs 100%) & 500% sugarBoxRate (>80% sugar boxes) & non-overlapping (x,z)
+  const world100 = new World(777123, 'city', { itemBoxDensity: 1.0, sugarBoxRate: 1.0 });
+  const world500 = new World(777123, 'city', { itemBoxDensity: 5.0, sugarBoxRate: 5.0 });
+  const worldZeroSugar = new World(777123, 'city', { itemBoxDensity: 1.2, sugarBoxRate: 0.0 });
+
+  const boxes100 = world100.getVisibleChunks(0, 0).flatMap((c) => c.itemBoxes);
+  const boxes500 = world500.getVisibleChunks(0, 0).flatMap((c) => c.itemBoxes);
+  const boxesZeroSugar = worldZeroSugar.getVisibleChunks(0, 0).flatMap((c) => c.itemBoxes);
+
+  assert.ok(
+    boxes500.length >= boxes100.length * 2.5,
+    `itemBoxDensity 5.0 (${boxes500.length}) must spawn >= 2.5x boxes vs 1.0 (${boxes100.length})`
+  );
+  const sugar500Count = boxes500.filter((b) => b.boxType === 'sugar').length;
+  const sugar500Ratio = sugar500Count / Math.max(1, boxes500.length);
+  assert.ok(
+    sugar500Ratio > 0.8,
+    `sugarBoxRate 5.0 must produce >80% sugar boxes, got ${(sugar500Ratio * 100).toFixed(1)}%`
+  );
+  assert.equal(
+    boxesZeroSugar.filter((b) => b.boxType === 'sugar').length,
+    0,
+    'sugarBoxRate 0.0 must produce 0% sugar boxes'
+  );
+
+  const coordSet500 = new Set();
+  for (const bx of boxes500) {
+    const cKey = `${bx.x.toFixed(2)},${bx.z.toFixed(2)}`;
+    assert.equal(coordSet500.has(cKey), false, `Overlapping item box at (${cKey}) in 500% world`);
+    coordSet500.add(cKey);
+  }
+
+  // Verify AbilitySystem weighted pickup rolling: homing_rocket: 1000 & all others 0.1 -> >95% homing_rocket!
+  const extremeWeights = {};
+  const minWeights = {};
+  for (const ab of ABILITIES) {
+    extremeWeights[ab.id] = ab.id === 'homing_rocket' ? 1000 : 0.1;
+    minWeights[ab.id] = 0.1;
+  }
+  const weightedAbilities = new AbilitySystem({
+    ...createDefaultSettings(),
+    itemWeights: cloneItemWeights(extremeWeights),
+  });
+  let rpgRolls = 0;
+  for (let i = 0; i < 100; i++) {
+    const dummyPlayer = { id: 'tester', items: weightedAbilities.createPlayerItemState() };
+    assert.equal(weightedAbilities.triggerItemBox(dummyPlayer, 0), true);
+    weightedAbilities.updatePlayerItemState(dummyPlayer, 2.0, {});
+    if (dummyPlayer.items.heldItem === 'homing_rocket') rpgRolls++;
+  }
+  assert.ok(
+    rpgRolls > 95,
+    `Expected >95 homing_rocket rolls out of 100 at 1000% vs 0.1%, got ${rpgRolls}`
+  );
+
+  // Verify all enabled abilities at 0.1% still roll cleanly without divide-by-zero
+  const allPointOneAbilities = new AbilitySystem({
+    ...createDefaultSettings(),
+    itemWeights: cloneItemWeights(minWeights),
+  });
+  const pointOnePlayer = { id: 'tester2', items: allPointOneAbilities.createPlayerItemState() };
+  assert.equal(allPointOneAbilities.triggerItemBox(pointOnePlayer, 0.5), true);
+  allPointOneAbilities.updatePlayerItemState(pointOnePlayer, 2.0, {});
+  assert.ok(ABILITIES.some((a) => a.id === pointOnePlayer.items.heldItem));
+
+  console.log('3c. Checking aiCopsEnabled:false, Playable Police Team (Heli flight & Tank), & 2.0s soft-tracking missiles...');
+  assert.deepEqual(
+    COP_VEHICLES.map((c) => c.id),
+    ['cop_cruiser', 'cop_swat', 'cop_heli', 'cop_tank'],
+    'COP_VEHICLES must expose all 4 playable Police units'
+  );
+  const heliDef = COP_VEHICLES.find((c) => c.id === 'cop_heli');
+  const tankDef = COP_VEHICLES.find((c) => c.id === 'cop_tank');
+  assert.equal(heliDef.flying, true);
+  assert.equal(heliDef.hasMissile, true);
+  assert.equal(heliDef.missileCooldown, 2.0);
+  assert.equal(tankDef.hasMissile, true);
+  assert.equal(tankDef.missileCooldown, 2.0);
+  assert.equal(tankDef.maxHp, 220);
+  assert.equal(tankDef.mass, 2.6);
+
+  // Verify aiCopsEnabled: false spawns 0 AI police, keeps wantedStars === 0, emits zero star_up events, and never triggers AI arrest progress
+  sim.resetRun(777123, { ...settings, playerRole: 'runner', aiCopsEnabled: false, autoAccelerate: false });
+  assert.equal(sim.cops.length, 0, 'aiCopsEnabled: false must spawn 0 initial AI cops');
+  assert.equal(sim.wantedStars, 0, 'aiCopsEnabled: false must set wantedStars === 0 at resetRun');
+  let starUpCount = 0;
+  for (let step = 0; step < 520; step++) {
+    const evs = sim.update(0.05, {}, (step + 1) * 0.05);
+    if (evs.some((e) => e.type === 'star_up')) starUpCount++;
+  }
+  assert.equal(sim.cops.length, 0, 'aiCopsEnabled: false must keep 0 AI cops during gameplay');
+  assert.equal(sim.wantedStars, 0, 'aiCopsEnabled: false must keep wantedStars === 0 past 25s');
+  assert.equal(starUpCount, 0, 'aiCopsEnabled: false must emit zero star_up events');
+  assert.equal(sim.localPlayer.bustedProgress, 0, 'aiCopsEnabled: false must keep bustedProgress at 0');
+
+  // Verify playing as Cop with aiCopsEnabled: true also suppresses star_up wanted toasts
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_cruiser', aiCopsEnabled: true, autoAccelerate: false });
+  let copStarUpCount = 0;
+  for (let step = 0; step < 500; step++) {
+    const evs = sim.update(0.05, {}, (step + 1) * 0.05);
+    if (evs.some((e) => e.type === 'star_up')) copStarUpCount++;
+  }
+  assert.equal(copStarUpCount, 0, 'playerRole: cop must suppress star_up wanted toasts');
+
+  // Verify cop_heli flies cleanly over downtown buildings AND rivers without colliding or drowning!
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_heli', aiCopsEnabled: false });
+  assert.equal(sim.localPlayer.playerRole, 'cop');
+  assert.equal(sim.localPlayer.copVehicleId, 'cop_heli');
+  assert.equal(sim.localPlayer.flying, true);
+  assert.ok(sim.localPlayer.y >= 11.0, `cop_heli must hover >= 11m, got y=${sim.localPlayer.y}`);
+
+  // Place cop_heli directly above non-bridge river water (gx = 1 -> x = 60, cz = 5 -> river center)
+  const riverZ = world.getRiverCenterZ(60, 5);
+  assert.equal(world.getGroundHeight(60, riverZ).surface, 'water', 'Test coordinate must be open river water');
+  sim.localPlayer.x = 60;
+  sim.localPlayer.z = riverZ;
+  for (let step = 0; step < 20; step++) {
+    sim.update(1 / 60, { left: false, right: false, brake: false }, step / 60);
+  }
+  assert.equal(sim.localPlayer.alive, true, 'cop_heli must fly over river water without drowning');
+  assert.ok(sim.localPlayer.y >= 11.0, 'cop_heli must stay airborne above river');
+
+  // Place cop_heli directly through a building footprint and confirm no wall slowdown/damage
+  const anyBuilding = world.getVisibleChunks(0, 0).flatMap((c) => c.buildings)[0];
+  assert.ok(anyBuilding, 'Expected at least one building in visible chunks');
+  sim.localPlayer.x = anyBuilding.x;
+  sim.localPlayer.z = anyBuilding.z;
+  const hpBeforeFlyOver = sim.localPlayer.hp;
+  sim.update(1 / 60, { left: false, right: false, brake: false }, 1.0);
+  assert.equal(sim.localPlayer.hp, hpBeforeFlyOver, 'cop_heli must fly cleanly over buildings without collision damage');
+
+  // Verify strict 2.0s missile cooldown for BOTH cop_heli and cop_tank + light turn-rate cap (<= 1.2 rad/s) + 10m break-lock!
+  for (const unitId of ['cop_heli', 'cop_tank']) {
+    abilities.reset();
+    sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: unitId, aiCopsEnabled: false });
+    const copP = sim.localPlayer;
+    const ctx = {
+      world,
+      cops: [],
+      traffic: [],
+      localPlayer: copP,
+      remotePlayers: [{ id: 'runner_target', name: 'Runner', playerRole: 'runner', alive: true, x: 18, y: 0, z: 34, radius: 2.1 }],
+      onEvent: () => {},
+    };
+
+    const shot1 = abilities.fireCopMissile(copP, ctx);
+    assert.equal(shot1.used, true, `${unitId} initial missile shot must fire`);
+    assert.equal(copP.copMissileCooldown, 2.0, `${unitId} must set strict 2.0s cooldown`);
+    assert.ok(shot1.projectile && shot1.projectile.maxTurnRate <= 1.2, 'Missile maxTurnRate must be <= 1.2 rad/s');
+
+    // Measure actual turn rate over 0.1s step toward off-axis runner in forward cone (dist ~38.5m > 10m)
+    const ang0 = shot1.projectile.angle;
+    abilities.updateProjectiles(0.1, ctx);
+    const turnRateObserved = Math.abs(shot1.projectile.angle - ang0) / 0.1;
+    assert.ok(
+      turnRateObserved > 0 && turnRateObserved <= 1.2001,
+      `${unitId} missile turn rate (${turnRateObserved.toFixed(3)} rad/s) must be gentle (>0 and <= 1.2 rad/s)`
+    );
+
+    // At 0.5s elapsed (1.5s cooldown remaining), 2nd shot MUST be rejected!
+    abilities.updatePlayerItemState(copP, 0.5, ctx);
+    const shotEarly = abilities.fireCopMissile(copP, ctx);
+    assert.equal(shotEarly.used, false, `${unitId} 2nd missile shot at 0.5s must be rejected by 2.0s cooldown`);
+
+    // Advance another 1.55s (2.05s total elapsed) -> next shot MUST succeed!
+    abilities.updatePlayerItemState(copP, 1.55, ctx);
+    const shotReady = abilities.fireCopMissile(copP, ctx);
+    assert.equal(shotReady.used, true, `${unitId} missile shot at 2.05s must succeed`);
+  }
+
+  // Verify terminal 10m break-lock: missile stops turning once target is within <= 10m horizontally
+  abilities.reset();
+  const closeCtx = {
+    world,
+    cops: [],
+    traffic: [],
+    localPlayer: sim.localPlayer,
+    remotePlayers: [{ id: 'close_runner', name: 'Juker', playerRole: 'runner', alive: true, x: 4, y: 0, z: 7, radius: 2.0 }],
+    onEvent: () => {},
+  };
+  sim.localPlayer.x = 0;
+  sim.localPlayer.z = 0;
+  sim.localPlayer.angle = 0;
+  sim.localPlayer.turretAngle = 0;
+  sim.localPlayer.copMissileCooldown = 0;
+  const closeShot = abilities.fireCopMissile(sim.localPlayer, closeCtx);
+  const preBreakAng = closeShot.projectile.angle;
+  abilities.updateProjectiles(0.05, closeCtx);
+  assert.equal(closeShot.projectile.angle, preBreakAng, 'Cop missile must stop homing inside 10m horizontal distance');
+
   console.log('4. Checking QR code generator...');
   const qr = generateQrMatrix('http://192.168.1.35:4567/?room=KART');
   assert.ok(qr.size >= 25);
@@ -257,6 +529,15 @@ async function runAllChecks() {
     assert.equal(homeRes.body.includes('id="hud-item-slot"'), false, 'Front-middle mystery box must be gone');
     assert.ok(homeRes.body.includes('id="settings-modal"'), 'Personal Settings modal must exist');
     assert.ok(homeRes.body.includes('id="btn-use-item"'), 'Side clickable item box must exist');
+    assert.ok(homeRes.body.includes('id="btn-brake"'), 'Visible Brake button must exist');
+    assert.ok(homeRes.body.includes('id="hud-layout-editor"'), 'Customizable Claw HUD layout editor must exist');
+    assert.ok(homeRes.body.includes('id="keybinds-list"'), 'Keyboard keybind remapper must exist');
+    assert.ok(homeRes.body.includes('icon-180.png'), 'iOS apple-touch-icon PNG must be linked');
+
+    const iconRes = await httpGet(`http://127.0.0.1:${port}/icon-180.png`);
+    assert.equal(iconRes.status, 200, 'icon-180.png must serve 200 OK');
+    const swRes = await httpGet(`http://127.0.0.1:${port}/sw.js`);
+    assert.equal(swRes.status, 200, 'sw.js must serve 200 OK');
 
     const mainJsRes = await httpGet(`http://127.0.0.1:${port}/js/main.js`);
     assert.equal(mainJsRes.status, 200);
@@ -323,10 +604,16 @@ async function runAllChecks() {
     const full16 = await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 16);
     assert.equal(full16.players.length, 16, 'Room must hold 16 players');
 
-    // Host locks Same Car ('monster') + Same Mode ('car_driver') + Equal 125% Speed
+    // Host locks Same Car ('monster') + Same Mode ('car_driver') + Equal 125% Speed + 500% Drop Rates!
     p1.send({
       type: 'update_room_settings',
       settings: {
+        itemBoxDensity: 5.0,
+        sugarBoxRate: 4.5,
+        itemWeights: {
+          homing_rocket: 1000,
+          lightning_zap: 0.1,
+        },
         lobbyRules: {
           lockStats: true,
           allowCarChoice: false,
@@ -341,6 +628,55 @@ async function runAllChecks() {
       (m) => m.type === 'room_state' && m.settings?.lobbyRules?.allowCarChoice === false
     );
     assert.ok(lockedRoom.players.every((pl) => pl.vehicleId === 'monster' && pl.characterMode === 'car_driver'));
+    assert.equal(lockedRoom.settings.itemBoxDensity, 5.0, 'Room must sync itemBoxDensity: 5.0 to guests');
+    assert.equal(lockedRoom.settings.sugarBoxRate, 4.5, 'Room must sync sugarBoxRate: 4.5 to guests');
+    assert.equal(lockedRoom.settings.itemWeights?.homing_rocket, 1000, 'Room must sync homing_rocket: 1000');
+    assert.equal(lockedRoom.settings.itemWeights?.lightning_zap, 0.1, 'Room must sync lightning_zap: 0.1');
+    assert.equal(lockedRoom.settings.itemWeights?.sugar_rush, 100, 'Unspecified room weights must default to 100');
+
+    // Verify 16-player room sync of aiCopsEnabled: false, playerRole: 'cop' ('cop_heli'), & allowPlayerCops lock!
+    p2.send({ type: 'update_profile', profile: { playerRole: 'cop', copVehicleId: 'cop_heli' } });
+    const copProfileRoom = await p1.waitFor(
+      (m) => m.type === 'room_state' && m.players?.find((pl) => pl.name === 'Friend')?.playerRole === 'cop'
+    );
+    const p2InRoom = copProfileRoom.players.find((pl) => pl.name === 'Friend');
+    assert.equal(p2InRoom.playerRole, 'cop');
+    assert.equal(p2InRoom.copVehicleId, 'cop_heli');
+
+    // Host toggles aiCopsEnabled: false & allowPlayerCops: false -> forces guest p2 back to 'runner'!
+    p1.send({
+      type: 'update_room_settings',
+      settings: {
+        aiCopsEnabled: false,
+        lobbyRules: {
+          ...lockedRoom.settings.lobbyRules,
+          allowPlayerCops: false,
+        },
+      },
+    });
+    const noCopRoom = await p2.waitFor(
+      (m) => m.type === 'room_state' && m.settings?.aiCopsEnabled === false && m.settings?.lobbyRules?.allowPlayerCops === false
+    );
+    assert.equal(noCopRoom.settings.aiCopsEnabled, false, 'Room must sync aiCopsEnabled: false across all 16 players');
+    assert.equal(
+      noCopRoom.players.find((pl) => pl.name === 'Friend')?.playerRole,
+      'runner',
+      'allowPlayerCops: false must force guests to runner'
+    );
+
+    // Re-enable allowPlayerCops: true and reset p2 to 'runner' for classic 2p match flow below
+    p2.send({ type: 'update_profile', profile: { playerRole: 'runner' } });
+    p1.send({
+      type: 'update_room_settings',
+      settings: {
+        aiCopsEnabled: true,
+        lobbyRules: {
+          ...lockedRoom.settings.lobbyRules,
+          allowPlayerCops: true,
+        },
+      },
+    });
+    await p2.waitFor((m) => m.type === 'room_state' && m.settings?.lobbyRules?.allowPlayerCops === true);
 
     for (const ck of extraClients) ck.close();
     await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
@@ -359,6 +695,24 @@ async function runAllChecks() {
     const results = await p1.waitFor((m) => m.type === 'match_results');
     assert.equal(results.winnerName, 'Tanner');
     assert.equal(results.standings[0].name, 'Tanner');
+
+    // Verify Asymmetric Cops vs. Runners match end: Police Officer eliminating Runner crowns Police Team ('winnerTeam: cop')!
+    p1.send({ type: 'return_to_lobby' });
+    await p2.waitFor((m) => m.type === 'return_to_lobby');
+    p1.send({ type: 'update_profile', profile: { playerRole: 'cop', copVehicleId: 'cop_tank' } });
+    p2.send({ type: 'update_profile', profile: { playerRole: 'runner', vehicleId: 'kart' } });
+    await p2.waitFor(
+      (m) =>
+        m.type === 'room_state' &&
+        m.players?.some((pl) => pl.name === 'Tanner' && pl.playerRole === 'cop' && pl.copVehicleId === 'cop_tank')
+    );
+    p1.send({ type: 'start_match', seed: 777555 });
+    await p1.waitFor((m) => m.type === 'match_countdown');
+    await p2.waitFor((m) => m.type === 'match_countdown');
+    p2.send({ type: 'player_eliminated', reason: 'wrecked', killerName: 'Tanner', survivalTime: 18.4, score: 620, copsWrecked: 1 });
+    const copWinResults = await p1.waitFor((m) => m.type === 'match_results' && m.winnerTeam === 'cop');
+    assert.equal(copWinResults.winnerTeam, 'cop', 'Eliminating all runners must crown winnerTeam: cop');
+    assert.equal(copWinResults.winnerName, 'Tanner');
 
     p1.close();
     p2.close();

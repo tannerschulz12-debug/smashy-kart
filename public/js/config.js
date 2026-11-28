@@ -233,6 +233,86 @@ export const VEHICLES = [
   },
 ];
 
+export const COP_VEHICLES = [
+  {
+    id: 'cop_cruiser',
+    copType: 'cruiser',
+    name: 'Police Interceptor',
+    icon: '🚔',
+    color: '#1e293b',
+    accent: '#f8fafc',
+    speed: 51,
+    accel: 41,
+    handling: 3.6,
+    drift: 0.89,
+    mass: 1.35,
+    maxHp: 125,
+    radius: 2.15,
+    flying: false,
+    hasMissile: false,
+    missileCooldown: 2.0,
+    desc: 'Fast V8 pursuit cruiser with siren surge & PIT slam',
+  },
+  {
+    id: 'cop_swat',
+    copType: 'swat',
+    name: 'Armored SWAT Truck',
+    icon: '🛡️',
+    color: '#1e3a8a',
+    accent: '#93c5fd',
+    speed: 45,
+    accel: 34,
+    handling: 2.95,
+    drift: 0.86,
+    mass: 2.0,
+    maxHp: 175,
+    radius: 2.5,
+    flying: false,
+    hasMissile: false,
+    missileCooldown: 2.0,
+    desc: 'Heavy battering-ram truck that boxes in & wrecks runners',
+  },
+  {
+    id: 'cop_heli',
+    copType: 'heli',
+    name: 'Police Attack Heli',
+    icon: '🚁',
+    color: '#0f172a',
+    accent: '#38bdf8',
+    speed: 55,
+    accel: 46,
+    handling: 3.9,
+    drift: 0.92,
+    mass: 1.4,
+    maxHp: 135,
+    radius: 2.2,
+    flying: true,
+    hoverY: 11.5,
+    hasMissile: true,
+    missileCooldown: 2.0,
+    desc: 'Flies over buildings & rivers! Fires air-to-ground missiles (2s cooldown)',
+  },
+  {
+    id: 'cop_tank',
+    copType: 'tank',
+    name: 'Heavy Police Tank',
+    icon: '🪖',
+    color: '#365314',
+    accent: '#a3e635',
+    speed: 40,
+    accel: 31,
+    handling: 2.85,
+    drift: 0.82,
+    mass: 2.6,
+    maxHp: 220,
+    radius: 2.75,
+    flying: false,
+    hasMissile: true,
+    missileCooldown: 2.0,
+    desc: 'Unstoppable armored tank! Fires cannon missiles (2s cooldown)',
+  },
+];
+
 export const ABILITIES = [
   {
     id: 'homing_rocket',
@@ -327,17 +407,194 @@ export const WANTED_LEVELS = [
   { stars: 5, timeSec: 125, maxCops: 16, types: ['swat', 'heli', 'army', 'tank'], speedMult: 1.18, label: 'Maximum Lockdown' },
 ];
 
+export const DEFAULT_KEYBINDS = {
+  steerLeft: ['KeyA', 'ArrowLeft'],
+  steerRight: ['KeyD', 'ArrowRight'],
+  brake: ['KeyS', 'ArrowDown', 'ShiftLeft'],
+  gas: ['KeyW', 'ArrowUp'],
+  useItem: ['Space', 'KeyE'],
+  horn: ['KeyH', 'KeyQ'],
+  cycleCamera: ['KeyC', 'KeyV'],
+  pause: ['Escape'],
+};
+
+export function formatKeyCodeLabel(code) {
+  if (!code || typeof code !== 'string') return '—';
+  if (code.startsWith('Key')) return code.slice(3).toUpperCase();
+  if (code.startsWith('Digit')) return code.slice(5);
+  const map = {
+    Space: 'SPACE',
+    ArrowLeft: '←',
+    ArrowRight: '→',
+    ArrowUp: '↑',
+    ArrowDown: '↓',
+    ShiftLeft: 'SHIFT',
+    ShiftRight: 'R-SHIFT',
+    ControlLeft: 'CTRL',
+    ControlRight: 'R-CTRL',
+    AltLeft: 'OPT',
+    AltRight: 'R-OPT',
+    MetaLeft: 'CMD',
+    MetaRight: 'R-CMD',
+    Enter: 'ENTER',
+    Tab: 'TAB',
+    Backspace: 'BACK',
+    Escape: 'ESC',
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+    Semicolon: ';',
+    Quote: "'",
+  };
+  return map[code] || code.toUpperCase();
+}
+
+export const HUD_LAYOUT_PRESETS = {
+  thumbs: {
+    steerLeft:  { xPct: 10, yPct: 84, scale: 1.0, opacity: 0.92 },
+    steerRight: { xPct: 24, yPct: 84, scale: 1.0, opacity: 0.92 },
+    joystick:   { xPct: 15, yPct: 80, scale: 1.0, opacity: 0.92 },
+    brake:      { xPct: 74, yPct: 86, scale: 1.05, opacity: 0.96 },
+    gas:        { xPct: 89, yPct: 86, scale: 1.0, opacity: 0.95 },
+    useItem:    { xPct: 88, yPct: 65, scale: 1.0, opacity: 0.98 },
+    horn:       { xPct: 62, yPct: 88, scale: 0.95, opacity: 0.9 },
+  },
+  claw: {
+    // 4-Finger Claw Setup: Brake on top-left index finger, Item on top-right index finger, thumbs steer below!
+    steerLeft:  { xPct: 12, yPct: 83, scale: 1.08, opacity: 0.92 },
+    steerRight: { xPct: 88, yPct: 83, scale: 1.08, opacity: 0.92 },
+    joystick:   { xPct: 16, yPct: 80, scale: 1.05, opacity: 0.92 },
+    brake:      { xPct: 14, yPct: 24, scale: 1.15, opacity: 0.96 },
+    gas:        { xPct: 74, yPct: 84, scale: 1.0, opacity: 0.95 },
+    useItem:    { xPct: 86, yPct: 26, scale: 1.08, opacity: 0.98 },
+    horn:       { xPct: 28, yPct: 24, scale: 0.95, opacity: 0.88 },
+  },
+  lefty: {
+    // Left-handed action cluster, right-handed steering!
+    steerLeft:  { xPct: 74, yPct: 84, scale: 1.0, opacity: 0.92 },
+    steerRight: { xPct: 89, yPct: 84, scale: 1.0, opacity: 0.92 },
+    joystick:   { xPct: 84, yPct: 80, scale: 1.0, opacity: 0.92 },
+    brake:      { xPct: 26, yPct: 86, scale: 1.05, opacity: 0.96 },
+    gas:        { xPct: 11, yPct: 86, scale: 1.0, opacity: 0.95 },
+    useItem:    { xPct: 12, yPct: 65, scale: 1.0, opacity: 0.98 },
+    horn:       { xPct: 38, yPct: 88, scale: 0.95, opacity: 0.9 },
+  },
+};
+
+export function cloneHudLayout(presetName = 'thumbs') {
+  const src = HUD_LAYOUT_PRESETS[presetName] || HUD_LAYOUT_PRESETS.thumbs;
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    out[k] = { ...v };
+  }
+  return out;
+}
+
+export function cloneKeybinds(src = DEFAULT_KEYBINDS) {
+  const out = {};
+  for (const [k, v] of Object.entries(DEFAULT_KEYBINDS)) {
+    out[k] = Array.isArray(src?.[k]) && src[k].length > 0 ? [...src[k]] : [...v];
+  }
+  return out;
+}
+
+const DROP_SLIDER_ANCHORS = [
+  [0, 0.1],
+  [20, 5],
+  [50, 100],
+  [80, 500],
+  [100, 1000],
+];
+
+export function clampDropRatePct(val) {
+  if (val === null || val === undefined || val === '') return 100;
+  const num = Number(val);
+  if (!Number.isFinite(num)) return 100;
+  const clamped = Math.max(0.1, Math.min(1000, num));
+  return Math.round(clamped * 10) / 10;
+}
+
+export function createDefaultItemWeights() {
+  const out = {};
+  for (const ab of ABILITIES) {
+    out[ab.id] = 100;
+  }
+  return out;
+}
+
+export function cloneItemWeights(src) {
+  const out = {};
+  for (const ab of ABILITIES) {
+    out[ab.id] = clampDropRatePct(src?.[ab.id] ?? 100);
+  }
+  return out;
+}
+
+export function sliderToDropPct(t) {
+  const num = Number(t);
+  const clampedT = Number.isFinite(num) ? Math.max(0, Math.min(100, num)) : 50;
+  for (let i = 0; i < DROP_SLIDER_ANCHORS.length - 1; i++) {
+    const [t0, p0] = DROP_SLIDER_ANCHORS[i];
+    const [t1, p1] = DROP_SLIDER_ANCHORS[i + 1];
+    if (clampedT <= t1 || i === DROP_SLIDER_ANCHORS.length - 2) {
+      const u = (clampedT - t0) / (t1 - t0);
+      const raw = p0 + u * (p1 - p0);
+      const clean = raw < 10 ? Math.round(raw * 10) / 10 : Math.round(raw);
+      return clampDropRatePct(clean);
+    }
+  }
+  return 100;
+}
+
+export function dropPctToSlider(pct) {
+  const p = clampDropRatePct(pct);
+  for (let i = 0; i < DROP_SLIDER_ANCHORS.length - 1; i++) {
+    const [t0, p0] = DROP_SLIDER_ANCHORS[i];
+    const [t1, p1] = DROP_SLIDER_ANCHORS[i + 1];
+    if (p <= p1 || i === DROP_SLIDER_ANCHORS.length - 2) {
+      const u = (p - p0) / (p1 - p0);
+      const rawT = t0 + u * (t1 - t0);
+      return Math.round(Math.max(0, Math.min(100, rawT)) * 100) / 100;
+    }
+  }
+  return 50;
+}
+
+export function computeAbilityDropOdds(enabledItems = {}, itemWeights = {}) {
+  const en = enabledItems || {};
+  const iw = itemWeights || {};
+  const rawWeights = {};
+  let total = 0;
+  for (const ab of ABILITIES) {
+    if (en[ab.id] !== false) {
+      const w = (ab.weight || 1) * (clampDropRatePct(iw[ab.id] ?? 100) / 100);
+      rawWeights[ab.id] = w;
+      total += w;
+    } else {
+      rawWeights[ab.id] = 0;
+    }
+  }
+  const odds = {};
+  for (const ab of ABILITIES) {
+    odds[ab.id] = total > 0 && rawWeights[ab.id] > 0 ? (rawWeights[ab.id] / total) * 100 : 0;
+  }
+  return odds;
+}
+
 export function createDefaultSettings() {
   const enabledItems = {};
   for (const ab of ABILITIES) enabledItems[ab.id] = true;
   return {
-    playerName: 'Player 1',
+    playerName: 'Tanner',
+    playerRole: 'runner',        // 'runner' (Getaway) | 'cop' (Playable Police Officer)
+    copVehicleId: 'cop_heli',    // 'cop_cruiser' | 'cop_swat' | 'cop_heli' | 'cop_tank'
     characterMode: 'car_driver', // 'car_driver' | 'photo_car' | 'runner'
     vehicleId: 'sedan',
     primaryColor: '#ef4444',
     accentColor: '#fef08a',
     avatarId: 'default_hero',
     customCopsEnabled: true,
+    aiCopsEnabled: true,         // true = AI police spawn & chase; false = 0 AI cops!
     // Garage stat multipliers (0.6 .. 1.6)
     speedMult: 1.0,
     driftMult: 1.0,
@@ -349,22 +606,43 @@ export function createDefaultSettings() {
     copIntensity: 1.0,           // 0.6 (chill) | 1.0 (normal) | 1.45 (insane)
     startStars: 1,               // 1..5
     trafficDensity: 1.0,         // 0 .. 1.8
-    itemBoxDensity: 1.2,         // 0.5 .. 2.0
+    itemBoxDensity: 1.2,         // 0.1 .. 5.0 (10% .. 500%)
+    sugarBoxRate: 1.0,           // 0.0 .. 5.0 (0% .. 500%)
     gravityMult: 1.0,            // 0.6 (moon jumps) .. 1.3
-    cameraMode: 'smashy',        // 'smashy' (angled overhead) | 'chase' (behind car) | 'pov' (first-person point-of-view)
-    touchStyle: 'split',         // 'split' (Smashy left/right screen) | 'joystick'
+    // Personal Camera, Display, Controls, HUD Layout & Audio Settings (never overwritten by Host Lobby!)
+    cameraMode: 'smashy',        // 'smashy' (angled overhead) | 'chase' (behind car) | 'pov' (first-person hood view)
+    povFov: 78,                  // 62 .. 96 degrees in POV camera
+    cameraShakeMult: 1.0,        // 0.0 (off) .. 1.5
+    graphicsQuality: 'high',     // 'high' | 'balanced' | 'performance'
+    speedUnit: 'mph',            // 'mph' | 'kmh'
+    touchStyle: 'split',         // 'split' (Buttons + Split Tap) | 'buttons' (Buttons Only) | 'joystick' (Thumbstick + Buttons)
+    autoAccelerate: true,        // true = Smashy auto-gas; false = Manual Gas pedal [W / Up / GAS button]
+    invertSteer: false,
     steerSensitivity: 1.0,       // 0.7 .. 1.4 personal steering feel
-    povFov: 76,                  // 62 .. 92 degrees in POV camera
-    showSpeedometer: true,       // Personal MPH & drift spark gauge
+    steerDeadzone: 0.05,         // 0.0 .. 0.22 joystick deadzone
+    showTouchControlsDesktop: true, // Show clickable Brake / Item / Steer buttons on Mac/Desktop too
+    showKeyHints: true,          // Show [S], [SPACE], [A]/[D], [C] keycap badges on HUD buttons
+    showSpeedometer: true,       // Personal MPH/KMH & drift spark gauge
+    showMinimap: true,           // Circular live GPS cop/box/friend radar
+    showFps: false,              // Live FPS counter badge
     showQuickCamBtn: true,       // In-game 1-tap camera angle cycle button
+    screenEffects: true,         // Speed streaks & danger siren edge flash
+    haptics: true,               // Mobile vibration feedback on crash/boost
     soundVolume: 0.85,
+    sfxEngineVol: 0.85,
+    sfxActionVol: 1.0,
+    hudLayoutPreset: 'thumbs',   // 'thumbs' | 'claw' | 'lefty' | 'custom'
+    hudLayout: cloneHudLayout('thumbs'),
+    keybinds: cloneKeybinds(),
     worldSeed: 777123,
     enabledItems,
+    itemWeights: createDefaultItemWeights(), // 0.1 .. 1000 (% weight multiplier per ability)
     lobbyRules: {
       lockStats: true,
       allowCarChoice: true,
       allowModeChoice: true,
       allowCustomPhotos: true,
+      allowPlayerCops: true,
       universalSpeedMult: 1.0,
       universalDriftMult: 1.0,
       universalMassMult: 1.0,

@@ -1,19 +1,40 @@
 {
+  "id": "./",
   "name": "Smashy Kart: Wanted",
   "short_name": "Smashy Kart",
-  "description": "Upload your own people onto cars, grab Mario Kart abilities, and outlast friends anywhere.",
+  "description": "Put your own people on 3D getaway cars, fire Twin RPGs & 3x Sugar Rush, and outlast up to 16 friends!",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
   "orientation": "any",
-  "background_color": "#161a22",
-  "theme_color": "#161a22",
+  "categories": ["games", "racing", "action"],
+  "background_color": "#0d142e",
+  "theme_color": "#0d142e",
   "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ]
 }
