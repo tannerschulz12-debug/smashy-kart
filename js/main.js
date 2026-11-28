@@ -199,6 +199,7 @@ function loadSavedSettings() {
         ...defaults.lobbyRules,
         ...(parsed.lobbyRules || {}),
         allowPlayerCops: parsed.lobbyRules?.allowPlayerCops !== false,
+        shareHostSounds: parsed.lobbyRules?.shareHostSounds !== false,
       },
     };
   } catch {
@@ -277,6 +278,8 @@ class SmashyKartApp {
     this.eliminatedSent = false;
     this.partyStandings = [];
     this.remoteAvatarCache = new Map(); // playerId -> dataUrl
+    this._wasHost = false;
+    this._lobbyHostName = '';
 
     // PWA Install, HUD Layout Editor & Keybind Remapper state
     this.deferredInstallPrompt = null;
@@ -1317,6 +1320,9 @@ class SmashyKartApp {
       btn.addEventListener('click', () => {
         const modalId = btn.dataset.openModal;
         document.getElementById(modalId)?.classList.remove('hidden');
+        if (modalId === 'sound-modal') {
+          this._renderSoundSlots();
+        }
       });
     });
 
@@ -1707,6 +1713,7 @@ class SmashyKartApp {
 
     document.getElementById('btn-settings-voice-studio')?.addEventListener('click', () => {
       document.getElementById('sound-modal')?.classList.remove('hidden');
+      this._renderSoundSlots();
     });
 
     document.getElementById('btn-reset-personal-settings')?.addEventListener('click', () => {
@@ -2166,6 +2173,7 @@ class SmashyKartApp {
         const v = Number(el.value);
         this.settings[key] = v;
         if ((!this.net.roomCode || this.net.isHost) && universalRuleKeyMap[key]) {
+          if (!this.settings.lobbyRules) this.settings.lobbyRules = {};
           this.settings.lobbyRules[universalRuleKeyMap[key]] = v;
         }
         saveSettings(this.settings);
@@ -2173,6 +2181,9 @@ class SmashyKartApp {
         if (this.mode === 'attract') this._respawnAttractHero();
         if (this.net.roomCode && this.net.isHost) {
           this.net.updateRoomSettings(this.settings);
+          if (this.net.roomState && !document.getElementById('lobby-modal')?.classList.contains('hidden')) {
+            this._renderLobbyRoom(this.net.roomState);
+          }
         }
       });
       return fmt;
@@ -2201,6 +2212,7 @@ class SmashyKartApp {
       }
       Object.assign(this.settings, vals);
       if (!this.net.roomCode || this.net.isHost) {
+        if (!this.settings.lobbyRules) this.settings.lobbyRules = {};
         this.settings.lobbyRules.universalSpeedMult = vals.speedMult;
         this.settings.lobbyRules.universalDriftMult = vals.driftMult;
         this.settings.lobbyRules.universalMassMult = vals.massMult;
@@ -2211,6 +2223,9 @@ class SmashyKartApp {
       if (this.mode === 'attract') this._respawnAttractHero();
       if (this.net.roomCode && this.net.isHost) {
         this.net.updateRoomSettings(this.settings);
+        if (this.net.roomState && !document.getElementById('lobby-modal')?.classList.contains('hidden')) {
+          this._renderLobbyRoom(this.net.roomState);
+        }
       }
     };
 
@@ -2799,7 +2814,9 @@ class SmashyKartApp {
   }
 
   _renderSoundSlots() {
+    this._updateSoundLobbyBanner();
     const list = document.getElementById('sound-slots-list');
+    if (!list) return;
     const summary = this.sound.getSavedSlotsSummary();
     const canMic = Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
     list.innerHTML = '';
@@ -2843,18 +2860,24 @@ class SmashyKartApp {
         this.sound.unlock();
         if (this.recordingSlot === slot) {
           this.recordingSlot = null;
-          await this.sound.stopMicRecording(slot).catch(() => {});
+          const savedRec = await this.sound.stopMicRecording(slot).catch(() => null);
           this._renderSoundSlots();
           this.sound.previewSlot(slot);
+          if (savedRec) {
+            this._pushHostSoundSlotToLobby(slot, false);
+          }
         } else {
           try {
             this.recordingSlot = slot;
             this._renderSoundSlots();
             await this.sound.startMicRecording(async () => {
               this.recordingSlot = null;
-              await this.sound.stopMicRecording(slot).catch(() => {});
+              const savedRec = await this.sound.stopMicRecording(slot).catch(() => null);
               this._renderSoundSlots();
               this.sound.previewSlot(slot);
+              if (savedRec) {
+                this._pushHostSoundSlotToLobby(slot, false);
+              }
             });
           } catch {
             this.recordingSlot = null;
@@ -2872,6 +2895,7 @@ class SmashyKartApp {
           await this.sound.uploadAudioFile(slot, file);
           this._renderSoundSlots();
           this.sound.previewSlot(slot);
+          this._pushHostSoundSlotToLobby(slot, false);
         } catch {
           alert('Could not read that sound clip — try a short audio or camera clip.');
         }
@@ -2885,9 +2909,77 @@ class SmashyKartApp {
       row.querySelector('[data-clear-slot]')?.addEventListener('click', async () => {
         await this.sound.clearCustomSound(slot);
         this._renderSoundSlots();
+        this._pushHostSoundSlotToLobby(slot, true);
       });
 
       list.appendChild(row);
+    }
+  }
+
+  _getLobbyHostName(room = this.net.roomState) {
+    if (room?.players && room?.hostId) {
+      const hostPlayer = room.players.find((p) => p.id === room.hostId);
+      if (hostPlayer?.name) return hostPlayer.name;
+    }
+    return this._lobbyHostName || 'Host';
+  }
+
+  _updateSoundLobbyBanner() {
+    const banner = document.getElementById('sound-lobby-banner');
+    if (!banner) return;
+    const shareOn = this.settings.lobbyRules?.shareHostSounds !== false;
+    if (this.net.roomCode && this.net.isHost && shareOn) {
+      banner.textContent =
+        '👑 Lobby Owner: Every sound you record, upload, or clear here syncs LIVE to everyone in your lobby!';
+      banner.classList.remove('hidden', 'is-guest');
+      banner.classList.add('is-host');
+    } else if (this.net.roomCode && !this.net.isHost && shareOn) {
+      const hostName = this._getLobbyHostName();
+      banner.textContent = `🔊 Playing ${hostName}'s Custom Sound Pack in this lobby (your own saved sounds come back when you leave!).`;
+      banner.classList.remove('hidden', 'is-host');
+      banner.classList.add('is-guest');
+    } else {
+      banner.textContent = '';
+      banner.classList.add('hidden');
+      banner.classList.remove('is-host', 'is-guest');
+    }
+  }
+
+  async _pushAllHostSoundsToLobby() {
+    if (!this.net.roomCode || !this.net.isHost) return;
+    if (this.settings.lobbyRules?.shareHostSounds === false) return;
+    if (typeof this.sound.exportAllCustomSoundsForNetwork !== 'function') return;
+    try {
+      const slots = await this.sound.exportAllCustomSoundsForNetwork();
+      if (!this.net.roomCode || !this.net.isHost || this.settings.lobbyRules?.shareHostSounds === false) return;
+      for (const s of slots || []) {
+        if (s && s.slot && s.dataUrl) {
+          this.net.syncHostSound?.(s.slot, s.dataUrl, s.label);
+        }
+      }
+    } catch {
+      // Ignore export error without interrupting lobby sync
+    }
+  }
+
+  async _pushHostSoundSlotToLobby(slot, cleared = false) {
+    if (!this.net.roomCode || !this.net.isHost) return;
+    if (this.settings.lobbyRules?.shareHostSounds === false) return;
+    try {
+      if (cleared) {
+        this.net.syncHostSound?.(slot, null);
+        return;
+      }
+      if (typeof this.sound.exportSlotForNetwork !== 'function') return;
+      const exp = await this.sound.exportSlotForNetwork(slot);
+      if (!this.net.roomCode || !this.net.isHost || this.settings.lobbyRules?.shareHostSounds === false) return;
+      if (exp && exp.dataUrl) {
+        this.net.syncHostSound?.(slot, exp.dataUrl, exp.label);
+      } else {
+        this.net.syncHostSound?.(slot, null);
+      }
+    } catch {
+      // Ignore export error
     }
   }
 
@@ -3152,6 +3244,7 @@ class SmashyKartApp {
     this._renderCopVehicleGrid();
     this._renderVehicleGrid();
     this._renderAbilityMixer();
+    this._updateSoundLobbyBanner();
     this._syncSimPersonalSettings();
   }
 
@@ -3201,6 +3294,7 @@ class SmashyKartApp {
         this.isReadyInLobby = true;
         this.settings.lobbyRules = {
           ...(this.settings.lobbyRules || {}),
+          shareHostSounds: this.settings.lobbyRules?.shareHostSounds !== false,
           universalSpeedMult: this.settings.speedMult || 1.0,
           universalDriftMult: this.settings.driftMult || 1.0,
           universalMassMult: this.settings.massMult || 1.0,
@@ -3208,6 +3302,7 @@ class SmashyKartApp {
           universalVehicleId: this.settings.vehicleId || 'sedan',
           universalCharacterMode: this.settings.characterMode || 'car_driver',
         };
+        saveSettings(this.settings);
         await this.net.createRoom(this._buildLocalNetProfile(), this.settings);
       } catch {
         this._showLobbyError('Could not connect to party relay. Check your internet connection!');
@@ -3225,6 +3320,9 @@ class SmashyKartApp {
 
     document.getElementById('btn-leave-room').addEventListener('click', () => {
       this.net.leaveRoom();
+      this._wasHost = false;
+      this._lobbyHostName = '';
+      this.sound.clearLobbySounds?.();
       window.history.replaceState({}, '', window.location.pathname);
       this._refreshAllUiFromSettings();
       this._openLobbyModal();
@@ -3276,6 +3374,9 @@ class SmashyKartApp {
     });
 
     this.net.on('kicked', (msg) => {
+      this._wasHost = false;
+      this._lobbyHostName = '';
+      this.sound.clearLobbySounds?.();
       window.history.replaceState({}, '', window.location.pathname);
       this._refreshAllUiFromSettings();
       this._openLobbyModal();
@@ -3284,31 +3385,97 @@ class SmashyKartApp {
 
     this.net.on('room_joined', (msg) => {
       // Ensure our avatar ID uses our network player ID so everyone maps our custom cutout cleanly
+      this._wasHost = Boolean(this.net.isHost);
+      const hostName = this._getLobbyHostName(msg.room);
+      if (hostName && hostName !== 'Host') this._lobbyHostName = hostName;
       this.net.updateProfile(this._buildLocalNetProfile());
-      if (!this.net.isHost && msg.room?.settings) {
-        this._applyHostSettings(msg.room.settings);
+      if (this.net.isHost) {
+        this.sound.clearLobbySounds?.();
+        this._pushAllHostSoundsToLobby();
+      } else {
+        if (msg.room?.settings) {
+          this._applyHostSettings(msg.room.settings);
+        }
+        if (this.settings.lobbyRules?.shareHostSounds === false) {
+          this.sound.clearLobbySounds?.();
+        } else {
+          this.sound.setLobbyOverride?.(true, hostName);
+        }
       }
       const basePath = window.location.pathname || '/';
       window.history.replaceState({}, '', `${basePath}?room=${encodeURIComponent(msg.code)}`);
       document.getElementById('lobby-entry').classList.add('hidden');
       document.getElementById('lobby-room').classList.remove('hidden');
       if (msg.room) this._renderLobbyRoom(msg.room);
+      this._updateSoundLobbyBanner();
     });
 
     this.net.on('room_state', (room) => {
+      const wasHost = this._wasHost;
+      const isNowHost = Boolean(this.net.isHost);
+      this._wasHost = isNowHost;
+      const hostName = this._getLobbyHostName(room);
+      if (hostName && hostName !== 'Host') this._lobbyHostName = hostName;
+
       this._ingestRoomAvatars(room.players || []);
-      if (!this.net.isHost && room.settings) {
+      if (!wasHost && isNowHost) {
+        this.sound.clearLobbySounds?.();
+        this.net.clearAllHostSounds?.();
+        this._pushAllHostSoundsToLobby();
+      } else if (!isNowHost && room.settings) {
         this._applyHostSettings(room.settings);
       }
       if (!document.getElementById('lobby-modal').classList.contains('hidden')) {
         this._renderLobbyRoom(room);
+      } else if (!isNowHost) {
+        this._updateGuestRulesBanner(room);
       }
+      this._updateSoundLobbyBanner();
     });
 
     this.net.on('room_settings_updated', (msg) => {
       if (!this.net.isHost && msg.settings) {
         this._applyHostSettings(msg.settings);
+        if (this.net.roomState && !document.getElementById('lobby-modal')?.classList.contains('hidden')) {
+          this._renderLobbyRoom(this.net.roomState);
+        } else {
+          this._updateGuestRulesBanner();
+        }
+        this._updateSoundLobbyBanner();
       }
+    });
+
+    this.net.on('sound_sync', async (msg) => {
+      if (!msg || !this.net.roomCode || this.net.isHost) return;
+      if (msg.hostName) this._lobbyHostName = msg.hostName;
+      const hostName = msg.hostName || this._getLobbyHostName();
+      const shareOn = this.settings.lobbyRules?.shareHostSounds !== false;
+      if (!shareOn) {
+        this.sound.clearLobbySounds?.();
+      } else {
+        if (typeof this.sound.setLobbySound === 'function') {
+          await this.sound.setLobbySound(msg.slot, msg.dataUrl, msg.label).catch(() => {});
+        }
+        if (!this.net.roomCode || this.net.isHost || this.settings.lobbyRules?.shareHostSounds === false) {
+          this.sound.clearLobbySounds?.();
+        } else {
+          this.sound.setLobbyOverride?.(true, hostName);
+        }
+      }
+      this._updateGuestRulesBanner();
+      this._updateSoundLobbyBanner();
+    });
+
+    this.net.on('sound_sync_clear', () => {
+      if (this.net.isHost) return;
+      this.sound.clearLobbySounds?.();
+      this._updateGuestRulesBanner();
+      this._updateSoundLobbyBanner();
+    });
+
+    this.net.on('horn_event', (ev) => {
+      if (!ev || (ev.playerId && ev.playerId === this.net.playerId)) return;
+      this.sound.playEvent('horn', 0.85);
     });
 
     this.net.on('match_countdown', (msg) => {
@@ -3403,6 +3570,9 @@ class SmashyKartApp {
         rules.universalScaleMult = 1.0;
         this.settings.aiCopsEnabled = true;
         this.settings.speedMult = 1.0;
+        this.settings.driftMult = 1.0;
+        this.settings.massMult = 1.0;
+        this.settings.scaleMult = 1.0;
         this.settings.copIntensity = 1.0;
         this.settings.startStars = 1;
         this.settings.itemBoxDensity = 1.2;
@@ -3438,6 +3608,7 @@ class SmashyKartApp {
         rules.universalSpeedMult = 1.35;
         rules.universalDriftMult = 1.15;
         this.settings.speedMult = 1.35;
+        this.settings.driftMult = 1.15;
         this.settings.itemBoxDensity = 2.0;
         this.settings.copIntensity = 1.4;
         this.settings.startStars = 3;
@@ -3512,6 +3683,22 @@ class SmashyKartApp {
     });
 
     bindPerm('perm-allow-cops', 'allowPlayerCops');
+    const permShareSoundsEl = document.getElementById('perm-share-sounds');
+    permShareSoundsEl?.addEventListener('change', () => {
+      if (!this.net.isHost) return;
+      const shareOn = Boolean(permShareSoundsEl.checked);
+      if (!this.settings.lobbyRules) this.settings.lobbyRules = {};
+      this.settings.lobbyRules.shareHostSounds = shareOn;
+      syncHostRules();
+      if (shareOn) {
+        this._pushAllHostSoundsToLobby();
+        this._showChaosToast('🔊 Sharing your custom voices & sounds with everyone!');
+      } else {
+        this.net.clearAllHostSounds?.();
+        this._showChaosToast('🔇 Host custom sounds OFF — everyone uses their own sounds.');
+      }
+      this._updateSoundLobbyBanner();
+    });
     bindPerm('perm-lock-stats', 'lockStats');
     bindPerm('perm-allow-car', 'allowCarChoice');
     bindPerm('perm-allow-mode', 'allowModeChoice');
@@ -3552,6 +3739,11 @@ class SmashyKartApp {
     }
     if (rs.lobbyRules) {
       this.settings.lobbyRules = { ...this.settings.lobbyRules, ...rs.lobbyRules };
+      if (this.settings.lobbyRules.shareHostSounds === false) {
+        this.sound.clearLobbySounds?.();
+      } else if (this.net.roomCode && !this.net.isHost) {
+        this.sound.setLobbyOverride?.(true, this._getLobbyHostName());
+      }
       if (this.settings.lobbyRules.allowModeChoice === false && this.settings.lobbyRules.universalCharacterMode) {
         this.settings.characterMode = this.settings.lobbyRules.universalCharacterMode;
       }
@@ -3617,6 +3809,8 @@ class SmashyKartApp {
       if (aiCopsChk) aiCopsChk.checked = room.settings?.aiCopsEnabled !== false;
       const allowCopsChk = document.getElementById('perm-allow-cops');
       if (allowCopsChk) allowCopsChk.checked = rules.allowPlayerCops !== false;
+      const shareSoundsChk = document.getElementById('perm-share-sounds');
+      if (shareSoundsChk) shareSoundsChk.checked = rules.shareHostSounds !== false;
       document.getElementById('perm-lock-stats').checked = rules.lockStats !== false;
       document.getElementById('perm-allow-car').checked = rules.allowCarChoice !== false;
       document.getElementById('perm-allow-mode').checked = rules.allowModeChoice !== false;
@@ -3630,21 +3824,9 @@ class SmashyKartApp {
         b.classList.toggle('active', b.dataset.ubiome === curBiome)
       );
     } else {
-      const spdPct = Math.round((rules.universalSpeedMult || 1.0) * 100);
-      const biomeObj = BIOMES[room.settings?.biome || 'city'] || BIOMES.city;
-      const aiCopsStatus = room.settings?.aiCopsEnabled === false ? '🚫 AI Cops OFF' : '🚔 AI Cops ON';
-      const playerCopsStatus =
-        rules.allowPlayerCops === false ? '🔒 Police Team Disabled' : '🚔 Police Team Open';
-      const parts = [
-        aiCopsStatus,
-        playerCopsStatus,
-        rules.lockStats !== false ? `🔒 Equal ${spdPct}% Speed & Stats` : '🔓 Custom Car Tuning Allowed',
-        biomeObj.name,
-        rules.allowCarChoice === false ? '🔒 Same Car Forced' : 'Any Car',
-        rules.allowModeChoice === false ? '🔒 Mode Locked' : 'Any Mode',
-      ];
-      guestBanner.textContent = `👑 Lobby Manager Rules: ${parts.join(' · ')}`;
+      this._updateGuestRulesBanner(room);
     }
+    this._updateSoundLobbyBanner();
 
     // Lock/unlock Guest buttons right inside Lobby & Garage
     document.getElementById('lobby-role-pills')?.classList.toggle(
@@ -3716,6 +3898,32 @@ class SmashyKartApp {
     readyBtn.textContent = this.isReadyInLobby ? '✓ Ready!' : 'Tap When Ready';
   }
 
+  _updateGuestRulesBanner(room = this.net.roomState) {
+    const guestBanner = document.getElementById('guest-rules-banner');
+    if (!guestBanner || this.net.isHost) return;
+    const rs = room?.settings || this.settings || {};
+    const rules = rs.lobbyRules || this.settings.lobbyRules || {};
+    const spdPct = Math.round((rules.universalSpeedMult || 1.0) * 100);
+    const biomeObj = BIOMES[rs.biome || 'city'] || BIOMES.city;
+    const aiCopsStatus = rs.aiCopsEnabled === false ? '🚫 AI Cops OFF' : '🚔 AI Cops ON';
+    const playerCopsStatus =
+      rules.allowPlayerCops === false ? '🔒 Police Team Disabled' : '🚔 Police Team Open';
+    const parts = [
+      aiCopsStatus,
+      playerCopsStatus,
+      rules.lockStats !== false ? `🔒 Equal ${spdPct}% Speed & Stats` : '🔓 Custom Car Tuning Allowed',
+      biomeObj.name,
+      rules.allowCarChoice === false ? '🔒 Same Car Forced' : 'Any Car',
+      rules.allowModeChoice === false ? '🔒 Mode Locked' : 'Any Mode',
+    ];
+    const lobbySoundCount =
+      typeof this.sound.getLobbySoundCount === 'function' ? this.sound.getLobbySoundCount() : 0;
+    if (rules.shareHostSounds !== false && lobbySoundCount > 0) {
+      parts.push('🎙️ Host Sounds ON');
+    }
+    guestBanner.textContent = `👑 Lobby Manager Rules: ${parts.join(' · ')}`;
+  }
+
   // ======================== MATCH START / GAME LOOP ========================
 
   _startAttractDemo() {
@@ -3770,6 +3978,10 @@ class SmashyKartApp {
       this.net.leaveRoom();
       window.history.replaceState({}, '', window.location.pathname);
     }
+    this._wasHost = false;
+    this._lobbyHostName = '';
+    this.sound.clearLobbySounds?.();
+    this._updateSoundLobbyBanner();
     const freshSeed = Math.floor(100000 + Math.random() * 899999);
     this.settings.worldSeed = freshSeed;
     this.eliminatedSent = false;
@@ -3921,6 +4133,9 @@ class SmashyKartApp {
       this.net.leaveRoom();
       window.history.replaceState({}, '', window.location.pathname);
     }
+    this._wasHost = false;
+    this._lobbyHostName = '';
+    this.sound.clearLobbySounds?.();
     this._startAttractDemo();
     document.getElementById('home-screen')?.classList.remove('hidden');
     document.getElementById('lobby-modal')?.classList.add('hidden');
@@ -4209,6 +4424,9 @@ class SmashyKartApp {
       case 'horn': {
         this.sound.playEvent(ev.superHorn ? 'super_horn' : 'horn', ev.intensity || 1.0);
         if (ev.superHorn) this._triggerHaptic(24);
+        if (this.net.roomCode && ev.playerId === (this.sim.localPlayer?.id || 'local')) {
+          this.net.sendHornEvent?.({ x: ev.x, z: ev.z });
+        }
         break;
       }
       case 'water_splash': {

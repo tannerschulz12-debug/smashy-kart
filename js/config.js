@@ -643,6 +643,7 @@ export function createDefaultSettings() {
       allowModeChoice: true,
       allowCustomPhotos: true,
       allowPlayerCops: true,
+      shareHostSounds: true,
       universalSpeedMult: 1.0,
       universalDriftMult: 1.0,
       universalMassMult: 1.0,
