@@ -23,7 +23,7 @@ import {
 import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
 import { Renderer3D, POV_CAMERA_RIGS } from '../public/js/renderer3d.js';
-import { AbilitySystem, NUKE_COUNTDOWN_SEC } from '../public/js/abilities.js';
+import { AbilitySystem, NUKE_COUNTDOWN_SEC, COP_MISSILE_SPEED, RPG_ROCKET_SPEED } from '../public/js/abilities.js';
 import { SoundManager, SOUND_SLOTS } from '../public/js/audio.js';
 import { Simulation } from '../public/js/physics_ai.js';
 import { renderQrCodeSvg, generateQrMatrix, MultiplayerClient } from '../public/js/multiplayer.js';
@@ -543,6 +543,85 @@ async function runAllChecks() {
   abilities.updateProjectiles(0.05, closeCtx);
   assert.equal(closeShot.projectile.angle, preBreakAng, 'Cop missile must stop homing inside 10m horizontal distance');
 
+  // Verify Instant Heli & Tank Missile Reload toggle (default false, 0s rapid fire + 48-missile cap when true, Cruiser/SWAT keep 2.0s cooldown)
+  assert.equal(settings.instantCopMissileReload, false, 'instantCopMissileReload must default to false');
+  for (const unitId of ['cop_heli', 'cop_tank']) {
+    abilities.reset();
+    sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: unitId, aiCopsEnabled: false, instantCopMissileReload: true });
+    const copP = sim.localPlayer;
+    const rapidCtx = { world, cops: [], traffic: [], localPlayer: copP, remotePlayers: [], onEvent: () => {} };
+    for (let s = 0; s < 5; s++) {
+      const shot = abilities.fireCopMissile(copP, rapidCtx);
+      assert.equal(shot.used, true, `${unitId} instant-reload shot #${s + 1} must fire immediately`);
+      assert.equal(shot.fired, true, `${unitId} instant-reload shot #${s + 1} must report fired: true`);
+      assert.equal(shot.cooldown, 0, `${unitId} instant-reload shot #${s + 1} must report 0 cooldown`);
+      assert.equal(copP.copMissileCooldown, 0, `${unitId} copMissileCooldown must remain 0`);
+    }
+    assert.equal(
+      abilities.getProjectiles().filter((p) => p.type === 'cop_missile').length,
+      5,
+      `${unitId} must spawn all 5 back-to-back missiles`
+    );
+  }
+
+  // Firing 60 times back-to-back with instantCopMissileReload: true must enforce the 48 cop_missile safety cap
+  abilities.reset();
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_heli', aiCopsEnabled: false, instantCopMissileReload: true });
+  const capCtx = { world, cops: [], traffic: [], localPlayer: sim.localPlayer, remotePlayers: [], onEvent: () => {} };
+  for (let s = 0; s < 60; s++) {
+    const shot = abilities.fireCopMissile(sim.localPlayer, capCtx);
+    assert.equal(shot.used, true, `Instant-reload rapid shot #${s + 1} must fire`);
+    assert.equal(sim.localPlayer.copMissileCooldown, 0);
+  }
+  const activeCopMissiles = abilities.getProjectiles().filter((p) => p.type === 'cop_missile').length;
+  assert.ok(activeCopMissiles > 0 && activeCopMissiles <= 48, `cop_missile safety cap must keep active missiles <= 48, got ${activeCopMissiles}`);
+  assert.ok(abilities.getProjectiles().length <= 96, `Total projectile count must stay <= 96, got ${abilities.getProjectiles().length}`);
+
+  // Cruiser & SWAT Siren Surge must keep normal 2.0s cooldown even when instantCopMissileReload: true
+  for (const groundCopId of ['cop_cruiser', 'cop_swat']) {
+    abilities.reset();
+    sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: groundCopId, aiCopsEnabled: false, instantCopMissileReload: true });
+    const surgeCtx = { world, cops: [], traffic: [], localPlayer: sim.localPlayer, remotePlayers: [], onEvent: () => {} };
+    const surge1 = abilities.fireCopMissile(sim.localPlayer, surgeCtx);
+    assert.equal(surge1.used, true, `${groundCopId} initial Siren Surge must activate`);
+    assert.equal(sim.localPlayer.copMissileCooldown, 2.0, `${groundCopId} must keep 2.0s cooldown even with instantCopMissileReload: true`);
+    const surge2 = abilities.fireCopMissile(sim.localPlayer, surgeCtx);
+    assert.equal(surge2.used, false, `${groundCopId} immediate 2nd Siren Surge must be blocked by 2.0s cooldown`);
+  }
+
+  // Verify Missile & RPG speeds (104 > max car speed 58, < 3x Sugar Rush speed; scales cleanly at 1.45x lobby speed)
+  const maxCarBaseSpeed = Math.max(...VEHICLES.map((v) => v.speed));
+  assert.equal(COP_MISSILE_SPEED, 104, 'COP_MISSILE_SPEED must be 104');
+  assert.equal(RPG_ROCKET_SPEED, 104, 'RPG_ROCKET_SPEED must be 104');
+  assert.ok(COP_MISSILE_SPEED > maxCarBaseSpeed, `Missile speed (${COP_MISSILE_SPEED}) must exceed max car speed (${maxCarBaseSpeed})`);
+  assert.ok(COP_MISSILE_SPEED < maxCarBaseSpeed * 2.35, `Missile speed (${COP_MISSILE_SPEED}) must remain slower than 3x Sugar Rush (${(maxCarBaseSpeed * 2.35).toFixed(1)})`);
+
+  abilities.reset();
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_heli', aiCopsEnabled: false, instantCopMissileReload: true, speedMult: 1.0 });
+  const stdShot = abilities.fireCopMissile(sim.localPlayer, { world, cops: [], traffic: [], localPlayer: sim.localPlayer, remotePlayers: [], onEvent: () => {} });
+  assert.equal(stdShot.projectile?.speed, 104, 'Cop missile must spawn at speed 104 under 1.0x speedMult');
+
+  abilities.reset();
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_heli', aiCopsEnabled: false, instantCopMissileReload: true, speedMult: 1.45 });
+  const fastShot = abilities.fireCopMissile(sim.localPlayer, { world, cops: [], traffic: [], localPlayer: sim.localPlayer, remotePlayers: [], onEvent: () => {} });
+  assert.ok(
+    fastShot.projectile?.speed > maxCarBaseSpeed * 1.45 && fastShot.projectile?.speed < maxCarBaseSpeed * 1.45 * 2.35,
+    `Scaled 1.45x missile speed (${fastShot.projectile?.speed}) must outpace 1.45x cars while staying slower than 1.45x 3x Sugar Rush`
+  );
+
+  // Verify rapid-tap input queue (useItemCount) never drops same-frame multi-taps or consecutive-frame taps
+  abilities.reset();
+  sim.resetRun(777123, { ...settings, playerRole: 'cop', copVehicleId: 'cop_heli', aiCopsEnabled: false, instantCopMissileReload: true });
+  sim.update(1 / 60, { useItem: true, useItemCount: 3 }, 0.016);
+  sim.update(1 / 60, { useItem: true, useItemCount: 1 }, 0.032);
+  sim.update(1 / 60, { useItem: true, useItemCount: 1 }, 0.048);
+  assert.equal(
+    abilities.getProjectiles().filter((p) => p.type === 'cop_missile').length,
+    5,
+    'Rapid queued taps (3 same-frame + 2 consecutive frames) must fire all 5 missiles without dropping any'
+  );
+  sim.updateSettings(settings);
+
   console.log('3d. Checking Tactical Nuke (0.1%–1000% odds, 2x real-player kill multiplier, 5.0s live tracking, Party vs Solo NPC ban)...');
   assert.equal(ABILITIES.length, 10, 'ABILITIES must contain all 10 items including Tactical Nuke');
   assert.equal(ABILITIES[0].id, 'tactical_nuke', 'tactical_nuke must be featured at index 0 of ABILITIES');
@@ -814,9 +893,10 @@ async function runAllChecks() {
   });
   await cloudHost._sendCloudCommand({
     type: 'update_room_settings',
-    settings: { nukeKillDoubleOdds: false, itemWeights: { tactical_nuke: 1000 } },
+    settings: { nukeKillDoubleOdds: false, instantCopMissileReload: true, itemWeights: { tactical_nuke: 1000 } },
   });
   assert.equal(cloudHost._cloudHostRoom.settings.nukeKillDoubleOdds, false, 'Cloud relay must sync nukeKillDoubleOdds');
+  assert.equal(cloudHost._cloudHostRoom.settings.instantCopMissileReload, true, 'Cloud relay must sync instantCopMissileReload');
   assert.equal(cloudHost._cloudHostRoom.settings.itemWeights?.tactical_nuke, 1000, 'Cloud relay must sync itemWeights.tactical_nuke');
   await cloudHost._sendCloudCommand({
     type: 'sound_sync',
@@ -844,6 +924,9 @@ async function runAllChecks() {
     assert.ok(homeRes.body.includes('id="nuke-target-hint"'), 'Nuke target hint must exist');
     assert.ok(homeRes.body.includes('id="nuke-countdown-banner"'), 'Nuke countdown banner must exist');
     assert.ok(homeRes.body.includes('data-rpreset="nuke1000"'), '1000% Nuke Chaos preset chip must exist');
+    assert.ok(homeRes.body.includes('id="chk-instant-cop-reload"'), 'World Settings instant missile reload toggle must exist');
+    assert.ok(homeRes.body.includes('id="perm-instant-cop-reload"'), 'Lobby Host Manager instant missile reload toggle must exist');
+    assert.ok(homeRes.body.includes('id="fleet-missile-hint-pill"'), 'Garage Police Fleet missile hint pill must exist');
     assert.ok(homeRes.body.includes('icon-180.png'), 'iOS apple-touch-icon PNG must be linked');
 
     const iconRes = await httpGet(`http://127.0.0.1:${port}/icon-180.png`);
@@ -890,6 +973,7 @@ async function runAllChecks() {
     });
     const created = await p1.waitFor((m) => m.type === 'room_joined');
     assert.equal(created.code.length, 4);
+    assert.equal(created.room.settings.instantCopMissileReload, false, 'LAN room settings must default instantCopMissileReload to false');
 
     p2.send({
       type: 'join_room',
@@ -916,13 +1000,14 @@ async function runAllChecks() {
     const full16 = await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 16);
     assert.equal(full16.players.length, 16, 'Room must hold 16 players');
 
-    // Host locks Same Car ('monster') + Same Mode ('car_driver') + Equal 125% Speed + 500% Drop Rates!
+    // Host locks Same Car ('monster') + Same Mode ('car_driver') + Equal 125% Speed + 500% Drop Rates + Instant Cop Missile Reload!
     p1.send({
       type: 'update_room_settings',
       settings: {
         itemBoxDensity: 5.0,
         sugarBoxRate: 4.5,
         nukeKillDoubleOdds: false,
+        instantCopMissileReload: true,
         itemWeights: {
           tactical_nuke: 1000,
           homing_rocket: 1000,
@@ -945,6 +1030,7 @@ async function runAllChecks() {
     assert.equal(lockedRoom.settings.itemBoxDensity, 5.0, 'Room must sync itemBoxDensity: 5.0 to guests');
     assert.equal(lockedRoom.settings.sugarBoxRate, 4.5, 'Room must sync sugarBoxRate: 4.5 to guests');
     assert.equal(lockedRoom.settings.nukeKillDoubleOdds, false, 'Room must sync nukeKillDoubleOdds: false to all 16 players');
+    assert.equal(lockedRoom.settings.instantCopMissileReload, true, 'Room must sync instantCopMissileReload: true to all 16 players');
     assert.equal(lockedRoom.settings.itemWeights?.tactical_nuke, 1000, 'Room must sync tactical_nuke: 1000');
     assert.equal(lockedRoom.settings.itemWeights?.homing_rocket, 1000, 'Room must sync homing_rocket: 1000');
     assert.equal(lockedRoom.settings.itemWeights?.lightning_zap, 0.1, 'Room must sync lightning_zap: 0.1');
@@ -986,13 +1072,20 @@ async function runAllChecks() {
       type: 'update_room_settings',
       settings: {
         aiCopsEnabled: true,
+        instantCopMissileReload: false,
         lobbyRules: {
           ...lockedRoom.settings.lobbyRules,
           allowPlayerCops: true,
         },
       },
     });
-    await p2.waitFor((m) => m.type === 'room_state' && m.settings?.lobbyRules?.allowPlayerCops === true);
+    const resetRoom = await p2.waitFor(
+      (m) =>
+        m.type === 'room_state' &&
+        m.settings?.lobbyRules?.allowPlayerCops === true &&
+        m.settings?.instantCopMissileReload === false
+    );
+    assert.equal(resetRoom.settings.instantCopMissileReload, false, 'Room must sync instantCopMissileReload: false back to guests');
 
     for (const ck of extraClients) ck.close();
     await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);

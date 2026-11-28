@@ -3636,6 +3636,59 @@ body.editing-hud-layout .hud-widget.active-widget {
   background: rgba(239, 68, 68, 0.18);
   border: 1px solid rgba(248, 113, 113, 0.5);
   color: #fecaca;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.fleet-hint-pill.instant-on {
+  background: linear-gradient(135deg, rgba(250, 204, 21, 0.28) 0%, rgba(132, 204, 22, 0.3) 100%);
+  border-color: #bef264;
+  color: #fef9c3;
+  box-shadow: 0 0 14px rgba(250, 204, 21, 0.48), 0 0 10px rgba(163, 230, 53, 0.42);
+}
+
+.instant-reload-switch {
+  background: var(--panel-surface);
+  border: 2px solid rgba(56, 189, 248, 0.38);
+  border-radius: 12px;
+  padding: 9px 11px;
+  margin-bottom: 9px;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.perm-switches .instant-reload-switch {
+  background: rgba(15, 23, 42, 0.72);
+  border-width: 1.5px;
+  border-radius: 10px;
+  padding: 7px 9px;
+  margin-bottom: 0;
+}
+
+.instant-reload-switch.is-on,
+.instant-reload-switch:has(input:checked) {
+  border-color: rgba(251, 146, 60, 0.88);
+  background: linear-gradient(135deg, rgba(234, 88, 12, 0.22) 0%, rgba(14, 116, 144, 0.28) 100%);
+  box-shadow: 0 0 14px rgba(249, 115, 22, 0.26), inset 0 1px 0 rgba(56, 189, 248, 0.24);
+}
+
+.instant-reload-switch.is-disabled {
+  opacity: 0.52;
+}
+
+.instant-reload-sub {
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--slate-tint);
+}
+
+.instant-reload-switch.is-on .instant-reload-sub,
+.instant-reload-switch:has(input:checked) .instant-reload-sub {
+  color: #fed7aa;
+}
+
+.cop-card-perk.missile.instant-on {
+  background: linear-gradient(135deg, rgba(250, 204, 21, 0.26) 0%, rgba(132, 204, 22, 0.26) 100%);
+  border-color: #bef264;
+  color: #fef9c3;
 }
 
 .cop-vehicle-grid {

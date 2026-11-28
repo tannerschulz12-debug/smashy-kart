@@ -191,6 +191,7 @@ function loadSavedSettings() {
       hudLayout: mergedHudLayout,
       keybinds: mergedKeybinds,
       aiCopsEnabled: parsed.aiCopsEnabled !== false,
+      instantCopMissileReload: Boolean(parsed.instantCopMissileReload),
       playerRole: parsed.playerRole === 'cop' ? 'cop' : 'runner',
       copVehicleId: COP_VEHICLES.some((c) => c.id === parsed.copVehicleId)
         ? parsed.copVehicleId
@@ -302,6 +303,7 @@ class SmashyKartApp {
     this.touchGas = false;
     this.joystickPullBrake = false;
     this.touchUseItemQueued = false;
+    this.touchUseItemQueueCount = 0;
     this.touchHornQueued = false;
     this.joystickTouchId = null;
     this.joystickOrigin = { x: 0, y: 0 };
@@ -609,6 +611,7 @@ class SmashyKartApp {
       } else if (this._matchesActionCode('useItem', e.code) && !e.repeat) {
         if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
           e.preventDefault();
+          this.touchUseItemQueueCount = Math.min(8, (this.touchUseItemQueueCount || 0) + 1);
           this.touchUseItemQueued = true;
         }
       } else if (this._matchesActionCode('horn', e.code) && !e.repeat) {
@@ -639,6 +642,8 @@ class SmashyKartApp {
     this.touchSteerRight = false;
     this.touchBrake = false;
     this.touchGas = false;
+    this.touchUseItemQueueCount = 0;
+    this.touchUseItemQueued = false;
     this.joystickPullBrake = false;
     this.joystickTouchId = null;
     this.joystickAxis = 0;
@@ -754,6 +759,7 @@ class SmashyKartApp {
       if (this.editingHudLayout) return;
       e.preventDefault();
       e.stopPropagation();
+      this.touchUseItemQueueCount = Math.min(8, (this.touchUseItemQueueCount || 0) + 1);
       this.touchUseItemQueued = true;
     });
 
@@ -946,9 +952,10 @@ class SmashyKartApp {
 
   _gatherGameplayInput() {
     if (this.editingHudLayout) {
+      this.touchUseItemQueueCount = 0;
       this.touchUseItemQueued = false;
       this.touchHornQueued = false;
-      return { left: false, right: false, brake: false, gas: false, useItem: false, horn: false, steerAxis: null };
+      return { left: false, right: false, brake: false, gas: false, useItem: false, useItemCount: 0, horn: false, steerAxis: null };
     }
 
     const keyLeft = this._isActionPressed('steerLeft');
@@ -961,9 +968,16 @@ class SmashyKartApp {
     const brake = keyBrake || this.touchBrake || this.joystickPullBrake || (left && right);
     const gas = keyGas || this.touchGas;
 
-    const useItem = this.touchUseItemQueued;
-    const horn = this.touchHornQueued;
+    let useItemCount = 0;
+    if (this.touchUseItemQueueCount > 0) {
+      useItemCount = Math.min(8, this.touchUseItemQueueCount);
+    } else if (this.touchUseItemQueued) {
+      useItemCount = 1;
+    }
+    this.touchUseItemQueueCount = 0;
     this.touchUseItemQueued = false;
+    const useItem = useItemCount > 0;
+    const horn = this.touchHornQueued;
     this.touchHornQueued = false;
 
     const deadzone = clampNum(this.settings.steerDeadzone, 0, 0.22, 0.05);
@@ -972,7 +986,7 @@ class SmashyKartApp {
         ? this.joystickAxis
         : null;
 
-    return { left, right, brake, gas, useItem, horn, steerAxis };
+    return { left, right, brake, gas, useItem, useItemCount, horn, steerAxis };
   }
 
   // ======================== CLAW & FREE-DRAG HUD LAYOUT EDITOR ========================
@@ -2437,6 +2451,36 @@ class SmashyKartApp {
       );
     });
 
+    document.getElementById('chk-instant-cop-reload')?.addEventListener('change', (e) => {
+      if (this.net.roomCode && !this.net.isHost) {
+        this._refreshAllUiFromSettings();
+        this._showChaosToast('🔒 Instant Missile Reload is controlled by the Lobby Host!');
+        return;
+      }
+      this.settings.instantCopMissileReload = Boolean(e.target.checked);
+      saveSettings(this.settings);
+      this.sim.updateSettings(this.settings);
+      this.abilities.updateSettings(this.settings);
+      if (this.settings.instantCopMissileReload && this.sim.localPlayer) {
+        this.sim.localPlayer.copMissileCooldown = 0;
+      }
+      if (this.net.roomState?.settings) {
+        this.net.roomState.settings.instantCopMissileReload = this.settings.instantCopMissileReload;
+      }
+      this._refreshAllUiFromSettings();
+      if (this.net.roomCode && this.net.isHost) {
+        this.net.updateRoomSettings(this.settings);
+        if (this.net.roomState && !document.getElementById('lobby-modal')?.classList.contains('hidden')) {
+          this._renderLobbyRoom(this.net.roomState);
+        }
+      }
+      this._showChaosToast(
+        this.settings.instantCopMissileReload
+          ? '⚡ Instant Heli & Tank Missile Reload ON — shoot as fast as you tap!'
+          : '⏳ Heli & Tank Missile Reload back to 2.0s'
+      );
+    });
+
     bindSlider('rng-cop-intensity', 'copIntensity');
     bindSlider('rng-start-stars', 'startStars');
     bindSlider('rng-gravity', 'gravityMult');
@@ -2519,7 +2563,11 @@ class SmashyKartApp {
         perks.push('<span class="cop-card-perk sky">🚁 Flies Over Buildings</span>');
       }
       if (cv.hasMissile) {
-        perks.push('<span class="cop-card-perk missile">🎯 2s Soft-Homing Missiles</span>');
+        perks.push(
+          this.settings.instantCopMissileReload
+            ? '<span class="cop-card-perk missile instant-on">⚡ Instant Rapid-Fire Missiles</span>'
+            : '<span class="cop-card-perk missile">🎯 2s Soft-Homing Missiles</span>'
+        );
       } else {
         perks.push('<span class="cop-card-perk surge">🚨 2s Siren Surge + ? Items</span>');
       }
@@ -3215,6 +3263,7 @@ class SmashyKartApp {
       homeCarName.classList.toggle('cop-active', isCopRole);
     }
 
+    const instantReloadOn = Boolean(s.instantCopMissileReload);
     document.getElementById('home-mode-pills')?.classList.toggle('hidden', isCopRole);
     const homeCopPerk = document.getElementById('home-cop-perk-badge');
     if (homeCopPerk) {
@@ -3222,9 +3271,13 @@ class SmashyKartApp {
       if (isCopRole) {
         homeCopPerk.textContent =
           copVeh.id === 'cop_heli'
-            ? '🚁 Flies + 🎯 2s Missiles'
+            ? instantReloadOn
+              ? '🚁 Flies + ⚡ Instant Missiles'
+              : '🚁 Flies + 🎯 2s Missiles'
             : copVeh.id === 'cop_tank'
-              ? '🪖 Tank Armor + 🎯 2s Missiles'
+              ? instantReloadOn
+                ? '🪖 Tank Armor + ⚡ Instant Missiles'
+                : '🪖 Tank Armor + 🎯 2s Missiles'
               : copVeh.id === 'cop_swat'
                 ? '🛡️ SWAT Ram + 🚨 2s Surge'
                 : '🚔 V8 Pursuit + 🚨 2s Surge';
@@ -3237,7 +3290,7 @@ class SmashyKartApp {
     const soloSubEl = document.querySelector('#btn-play-solo .btn-sub-text');
     if (soloSubEl) {
       soloSubEl.textContent = isCopRole
-        ? `${copVeh.icon} Hunt Outlaws · ${copVeh.hasMissile ? '2s Missiles' : 'Siren Purge'}`
+        ? `${copVeh.icon} Hunt Outlaws · ${copVeh.hasMissile ? (instantReloadOn ? 'Instant Missiles' : '2s Missiles') : 'Siren Purge'}`
         : s.aiCopsEnabled === false
           ? 'Free-Roam Stunt & ? Box Run'
           : 'Instant 5-Star Police Chase';
@@ -3298,6 +3351,35 @@ class SmashyKartApp {
         : `OFF — No AI Cops${worldLockSuffix}`;
     }
     document.getElementById('ai-cop-sliders-wrap')?.classList.toggle('is-off', !aiCopsOn);
+
+    const chkInstantReload = document.getElementById('chk-instant-cop-reload');
+    if (chkInstantReload) {
+      chkInstantReload.checked = instantReloadOn;
+      chkInstantReload.disabled = guestWorldLocked;
+    }
+    const instantReloadWrap = chkInstantReload?.closest('.instant-reload-switch');
+    instantReloadWrap?.classList.toggle('is-on', instantReloadOn);
+    instantReloadWrap?.classList.toggle('is-disabled', guestWorldLocked);
+    const lblInstantReload = document.getElementById('lbl-instant-cop-reload');
+    if (lblInstantReload) {
+      lblInstantReload.textContent = instantReloadOn
+        ? `ON — 0s Instant Rapid-Fire!${worldLockSuffix}`
+        : `OFF — 2.0s Missile Cooldown${worldLockSuffix}`;
+    }
+
+    const permInstantReload = document.getElementById('perm-instant-cop-reload');
+    if (permInstantReload) {
+      permInstantReload.checked = instantReloadOn;
+      permInstantReload.closest('.instant-reload-switch')?.classList.toggle('is-on', instantReloadOn);
+    }
+
+    const fleetHintPill = document.getElementById('fleet-missile-hint-pill');
+    if (fleetHintPill) {
+      fleetHintPill.textContent = instantReloadOn
+        ? '⚡ INSTANT Reload ON — Shoot as fast as you tap!'
+        : '🎯 2.0s Soft-Tracking Missiles on Heli & Tank';
+      fleetHintPill.classList.toggle('instant-on', instantReloadOn);
+    }
 
     document.querySelectorAll('#biome-btns .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.biome === s.biome)
@@ -3831,6 +3913,10 @@ class SmashyKartApp {
         rules.universalMassMult = 1.0;
         rules.universalScaleMult = 1.0;
         this.settings.aiCopsEnabled = true;
+        this.settings.instantCopMissileReload = false;
+        if (this.net.roomState?.settings) {
+          this.net.roomState.settings.instantCopMissileReload = false;
+        }
         this.settings.speedMult = 1.0;
         this.settings.driftMult = 1.0;
         this.settings.massMult = 1.0;
@@ -3946,6 +4032,25 @@ class SmashyKartApp {
     });
 
     bindPerm('perm-allow-cops', 'allowPlayerCops');
+    const permInstantReloadEl = document.getElementById('perm-instant-cop-reload');
+    permInstantReloadEl?.addEventListener('change', () => {
+      if (!this.net.isHost) return;
+      this.settings.instantCopMissileReload = Boolean(permInstantReloadEl.checked);
+      this.sim.updateSettings(this.settings);
+      this.abilities.updateSettings(this.settings);
+      if (this.settings.instantCopMissileReload && this.sim.localPlayer) {
+        this.sim.localPlayer.copMissileCooldown = 0;
+      }
+      if (this.net.roomState?.settings) {
+        this.net.roomState.settings.instantCopMissileReload = this.settings.instantCopMissileReload;
+      }
+      syncHostRules();
+      this._showChaosToast(
+        this.settings.instantCopMissileReload
+          ? '⚡ Instant Heli & Tank Missile Reload ON — shoot as fast as you tap!'
+          : '⏳ Heli & Tank Missile Reload back to 2.0s'
+      );
+    });
     const permShareSoundsEl = document.getElementById('perm-share-sounds');
     permShareSoundsEl?.addEventListener('change', () => {
       if (!this.net.isHost) return;
@@ -3978,6 +4083,15 @@ class SmashyKartApp {
     if (rs.biome) this.settings.biome = rs.biome;
     if (rs.aiCopsEnabled !== undefined) {
       this.settings.aiCopsEnabled = Boolean(rs.aiCopsEnabled);
+    }
+    if (rs.instantCopMissileReload !== undefined) {
+      this.settings.instantCopMissileReload = Boolean(rs.instantCopMissileReload);
+      if (this.sim?.settings) {
+        this.sim.settings.instantCopMissileReload = this.settings.instantCopMissileReload;
+      }
+      if (this.settings.instantCopMissileReload && this.sim.localPlayer) {
+        this.sim.localPlayer.copMissileCooldown = 0;
+      }
     }
     if (rs.copIntensity !== undefined) this.settings.copIntensity = rs.copIntensity;
     if (rs.startStars !== undefined) this.settings.startStars = rs.startStars;
@@ -4076,6 +4190,16 @@ class SmashyKartApp {
       if (aiCopsChk) aiCopsChk.checked = room.settings?.aiCopsEnabled !== false;
       const allowCopsChk = document.getElementById('perm-allow-cops');
       if (allowCopsChk) allowCopsChk.checked = rules.allowPlayerCops !== false;
+      const instantReloadOn = Boolean(
+        room.settings?.instantCopMissileReload !== undefined
+          ? room.settings.instantCopMissileReload
+          : this.settings.instantCopMissileReload
+      );
+      const instantReloadChk = document.getElementById('perm-instant-cop-reload');
+      if (instantReloadChk) {
+        instantReloadChk.checked = instantReloadOn;
+        instantReloadChk.closest('.instant-reload-switch')?.classList.toggle('is-on', instantReloadOn);
+      }
       const shareSoundsChk = document.getElementById('perm-share-sounds');
       if (shareSoundsChk) shareSoundsChk.checked = rules.shareHostSounds !== false;
       document.getElementById('perm-lock-stats').checked = rules.lockStats !== false;
@@ -4175,9 +4299,14 @@ class SmashyKartApp {
     const aiCopsStatus = rs.aiCopsEnabled === false ? '🚫 AI Cops OFF' : '🚔 AI Cops ON';
     const playerCopsStatus =
       rules.allowPlayerCops === false ? '🔒 Police Team Disabled' : '🚔 Police Team Open';
+    const instantReloadOn =
+      rs.instantCopMissileReload !== undefined
+        ? Boolean(rs.instantCopMissileReload)
+        : Boolean(this.settings.instantCopMissileReload);
     const parts = [
       aiCopsStatus,
       playerCopsStatus,
+      ...(instantReloadOn ? ['⚡ Instant Heli/Tank Missiles'] : []),
       rules.lockStats !== false ? `🔒 Equal ${spdPct}% Speed & Stats` : '🔓 Custom Car Tuning Allowed',
       biomeObj.name,
       rules.allowCarChoice === false ? '🔒 Same Car Forced' : 'Any Car',
@@ -4298,6 +4427,11 @@ class SmashyKartApp {
       roomSettings.aiCopsEnabled !== undefined
         ? Boolean(roomSettings.aiCopsEnabled)
         : this.settings.aiCopsEnabled !== false;
+    const roomInstantCopReload =
+      roomSettings.instantCopMissileReload !== undefined
+        ? Boolean(roomSettings.instantCopMissileReload)
+        : Boolean(this.settings.instantCopMissileReload);
+    this.settings.instantCopMissileReload = roomInstantCopReload;
 
     const players = (msg.players || []).map((p, idx) => ({
       ...p,
@@ -4328,6 +4462,7 @@ class SmashyKartApp {
       ...this.settings,
       isParty: true,
       aiCopsEnabled: roomAiCops,
+      instantCopMissileReload: roomInstantCopReload,
       playerRole: localRole,
       copVehicleId: localCopVehicleId,
       characterMode: allowMode ? this.settings.characterMode : rules.universalCharacterMode || 'car_driver',
@@ -4940,13 +5075,17 @@ class SmashyKartApp {
 
     if (useBtn && useIcon && useLabel && useCharges) {
       if (isCopMissileUnit) {
-        const cd = Math.max(0, Number(lp.copMissileCooldown) || 0);
+        const instantReload = Boolean(
+          this.settings.instantCopMissileReload ||
+            (this.mode === 'playing_party' && this.sim.settings?.instantCopMissileReload)
+        );
+        const cd = instantReload ? 0 : Math.max(0, Number(lp.copMissileCooldown) || 0);
         useBtn.classList.remove('spinning', 'sugar-glow', 'nuke-glow');
         useCharges.classList.add('hidden');
-        if (cd <= 0) {
+        if (instantReload || cd <= 0) {
           useBtn.classList.remove('disabled');
           useBtn.classList.add('cop-weapon-ready');
-          useIcon.textContent = '🎯';
+          useIcon.textContent = instantReload ? '⚡' : '🎯';
           useLabel.textContent = 'MISSILE';
         } else {
           useBtn.classList.add('disabled');

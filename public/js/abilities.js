@@ -2,7 +2,8 @@
 import { ABILITIES, WORLD_CONFIG, clampDropRatePct } from './config.js';
 
 const COP_MISSILE_COOLDOWN = 2.0;
-const COP_MISSILE_SPEED = 64;
+export const COP_MISSILE_SPEED = 104;
+export const RPG_ROCKET_SPEED = 104;
 const COP_MISSILE_TTL = 3.4;
 const COP_MISSILE_TURN_RATE = 1.15; // Gentle <= 1.15 rad/s tracking so runners can juke/dodge!
 const COP_MISSILE_CONE_DOT = 0.52;
@@ -38,6 +39,11 @@ export class AbilitySystem {
 
   updateSettings(settings = {}) {
     this.settings = { ...this.settings, ...(settings || {}) };
+  }
+
+  _getScaledMissileSpeed(baseSpeed = COP_MISSILE_SPEED) {
+    const speedMult = Number(this.settings?.speedMult) || 1.0;
+    return Math.round(baseSpeed * Math.max(1.0, Math.min(1.25, speedMult * 0.85)));
   }
 
   reset() {
@@ -264,7 +270,14 @@ export class AbilitySystem {
     if (player.copMissileCooldown === undefined) {
       player.copMissileCooldown = Number(items.copMissileCooldown) || 0;
     }
-    if (player.copMissileCooldown > 0) {
+    if (
+      this.settings?.instantCopMissileReload &&
+      player.playerRole === 'cop' &&
+      (player.copVehicleId === 'cop_heli' || player.copVehicleId === 'cop_tank')
+    ) {
+      player.copMissileCooldown = 0;
+      items.copMissileCooldown = 0;
+    } else if (player.copMissileCooldown > 0) {
       player.copMissileCooldown = Math.max(0, player.copMissileCooldown - dt);
     } else {
       player.copMissileCooldown = 0;
@@ -409,7 +422,10 @@ export class AbilitySystem {
     if (!player || player.alive === false) {
       return { used: false, fired: false, abilityId: null };
     }
-    if ((player.copMissileCooldown || 0) > 0) {
+    const copUnit = player.copVehicleId || 'cop_heli';
+    const isMissileUnit = copUnit === 'cop_heli' || copUnit === 'cop_tank';
+    const instantReload = Boolean(this.settings?.instantCopMissileReload) && isMissileUnit;
+    if (!instantReload && (player.copMissileCooldown || 0) > 0) {
       return {
         used: false,
         fired: false,
@@ -418,7 +434,6 @@ export class AbilitySystem {
       };
     }
 
-    const copUnit = player.copVehicleId || 'cop_heli';
     if (!player.items) {
       player.items = this.createPlayerItemState();
     }
@@ -472,10 +487,11 @@ export class AbilitySystem {
       };
     }
 
-    // Attack Helicopter & Police Tank: strict 2.0s-cooldown light/gentle soft-tracking missile!
+    // Attack Helicopter & Police Tank: 2.0s cooldown (or 0s instant reload when enabled!)
     const sourceUnit = copUnit === 'cop_tank' ? 'tank' : 'heli';
-    player.copMissileCooldown = COP_MISSILE_COOLDOWN;
-    player.items.copMissileCooldown = COP_MISSILE_COOLDOWN;
+    const appliedCooldown = instantReload ? 0 : COP_MISSILE_COOLDOWN;
+    player.copMissileCooldown = appliedCooldown;
+    if (player.items) player.items.copMissileCooldown = appliedCooldown;
 
     const px = Number(player.x) || 0;
     const pz = Number(player.z) || 0;
@@ -492,6 +508,7 @@ export class AbilitySystem {
     let sy;
     let sz;
     let vy = 0;
+    const missileSpeed = this._getScaledMissileSpeed(COP_MISSILE_SPEED);
 
     if (sourceUnit === 'tank') {
       sx = px + fx * 3.8;
@@ -507,12 +524,12 @@ export class AbilitySystem {
       const lockCand = this._pickInitialCopMissileTarget(sx, sz, launchAngle, player.id || 'local', context);
       const aimDist = lockCand ? Math.max(15, Math.min(78, lockCand.dist)) : 36;
       const targetFloorY = lockCand ? (lockCand.entity.y || 0) + 0.9 : groundY + 0.9;
-      const estFlightT = Math.max(0.24, aimDist / COP_MISSILE_SPEED);
-      vy = Math.max(-26, Math.min(-3.0, (targetFloorY - sy) / estFlightT));
+      const estFlightT = Math.max(0.24, aimDist / missileSpeed);
+      vy = Math.max(-42, Math.min(-3.0, (targetFloorY - sy) / estFlightT));
     }
 
-    const vx = fx * COP_MISSILE_SPEED;
-    const vz = fz * COP_MISSILE_SPEED;
+    const vx = fx * missileSpeed;
+    const vz = fz * missileSpeed;
 
     const proj = this._spawnCopMissile({
       ownerId: player.id || 'local',
@@ -526,6 +543,7 @@ export class AbilitySystem {
       vx,
       vy,
       vz,
+      speed: missileSpeed,
       angle: launchAngle,
       context,
     });
@@ -541,6 +559,7 @@ export class AbilitySystem {
       vx,
       vy,
       vz,
+      speed: missileSpeed,
       angle: launchAngle,
     };
 
@@ -550,7 +569,7 @@ export class AbilitySystem {
       sourceUnit,
       playerId: player.id || 'local',
       chargesLeft: 0,
-      cooldown: COP_MISSILE_COOLDOWN,
+      cooldown: appliedCooldown,
       x: sx,
       y: sy,
       z: sz,
@@ -563,7 +582,7 @@ export class AbilitySystem {
       abilityId: 'cop_missile',
       sourceUnit,
       chargesLeft: 0,
-      cooldown: COP_MISSILE_COOLDOWN,
+      cooldown: appliedCooldown,
       projectile: proj,
       netEvent,
     };
@@ -909,7 +928,7 @@ export class AbilitySystem {
             y: Math.max(0.65, y + 0.65),
             z,
             angle,
-            speed: 88,
+            speed: this._getScaledMissileSpeed(RPG_ROCKET_SPEED),
           });
         } else {
           this._spawnTwinRpg({
@@ -983,6 +1002,10 @@ export class AbilitySystem {
 
       case 'cop_missile': {
         const srcUnit = payload.sourceUnit === 'tank' ? 'tank' : 'heli';
+        const missileSpeed =
+          Number.isFinite(Number(payload.speed)) && Number(payload.speed) > 0
+            ? Number(payload.speed)
+            : this._getScaledMissileSpeed(COP_MISSILE_SPEED);
         this._spawnCopMissile({
           ownerId,
           ownerName,
@@ -992,9 +1015,10 @@ export class AbilitySystem {
           x,
           y: Number.isFinite(Number(payload.y)) ? Number(payload.y) : srcUnit === 'heli' ? 11.0 : 1.4,
           z,
-          vx: Number.isFinite(Number(payload.vx)) ? Number(payload.vx) : fx * COP_MISSILE_SPEED,
+          vx: Number.isFinite(Number(payload.vx)) ? Number(payload.vx) : fx * missileSpeed,
           vy: Number.isFinite(Number(payload.vy)) ? Number(payload.vy) : srcUnit === 'heli' ? -14.0 : 0,
-          vz: Number.isFinite(Number(payload.vz)) ? Number(payload.vz) : fz * COP_MISSILE_SPEED,
+          vz: Number.isFinite(Number(payload.vz)) ? Number(payload.vz) : fz * missileSpeed,
+          speed: missileSpeed,
           angle,
           context,
         });
@@ -1108,6 +1132,7 @@ export class AbilitySystem {
       { lateral: 1.15, barrelSide: 1, spread: 0.09, target: target2 },
     ];
 
+    const rocketSpeed = this._getScaledMissileSpeed(RPG_ROCKET_SPEED);
     const spawned = [];
     for (let i = 0; i < barrels.length; i++) {
       const b = barrels[i];
@@ -1123,7 +1148,7 @@ export class AbilitySystem {
           y: baseY,
           z: sz,
           angle: launchAngle,
-          speed: 88,
+          speed: rocketSpeed,
           turnRate: 7.2,
           blastRadius: 9.5,
           barrelSide: b.barrelSide,
@@ -1142,7 +1167,7 @@ export class AbilitySystem {
     y,
     z,
     angle = 0,
-    speed = 88,
+    speed = RPG_ROCKET_SPEED,
     turnRate = 7.2,
     blastRadius = 9.5,
     barrelSide = -1,
@@ -1181,7 +1206,7 @@ export class AbilitySystem {
     return proj;
   }
 
-  _spawnHomingShell({ ownerId, ownerName, ownerRef, x, y, z, angle, speed = 88 }) {
+  _spawnHomingShell({ ownerId, ownerName, ownerRef, x, y, z, angle, speed = RPG_ROCKET_SPEED }) {
     return this._spawnRpgRocket({
       ownerId,
       ownerName,
@@ -1723,9 +1748,14 @@ export class AbilitySystem {
     vx,
     vy = 0,
     vz,
+    speed = null,
     angle = 0,
     context = {},
   }) {
+    const missileSpeed =
+      Number.isFinite(Number(speed)) && Number(speed) > 0
+        ? Number(speed)
+        : this._getScaledMissileSpeed(COP_MISSILE_SPEED);
     const initTarget = this._pickInitialCopMissileTarget(x, z, angle, ownerId, context);
     const proj = {
       id: this.nextProjectileId++,
@@ -1743,7 +1773,7 @@ export class AbilitySystem {
       vx,
       vy,
       vz,
-      speed: COP_MISSILE_SPEED,
+      speed: missileSpeed,
       turnRate: COP_MISSILE_TURN_RATE,
       maxTurnRate: COP_MISSILE_TURN_RATE,
       coneDot: COP_MISSILE_CONE_DOT,
@@ -1753,7 +1783,7 @@ export class AbilitySystem {
       blastRadius: COP_MISSILE_BLAST_RADIUS,
       damage: COP_MISSILE_DAMAGE,
       angle,
-      pitch: Math.atan2(vy || 0, COP_MISSILE_SPEED),
+      pitch: Math.atan2(vy || 0, missileSpeed),
       spin: 0,
       radius: 1.35,
       ttl: COP_MISSILE_TTL,
@@ -1761,6 +1791,25 @@ export class AbilitySystem {
       age: 0,
       color: '#38bdf8',
     };
+    // Safety cap: keep cop_missile <= 48 and total projectiles <= 96 for smooth 60fps during rapid tapping
+    while (this.projectiles.length >= 96) {
+      const oldestIdx = this.projectiles.findIndex((p) => p?.type === 'cop_missile');
+      if (oldestIdx === -1) break;
+      this.projectiles.splice(oldestIdx, 1);
+    }
+    let copMissileCount = 0;
+    let oldestCopMissileIdx = -1;
+    for (let i = 0; i < this.projectiles.length; i++) {
+      if (this.projectiles[i]?.type === 'cop_missile') {
+        if (oldestCopMissileIdx === -1) oldestCopMissileIdx = i;
+        copMissileCount++;
+      }
+    }
+    while (copMissileCount >= 48 && oldestCopMissileIdx !== -1) {
+      this.projectiles.splice(oldestCopMissileIdx, 1);
+      copMissileCount--;
+      oldestCopMissileIdx = this.projectiles.findIndex((p) => p?.type === 'cop_missile');
+    }
     this.projectiles.push(proj);
     return proj;
   }
@@ -2326,7 +2375,7 @@ export class AbilitySystem {
             if (proj.sourceUnit === 'heli') {
               const desiredY = (bestCand.entity.y || 0) + 0.9;
               const estT = Math.max(0.2, bestCand.horizDist / speed);
-              const desiredVy = Math.max(-28, Math.min(6, (desiredY - proj.y) / estT));
+              const desiredVy = Math.max(-42, Math.min(6, (desiredY - proj.y) / estT));
               proj.vy = (proj.vy || 0) + (desiredVy - (proj.vy || 0)) * Math.min(1, dt * 4.5);
             }
           }
@@ -2428,7 +2477,7 @@ export class AbilitySystem {
 
       if (proj.type === 'rpg_rocket' || proj.type === 'homing_rocket' || proj.type === 'homing_shell') {
         proj.spin = (proj.spin || 0) + dt * 24;
-        const speed = proj.speed || 88;
+        const speed = proj.speed || RPG_ROCKET_SPEED;
         const turnRate = proj.turnRate || 7.2;
         const blastRadius = proj.blastRadius || 9.5;
         const dirLen = Math.hypot(proj.vx, proj.vz) || 1;

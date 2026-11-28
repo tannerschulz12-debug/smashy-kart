@@ -199,6 +199,7 @@ function defaultRoomSettings() {
     itemBoxDensity: 1.2,
     sugarBoxRate: 1.0,
     nukeKillDoubleOdds: true,
+    instantCopMissileReload: false,
     gravityMult: 1.0,
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems: {
@@ -260,6 +261,11 @@ function sanitizeRoomSettings(current, patch = {}) {
     next.nukeKillDoubleOdds = Boolean(patch.nukeKillDoubleOdds);
   } else if (next.nukeKillDoubleOdds === undefined) {
     next.nukeKillDoubleOdds = true;
+  }
+  if (patch.instantCopMissileReload !== undefined) {
+    next.instantCopMissileReload = Boolean(patch.instantCopMissileReload);
+  } else if (next.instantCopMissileReload === undefined) {
+    next.instantCopMissileReload = false;
   }
   if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
     next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
