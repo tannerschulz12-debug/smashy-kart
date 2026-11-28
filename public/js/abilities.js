@@ -10,6 +10,8 @@ const COP_MISSILE_BREAK_DIST = 10.0; // Stops homing inside 10m horizontal dista
 const COP_MISSILE_BLAST_RADIUS = 5.8;
 const COP_MISSILE_DAMAGE = 36;
 
+export const NUKE_COUNTDOWN_SEC = 5.0;
+
 const ROULETTE_DURATION = 1.15;
 const SUGAR_ROULETTE_DURATION = 0.5;
 const ABILITY_MAP = new Map(ABILITIES.map((ab) => [ab.id, ab]));
@@ -66,6 +68,7 @@ export class AbilitySystem {
       shrunkTimer: 0,
       shockwaveVisualTimer: 0,
       copMissileCooldown: 0,
+      nukeSafeTimer: 0,
     };
   }
 
@@ -77,13 +80,18 @@ export class AbilitySystem {
     return playerOrState;
   }
 
-  _pickWeightedAbility(enabled, rankBias = 0) {
+  _pickWeightedAbility(enabled, rankBias = 0, playerState = null) {
     if (!enabled || !enabled.length) return null;
     const bias = Math.max(0, Math.min(1, Number(rankBias) || 0));
     const itemWeights = this.settings?.itemWeights;
+    const nukeKillDouble = this.settings?.nukeKillDoubleOdds !== false;
+    const playerKills = Math.max(0, Math.floor(Number(playerState?.playerKills) || 0));
     const weights = enabled.map((ab) => {
       const rateMult = clampDropRatePct(itemWeights?.[ab.id] ?? 100) / 100;
       let w = (ab.weight || 1.0) * rateMult;
+      if (ab.id === 'tactical_nuke' && nukeKillDouble && playerKills > 0) {
+        w *= Math.pow(2, Math.min(8, playerKills));
+      }
       if (bias > 0) {
         if (ab.id === 'star_power' || ab.id === 'mega_giant' || ab.id === 'lightning_zap') {
           w *= 1 + bias * 0.95;
@@ -115,7 +123,7 @@ export class AbilitySystem {
     const enabled = this.getEnabledAbilities();
     if (enabled.length === 0) return false;
 
-    const target = this._pickWeightedAbility(enabled, rankBias);
+    const target = this._pickWeightedAbility(enabled, rankBias, playerState);
     if (!target) return false;
 
     const startIdx = Math.floor(Math.random() * enabled.length);
@@ -220,7 +228,7 @@ export class AbilitySystem {
           ? forcedId
           : lockedTargetValid
             ? items._rouletteTargetId
-            : this._pickWeightedAbility(enabled, 0)?.id || enabled[0]?.id || null;
+            : this._pickWeightedAbility(enabled, 0, player)?.id || enabled[0]?.id || null;
         if (lockedId) {
           const def = this.getAbilityDef(lockedId);
           items.heldItem = lockedId;
@@ -249,6 +257,9 @@ export class AbilitySystem {
     if (items.shrunkTimer > 0) items.shrunkTimer = Math.max(0, items.shrunkTimer - dt);
     if (items.shockwaveVisualTimer > 0) {
       items.shockwaveVisualTimer = Math.max(0, items.shockwaveVisualTimer - dt);
+    }
+    if (items.nukeSafeTimer > 0) {
+      items.nukeSafeTimer = Math.max(0, items.nukeSafeTimer - dt);
     }
     if (player.copMissileCooldown === undefined) {
       player.copMissileCooldown = Number(items.copMissileCooldown) || 0;
@@ -580,14 +591,6 @@ export class AbilitySystem {
       return { used: false, abilityId: null };
     }
 
-    items.charges -= 1;
-    if (items.charges <= 0) {
-      items.heldItem = null;
-      items.charges = 0;
-      items.rouletteDisplayId = null;
-    }
-    player.heldItemId = items.heldItem;
-
     const angle = player.angle || 0;
     const fx = Math.sin(angle);
     const fz = Math.cos(angle);
@@ -595,6 +598,36 @@ export class AbilitySystem {
     const px = player.x || 0;
     const py = player.y || 0;
     const pz = player.z || 0;
+
+    let resolvedNuke = null;
+    if (abilityId === 'tactical_nuke') {
+      resolvedNuke = this._resolveNukeTarget({
+        ownerId: player.id || 'local',
+        targetId: context.targetId || null,
+        targetKind: context.targetKind || null,
+        isParty: context.isParty,
+        px,
+        pz,
+        fx,
+        fz,
+        context,
+      });
+      if (!resolvedNuke) {
+        context.onEvent?.({
+          type: 'nuke_no_target',
+          playerId: player.id || 'local',
+        });
+        return { used: false, reason: 'no_real_target', abilityId: 'tactical_nuke' };
+      }
+    }
+
+    items.charges -= 1;
+    if (items.charges <= 0) {
+      items.heldItem = null;
+      items.charges = 0;
+      items.rouletteDisplayId = null;
+    }
+    player.heldItemId = items.heldItem;
 
     const netEvent = {
       abilityId,
@@ -609,6 +642,32 @@ export class AbilitySystem {
     };
 
     switch (abilityId) {
+      case 'tactical_nuke': {
+        items.nukeSafeTimer = 6.5;
+        const dropX = resolvedNuke.x ?? px + fx * 22;
+        const dropZ = resolvedNuke.z ?? pz + fz * 22;
+        const dropY = resolvedNuke.groundY ?? (py || 0);
+        netEvent.targetId = resolvedNuke.targetId || null;
+        netEvent.targetKind = resolvedNuke.targetKind || 'point';
+        netEvent.targetName = resolvedNuke.targetName || 'Target';
+        netEvent.dropX = dropX;
+        netEvent.dropY = dropY;
+        netEvent.dropZ = dropZ;
+        this._spawnTacticalNuke({
+          ownerId: player.id || 'local',
+          ownerName: player.name || 'Player',
+          ownerRef: player,
+          targetId: resolvedNuke.targetId || null,
+          targetKind: resolvedNuke.targetKind || 'point',
+          targetName: resolvedNuke.targetName || 'Target',
+          x: dropX,
+          groundY: dropY,
+          z: dropZ,
+          context,
+        });
+        break;
+      }
+
       case 'homing_rocket': {
         netEvent.twinRpg = true;
         netEvent.playerRadius = pr;
@@ -791,6 +850,54 @@ export class AbilitySystem {
     const fz = Math.cos(angle);
 
     switch (abilityId) {
+      case 'tactical_nuke': {
+        const targetId = payload.targetId || null;
+        const targetKind = payload.targetKind || (targetId ? 'player' : 'point');
+        let targetName = payload.targetName || 'Target';
+        let dropX = Number.isFinite(Number(payload.dropX)) ? Number(payload.dropX) : x;
+        let dropY = Number.isFinite(Number(payload.dropY)) ? Number(payload.dropY) : y;
+        let dropZ = Number.isFinite(Number(payload.dropZ)) ? Number(payload.dropZ) : z;
+
+        if (targetId) {
+          let liveEnt = null;
+          if (
+            context.localPlayer &&
+            String(context.localPlayer.id) === String(targetId) &&
+            context.localPlayer.alive !== false
+          ) {
+            liveEnt = context.localPlayer;
+          } else {
+            const remotes = Array.isArray(context.remotePlayers)
+              ? context.remotePlayers
+              : Array.from(context.remotePlayers?.values?.() || []);
+            liveEnt =
+              remotes.find((rp) => rp && String(rp.id) === String(targetId) && rp.alive !== false) || null;
+          }
+          if (liveEnt) {
+            dropX = liveEnt.x;
+            dropY = liveEnt.y || 0;
+            dropZ = liveEnt.z;
+            if (!payload.targetName && liveEnt.name) {
+              targetName = liveEnt.name;
+            }
+          }
+        }
+
+        this._spawnTacticalNuke({
+          ownerId,
+          ownerName,
+          ownerRef: null,
+          targetId,
+          targetKind,
+          targetName,
+          x: dropX,
+          groundY: dropY,
+          z: dropZ,
+          context,
+        });
+        break;
+      }
+
       case 'homing_rocket':
       case 'rpg_rocket':
         if (payload.twinRpg === false) {
@@ -1371,7 +1478,14 @@ export class AbilitySystem {
     // Clear nearby bananas, incoming homing shells & tank shells
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const pr = this.projectiles[i];
-      if (pr.type === 'shockwave' || pr.type === 'lightning') continue;
+      if (
+        pr.type === 'shockwave' ||
+        pr.type === 'lightning' ||
+        pr.type === 'tactical_nuke' ||
+        pr.type === 'nuke_cloud'
+      ) {
+        continue;
+      }
       if (pr.ownerId === ownerId && pr.type !== 'banana') continue;
       const dist = Math.hypot(pr.x - x, pr.z - z);
       if (dist <= maxRadius) {
@@ -1651,6 +1765,421 @@ export class AbilitySystem {
     return proj;
   }
 
+  _findLiveEntityById(targetId, context = {}) {
+    if (!targetId) return null;
+    const tid = String(targetId);
+    if (context.localPlayer && String(context.localPlayer.id) === tid && context.localPlayer.alive !== false) {
+      return context.localPlayer;
+    }
+    const remotes = Array.isArray(context.remotePlayers)
+      ? context.remotePlayers
+      : Array.from(context.remotePlayers?.values?.() || []);
+    for (let i = 0; i < remotes.length; i++) {
+      const rp = remotes[i];
+      if (rp && String(rp.id) === tid && rp.alive !== false) return rp;
+    }
+    const cops = context.cops || [];
+    for (let i = 0; i < cops.length; i++) {
+      const c = cops[i];
+      if (!c || c.wrecked || c.alive === false) continue;
+      if (String(c.id ?? this._getEntityId(c)) === tid) return c;
+    }
+    const traffic = context.traffic || [];
+    for (let i = 0; i < traffic.length; i++) {
+      const t = traffic[i];
+      if (!t || t.wrecked || t.alive === false) continue;
+      if (String(t.id ?? this._getEntityId(t)) === tid) return t;
+    }
+    return null;
+  }
+
+  _resolveNukeTarget({ ownerId, targetId = null, targetKind = null, isParty, px = 0, pz = 0, fx = 0, fz = 1, context = {} }) {
+    const remotes = Array.isArray(context.remotePlayers)
+      ? context.remotePlayers
+      : Array.from(context.remotePlayers?.values?.() || []);
+    const partyMode =
+      isParty !== undefined
+        ? Boolean(isParty)
+        : context.isParty !== undefined
+          ? Boolean(context.isParty)
+          : remotes.length > 0;
+
+    const alivePlayers = [];
+    for (let i = 0; i < remotes.length; i++) {
+      const rp = remotes[i];
+      if (!rp || rp.id === ownerId || rp.alive === false) continue;
+      alivePlayers.push(rp);
+    }
+    if (
+      context.localPlayer &&
+      context.localPlayer.id !== ownerId &&
+      context.localPlayer.alive !== false &&
+      !alivePlayers.some((p) => p.id === context.localPlayer.id)
+    ) {
+      alivePlayers.push(context.localPlayer);
+    }
+
+    if (partyMode) {
+      // Party mode NEVER targets AI cops or traffic NPCs!
+      if (targetKind === 'cop' || targetKind === 'traffic') {
+        return null;
+      }
+      if (targetId) {
+        const tid = String(targetId);
+        const match = alivePlayers.find((p) => String(p.id) === tid);
+        if (match) {
+          return {
+            entity: match,
+            targetId: match.id,
+            targetKind: 'player',
+            targetName: match.name || 'Rival',
+            x: match.x,
+            z: match.z,
+            groundY: match.y || 0,
+          };
+        }
+        return null;
+      }
+      if (alivePlayers.length === 0) {
+        return null;
+      }
+      let nearest = alivePlayers[0];
+      let bestDist = Math.hypot((nearest.x || 0) - px, (nearest.z || 0) - pz);
+      for (let i = 1; i < alivePlayers.length; i++) {
+        const cand = alivePlayers[i];
+        const d = Math.hypot((cand.x || 0) - px, (cand.z || 0) - pz);
+        if (d < bestDist) {
+          bestDist = d;
+          nearest = cand;
+        }
+      }
+      return {
+        entity: nearest,
+        targetId: nearest.id,
+        targetKind: 'player',
+        targetName: nearest.name || 'Rival',
+        x: nearest.x,
+        z: nearest.z,
+        groundY: nearest.y || 0,
+      };
+    }
+
+    // Solo mode: allow targeting alive AI cops or civilian traffic NPCs, with forward point fallback
+    const copNames = {
+      cruiser: 'Police Cruiser',
+      suv: 'Police SUV',
+      swat: 'SWAT Truck',
+      heli: 'Police Heli',
+      army: 'Army Truck',
+      tank: 'Police Tank',
+    };
+    const cops = (context.cops || []).filter((c) => c && !c.wrecked && c.alive !== false);
+    const traffic = (context.traffic || []).filter((t) => t && !t.wrecked && t.alive !== false);
+
+    const makeCopTarget = (c) => {
+      const cid = String(c.id ?? this._getEntityId(c));
+      return {
+        entity: c,
+        targetId: cid,
+        targetKind: 'cop',
+        targetName: c.name || copNames[c.type] || 'Police Car',
+        x: c.x,
+        z: c.z,
+        groundY: c.y || 0,
+      };
+    };
+    const makeTrafficTarget = (t) => {
+      const tid = String(t.id ?? this._getEntityId(t));
+      return {
+        entity: t,
+        targetId: tid,
+        targetKind: 'traffic',
+        targetName: t.name || (t.isOutlaw ? 'Outlaw Racer' : 'Traffic Car'),
+        x: t.x,
+        z: t.z,
+        groundY: t.y || 0,
+      };
+    };
+
+    if (targetId) {
+      const tid = String(targetId);
+      if (targetKind !== 'traffic') {
+        const copMatch = cops.find((c) => String(c.id ?? this._getEntityId(c)) === tid);
+        if (copMatch) return makeCopTarget(copMatch);
+      }
+      if (targetKind !== 'cop') {
+        const trafficMatch = traffic.find((t) => String(t.id ?? this._getEntityId(t)) === tid);
+        if (trafficMatch) return makeTrafficTarget(trafficMatch);
+      }
+    }
+
+    if (cops.length > 0) {
+      let bestCop = cops[0];
+      let bestDist = Math.hypot((bestCop.x || 0) - px, (bestCop.z || 0) - pz);
+      for (let i = 1; i < cops.length; i++) {
+        const d = Math.hypot((cops[i].x || 0) - px, (cops[i].z || 0) - pz);
+        if (d < bestDist) {
+          bestDist = d;
+          bestCop = cops[i];
+        }
+      }
+      return makeCopTarget(bestCop);
+    }
+
+    if (traffic.length > 0) {
+      let bestCar = traffic[0];
+      let bestDist = Math.hypot((bestCar.x || 0) - px, (bestCar.z || 0) - pz);
+      for (let i = 1; i < traffic.length; i++) {
+        const d = Math.hypot((traffic[i].x || 0) - px, (traffic[i].z || 0) - pz);
+        if (d < bestDist) {
+          bestDist = d;
+          bestCar = traffic[i];
+        }
+      }
+      return makeTrafficTarget(bestCar);
+    }
+
+    const dropX = px + fx * 22;
+    const dropZ = pz + fz * 22;
+    const g = context.world?.getGroundHeight ? context.world.getGroundHeight(dropX, dropZ) : { y: 0 };
+    return {
+      entity: null,
+      targetId: null,
+      targetKind: 'point',
+      targetName: 'Ground Zero',
+      x: dropX,
+      z: dropZ,
+      groundY: g.y || 0,
+    };
+  }
+
+  _spawnTacticalNuke({
+    ownerId,
+    ownerName,
+    ownerRef = null,
+    targetId = null,
+    targetKind = 'point',
+    targetName = 'Target',
+    x = 0,
+    groundY = 0,
+    z = 0,
+    context = {},
+  }) {
+    const gy = Number(groundY) || 0;
+    const proj = {
+      id: this.nextProjectileId++,
+      type: 'tactical_nuke',
+      kind: 'tactical_nuke',
+      abilityId: 'tactical_nuke',
+      ownerId,
+      ownerName,
+      ownerRef: ownerRef || null,
+      targetId: targetId || null,
+      targetKind: targetKind || 'point',
+      targetName: targetName || 'Target',
+      x,
+      y: gy + 145,
+      z,
+      startY: 145,
+      targetY: gy,
+      countdown: NUKE_COUNTDOWN_SEC,
+      maxCountdown: NUKE_COUNTDOWN_SEC,
+      ttl: NUKE_COUNTDOWN_SEC + 0.5,
+      maxTtl: NUKE_COUNTDOWN_SEC + 0.5,
+      blastRadius: 65,
+      angle: 0,
+      radius: 2.0,
+      age: 0,
+      color: '#84cc16',
+    };
+    this.projectiles.push(proj);
+    context?.onEvent?.({
+      type: 'nuke_incoming',
+      x,
+      y: gy,
+      z,
+      ownerId,
+      ownerName,
+      targetId: targetId || null,
+      targetKind: targetKind || 'point',
+      targetName: targetName || 'Target',
+      countdown: NUKE_COUNTDOWN_SEC,
+    });
+    return proj;
+  }
+
+  _detonateTacticalNuke(proj, context = {}) {
+    const groundY = proj.targetY || 0;
+    const blastRadius = proj.blastRadius || 65;
+
+    // Towering 3D mushroom cloud + expanding ground shockwave ring
+    this.projectiles.push({
+      id: this.nextProjectileId++,
+      type: 'nuke_cloud',
+      kind: 'nuke_cloud',
+      abilityId: 'tactical_nuke',
+      ownerId: proj.ownerId,
+      ownerName: proj.ownerName,
+      x: proj.x,
+      y: groundY,
+      z: proj.z,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      angle: 0,
+      radius: 4,
+      maxRadius: blastRadius,
+      ttl: 4.5,
+      maxTtl: 4.5,
+      age: 0,
+      color: '#84cc16',
+    });
+
+    // 1. 100% Hit Rate Direct Lock
+    const lp = context.localPlayer;
+    let directHitLocal = false;
+    if (lp && lp.alive !== false && proj.targetId && String(lp.id) === String(proj.targetId)) {
+      directHitLocal = true;
+      lp.hp = 0;
+      lp.vy = Math.max(lp.vy || 0, 30);
+      lp.vx = (lp.vx || 0) + (Math.random() - 0.5) * 28;
+      lp.vz = (lp.vz || 0) + (Math.random() - 0.5) * 28;
+      lp.nukedBy = proj.ownerName || 'Rival';
+      lp.lastBumpedBy = {
+        id: proj.ownerId,
+        name: proj.ownerName || 'Rival',
+        time: context.time || 0,
+        reason: 'nuked',
+      };
+      context.onEvent?.({
+        type: 'pvp_slam',
+        reason: 'tactical_nuke',
+        attackerId: proj.ownerId,
+        attackerName: proj.ownerName,
+        x: lp.x,
+        y: lp.y || 0,
+        z: lp.z,
+      });
+    }
+
+    const cops = context.cops || [];
+    if (proj.targetKind === 'cop' && proj.targetId) {
+      const tid = String(proj.targetId);
+      const lockedCop = cops.find(
+        (c) => c && !c.wrecked && c.alive !== false && String(c.id ?? this._getEntityId(c)) === tid
+      );
+      if (lockedCop) {
+        this._wreckCop(lockedCop, 0, 32, 0, proj.ownerRef, 'tactical_nuke', context);
+      }
+    }
+
+    const traffic = context.traffic || [];
+    if (proj.targetKind === 'traffic' && proj.targetId) {
+      const tid = String(proj.targetId);
+      const lockedCar = traffic.find(
+        (t) => t && !t.wrecked && t.alive !== false && String(t.id ?? this._getEntityId(t)) === tid
+      );
+      if (lockedCar) {
+        lockedCar.wrecked = true;
+        lockedCar.vy = 30;
+        lockedCar.spinTimer = 2.0;
+        lockedCar.panic = true;
+      }
+    }
+
+    // 2. Collateral Blast — vaporizes ALL AI cops within 75m (including helis & tanks!)
+    for (let i = 0; i < cops.length; i++) {
+      const cop = cops[i];
+      if (!cop || cop.wrecked || cop.alive === false) continue;
+      const dx = cop.x - proj.x;
+      const dz = cop.z - proj.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 75) {
+        const inv = dist > 0.001 ? 1 / dist : 1;
+        const nx = dist > 0.001 ? dx * inv : 0.7;
+        const nz = dist > 0.001 ? dz * inv : 0.7;
+        const falloff = 1 - Math.min(0.55, dist / 85);
+        const fling = 52 * falloff;
+        this._wreckCop(cop, nx * fling, 28, nz * fling, proj.ownerRef, 'tactical_nuke', context);
+      }
+    }
+
+    // Launch all civilian traffic within 70m
+    for (let i = 0; i < traffic.length; i++) {
+      const car = traffic[i];
+      if (!car || car.wrecked) continue;
+      const dx = car.x - proj.x;
+      const dz = car.z - proj.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 70) {
+        const inv = dist > 0.001 ? 1 / dist : 1;
+        const nx = dist > 0.001 ? dx * inv : 1;
+        const nz = dist > 0.001 ? dz * inv : 0;
+        const falloff = 1 - Math.min(0.5, dist / 80);
+        car.vx = nx * 55 * falloff;
+        car.vz = nz * 55 * falloff;
+        car.vy = 26;
+        car.spinTimer = 2.0;
+        car.panic = true;
+      }
+    }
+
+    // Collateral blast on non-owner localPlayer within 60m (launcher protected by nukeSafeTimer & ownerId)
+    if (
+      lp &&
+      lp.alive !== false &&
+      !directHitLocal &&
+      lp.id !== proj.ownerId &&
+      (lp.items?.nukeSafeTimer || 0) <= 0
+    ) {
+      const dx = lp.x - proj.x;
+      const dz = lp.z - proj.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= 60) {
+        const inv = dist > 0.001 ? 1 / dist : 1;
+        const nx = dist > 0.001 ? dx * inv : Math.sin(lp.angle || 0);
+        const nz = dist > 0.001 ? dz * inv : Math.cos(lp.angle || 0);
+        const falloff = Math.max(0.2, 1 - dist / 65);
+        const dmg = Math.round(55 * falloff);
+        lp.hp = Math.max(0, (lp.hp || 0) - dmg);
+        lp.vx = (lp.vx || 0) + nx * 42 * falloff;
+        lp.vz = (lp.vz || 0) + nz * 42 * falloff;
+        lp.vy = Math.max(lp.vy || 0, 20 * falloff);
+        lp.spinOutTimer = Math.max(lp.spinOutTimer || 0, 1.35);
+        lp.lastBumpedBy = {
+          id: proj.ownerId,
+          name: proj.ownerName || 'Rival',
+          time: context.time || 0,
+          reason: 'nuked',
+        };
+        if (lp.hp <= 0) {
+          lp.nukedBy = proj.ownerName || 'Rival';
+        }
+        context.onEvent?.({
+          type: 'pvp_slam',
+          reason: 'tactical_nuke',
+          attackerId: proj.ownerId,
+          attackerName: proj.ownerName,
+          x: lp.x,
+          y: lp.y || 0,
+          z: lp.z,
+        });
+      }
+    }
+
+    context.onEvent?.({
+      type: 'nuke_detonate',
+      x: proj.x,
+      y: groundY,
+      z: proj.z,
+      radius: blastRadius,
+      ownerId: proj.ownerId,
+      ownerName: proj.ownerName,
+      targetId: proj.targetId || null,
+      targetName: proj.targetName || 'Target',
+    });
+  }
+
   _collectTargetCandidates(ownerId, context) {
     const candidates = [];
     const cops = context.cops || [];
@@ -1681,6 +2210,27 @@ export class AbilitySystem {
       const proj = this.projectiles[i];
       proj.age = (proj.age || 0) + dt;
       proj.ttl -= dt;
+
+      if (proj.type === 'tactical_nuke') {
+        if (proj.targetId) {
+          const liveTarget = this._findLiveEntityById(proj.targetId, context);
+          if (liveTarget) {
+            proj.x = liveTarget.x;
+            proj.z = liveTarget.z;
+            proj.targetY = liveTarget.y || 0;
+          }
+        }
+        proj.countdown = Math.max(0, (proj.countdown ?? NUKE_COUNTDOWN_SEC) - dt);
+        const frac = proj.countdown / (proj.maxCountdown || NUKE_COUNTDOWN_SEC);
+        proj.y = (proj.targetY || 0) + 1.0 + (proj.startY || 145) * Math.pow(frac, 1.35);
+        proj.angle = (proj.angle || 0) + dt * 4.5;
+        if (proj.countdown <= 0) {
+          this._detonateTacticalNuke(proj, context);
+          this.projectiles.splice(i, 1);
+        }
+        continue;
+      }
+
       if (proj.ttl <= 0) {
         if (proj.type === 'bobomb' || proj.type === 'tank_shell' || proj.type === 'heli_bomb') {
           this.detonateExplosion(
@@ -1695,6 +2245,14 @@ export class AbilitySystem {
           );
         }
         this.projectiles.splice(i, 1);
+        continue;
+      }
+
+      if (proj.type === 'nuke_cloud') {
+        const maxTtl = proj.maxTtl || 4.5;
+        const maxR = proj.maxRadius || 65;
+        const prog = Math.max(0, Math.min(1, 1 - proj.ttl / maxTtl));
+        proj.radius = Math.min(maxR, 4 + prog * 1.8 * maxR);
         continue;
       }
 

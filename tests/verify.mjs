@@ -23,10 +23,10 @@ import {
 import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
 import { Renderer3D, POV_CAMERA_RIGS } from '../public/js/renderer3d.js';
-import { AbilitySystem } from '../public/js/abilities.js';
-import { SoundManager } from '../public/js/audio.js';
+import { AbilitySystem, NUKE_COUNTDOWN_SEC } from '../public/js/abilities.js';
+import { SoundManager, SOUND_SLOTS } from '../public/js/audio.js';
 import { Simulation } from '../public/js/physics_ai.js';
-import { renderQrCodeSvg, generateQrMatrix } from '../public/js/multiplayer.js';
+import { renderQrCodeSvg, generateQrMatrix, MultiplayerClient } from '../public/js/multiplayer.js';
 import { startServer } from '../server.mjs';
 
 function createSampleWavBytes(numSamples = 4500, sampleRate = 11025) {
@@ -293,7 +293,8 @@ async function runAllChecks() {
     assert.ok(sim.localPlayer.speed > 5, `${mode} failed to accelerate`);
   }
 
-  // Test all 9 abilities (including Twin-Rocket RPG & 3x Sugar Rush!) firing cleanly
+  // Test all 10 abilities (including Tactical Nuke, Twin-Rocket RPG & 3x Sugar Rush!) firing cleanly
+  assert.ok(ABILITIES.some((a) => a.id === 'tactical_nuke'), 'Tactical Nuke must be in ABILITIES');
   assert.ok(ABILITIES.some((a) => a.id === 'sugar_rush'), 'Sugar Rush must be in ABILITIES');
   abilities.reset();
   sim.localPlayer.items.heldItem = 'homing_rocket';
@@ -542,6 +543,206 @@ async function runAllChecks() {
   abilities.updateProjectiles(0.05, closeCtx);
   assert.equal(closeShot.projectile.angle, preBreakAng, 'Cop missile must stop homing inside 10m horizontal distance');
 
+  console.log('3d. Checking Tactical Nuke (0.1%–1000% odds, 2x real-player kill multiplier, 5.0s live tracking, Party vs Solo NPC ban)...');
+  assert.equal(ABILITIES.length, 10, 'ABILITIES must contain all 10 items including Tactical Nuke');
+  assert.equal(ABILITIES[0].id, 'tactical_nuke', 'tactical_nuke must be featured at index 0 of ABILITIES');
+  assert.equal(NUKE_COUNTDOWN_SEC, 5.0, 'NUKE_COUNTDOWN_SEC must be exactly 5.0 seconds');
+  assert.equal(createDefaultSettings().nukeKillDoubleOdds, true, 'nukeKillDoubleOdds must default to true');
+
+  // Verify 0.1%–1000% drop rate & nukeKillDoubleOdds doubling weight on real-player kills (0 -> 1 -> 2)
+  const nukeOdds0 = computeAbilityDropOdds(settings.enabledItems, defWeights, { playerKills: 0, nukeKillDoubleOdds: true });
+  const nukeOdds1 = computeAbilityDropOdds(settings.enabledItems, defWeights, { playerKills: 1, nukeKillDoubleOdds: true });
+  const nukeOdds2 = computeAbilityDropOdds(settings.enabledItems, defWeights, { playerKills: 2, nukeKillDoubleOdds: true });
+  const nukeOddsOff = computeAbilityDropOdds(settings.enabledItems, defWeights, { playerKills: 2, nukeKillDoubleOdds: false });
+  assert.ok(nukeOdds1.tactical_nuke > nukeOdds0.tactical_nuke * 1.8, '1 real-player kill must double Tactical Nuke weight');
+  assert.ok(nukeOdds2.tactical_nuke > nukeOdds1.tactical_nuke * 1.7, '2 real-player kills must quadruple Tactical Nuke weight');
+  assert.ok(Math.abs(nukeOddsOff.tactical_nuke - nukeOdds0.tactical_nuke) < 1e-6, 'nukeKillDoubleOdds: false must preserve base odds');
+
+  const nuke1000Weights = {};
+  for (const ab of ABILITIES) nuke1000Weights[ab.id] = ab.id === 'tactical_nuke' ? 1000 : 0.1;
+  const nuke1000Odds = computeAbilityDropOdds(settings.enabledItems, nuke1000Weights);
+  assert.ok(nuke1000Odds.tactical_nuke > 99, `1000% Nuke Chaos must yield >99% Tactical Nuke odds, got ${nuke1000Odds.tactical_nuke.toFixed(2)}%`);
+
+  // Verify AbilitySystem pickup rolling multiplies Nuke odds by 2^playerKills while ignoring AI copsWrecked
+  const nukeRollAbilities = new AbilitySystem({ ...createDefaultSettings(), nukeKillDoubleOdds: true });
+  let nukeHits0 = 0;
+  let nukeHits6 = 0;
+  for (let i = 0; i < 200; i++) {
+    const p0 = { id: 'p0', playerKills: 0, copsWrecked: 50, items: nukeRollAbilities.createPlayerItemState() };
+    nukeRollAbilities.triggerItemBox(p0, 0);
+    nukeRollAbilities.updatePlayerItemState(p0, 2.0, {});
+    if (p0.items.heldItem === 'tactical_nuke') nukeHits0++;
+
+    const p6 = { id: 'p6', playerKills: 6, copsWrecked: 0, items: nukeRollAbilities.createPlayerItemState() };
+    nukeRollAbilities.triggerItemBox(p6, 0);
+    nukeRollAbilities.updatePlayerItemState(p6, 2.0, {});
+    if (p6.items.heldItem === 'tactical_nuke') nukeHits6++;
+  }
+  assert.ok(
+    nukeHits6 > nukeHits0 + 40,
+    `6 real-player kills (64x Nuke weight) must dramatically increase Nuke rolls (${nukeHits6} vs ${nukeHits0})`
+  );
+
+  // Party mode: refuses to target NPCs when no alive real player exists (does NOT consume Nuke)
+  abilities.reset();
+  const partyLauncher = {
+    id: 'p_launcher',
+    name: 'Tanner',
+    alive: true,
+    x: 0,
+    y: 0,
+    z: 0,
+    angle: 0,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    hp: 100,
+    maxHp: 100,
+    items: abilities.createPlayerItemState(),
+  };
+  partyLauncher.items.heldItem = 'tactical_nuke';
+  partyLauncher.items.charges = 1;
+  const partyCop = { id: 'cop_1', type: 'cruiser', x: 10, y: 0, z: 10, alive: true, wrecked: false, radius: 2.0 };
+  const partyNpc = { id: 'npc_1', type: 'sedan', x: 12, y: 0, z: 12, alive: true, wrecked: false, radius: 1.95 };
+  const noTargetEvs = [];
+  const partyNoTargetRes = abilities.useHeldItem(partyLauncher, {
+    world,
+    cops: [partyCop],
+    traffic: [partyNpc],
+    localPlayer: partyLauncher,
+    remotePlayers: [{ id: 'p_dead', name: 'Eliminated', alive: false, x: 15, y: 0, z: 15 }],
+    isParty: true,
+    onEvent: (ev) => noTargetEvs.push(ev),
+  });
+  assert.equal(partyNoTargetRes.used, false, 'Party mode must refuse to target NPCs when no alive real player exists');
+  assert.equal(partyNoTargetRes.reason, 'no_real_target');
+  assert.equal(partyLauncher.items.heldItem, 'tactical_nuke', 'Refused Party Nuke must not consume heldItem');
+  assert.equal(partyLauncher.items.charges, 1, 'Refused Party Nuke must preserve charge');
+  assert.ok(noTargetEvs.some((e) => e.type === 'nuke_no_target'), 'Refused Party Nuke must emit nuke_no_target');
+
+  // Party mode: refuses explicit cop click even when an alive real player is present
+  const partyVictim = {
+    id: 'p_victim',
+    name: 'Friend',
+    alive: true,
+    x: 30,
+    y: 0,
+    z: 40,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    hp: 100,
+    maxHp: 100,
+    radius: 2.1,
+    items: abilities.createPlayerItemState(),
+  };
+  const partyCopReject = abilities.useHeldItem(partyLauncher, {
+    world,
+    cops: [partyCop],
+    traffic: [partyNpc],
+    localPlayer: partyLauncher,
+    remotePlayers: [partyVictim],
+    isParty: true,
+    targetId: 'cop_1',
+    targetKind: 'cop',
+    onEvent: () => {},
+  });
+  assert.equal(partyCopReject.used, false, 'Party mode must NEVER target AI cops even when explicitly clicked');
+  assert.equal(partyLauncher.items.heldItem, 'tactical_nuke');
+
+  // Party mode: locks onto alive real player, tracks moving player over exact 5.0s countdown, & guarantees 100% lethal hit!
+  const partyFireEvs = [];
+  const partyFireRes = abilities.useHeldItem(partyLauncher, {
+    world,
+    cops: [partyCop],
+    traffic: [partyNpc],
+    localPlayer: partyLauncher,
+    remotePlayers: [partyVictim],
+    isParty: true,
+    targetId: 'p_victim',
+    targetKind: 'player',
+    onEvent: (ev) => partyFireEvs.push(ev),
+  });
+  assert.equal(partyFireRes.used, true, 'Party Nuke must fire on locked real player');
+  assert.equal(partyFireRes.netEvent?.targetId, 'p_victim');
+  assert.equal(partyFireRes.netEvent?.targetKind, 'player');
+  assert.ok(partyLauncher.items.nukeSafeTimer >= 6.0, 'Launcher must get nukeSafeTimer protection');
+  assert.ok(partyFireEvs.some((e) => e.type === 'nuke_incoming' && e.countdown === 5.0));
+
+  const victimAbilities = new AbilitySystem(createDefaultSettings());
+  const victimEvs = [];
+  const victimCtx = {
+    world,
+    cops: [],
+    traffic: [],
+    localPlayer: partyVictim,
+    remotePlayers: [partyLauncher],
+    isParty: true,
+    time: 10.0,
+    onEvent: (ev) => victimEvs.push(ev),
+  };
+  victimAbilities.spawnNetworkAbilityEvent(partyFireRes.netEvent, victimCtx);
+  const inboundNuke = victimAbilities.getProjectiles().find((p) => p.type === 'tactical_nuke');
+  assert.ok(inboundNuke, 'Victim client must spawn inbound tactical_nuke projectile');
+  assert.equal(inboundNuke.countdown, 5.0, 'Inbound Nuke countdown must start at 5.0s');
+
+  for (let s = 0; s < 19; s++) {
+    partyVictim.x += 10;
+    partyVictim.z += 8;
+    victimCtx.time += 0.25;
+    victimAbilities.updateProjectiles(0.25, victimCtx);
+  }
+  assert.equal(partyVictim.hp, 100, 'Nuke must NOT detonate before full 5.0s countdown completes');
+  assert.equal(inboundNuke.x, partyVictim.x, 'Inbound Nuke must live-track moving victim X');
+  assert.equal(inboundNuke.z, partyVictim.z, 'Inbound Nuke must live-track moving victim Z');
+
+  partyVictim.x += 10;
+  partyVictim.z += 8;
+  victimCtx.time += 0.25;
+  victimAbilities.updateProjectiles(0.25, victimCtx);
+  assert.equal(partyVictim.hp, 0, 'Locked Tactical Nuke must guarantee 100% lethal hit (hp === 0) on moving player');
+  assert.equal(partyVictim.lastBumpedBy?.reason, 'nuked', 'Victim lastBumpedBy.reason must be nuked');
+  assert.equal(partyVictim.lastBumpedBy?.id, 'p_launcher', 'Victim lastBumpedBy.id must credit launcher');
+  assert.ok(victimEvs.some((e) => e.type === 'nuke_detonate'), 'Nuke detonation must emit nuke_detonate');
+  assert.ok(victimAbilities.getProjectiles().some((p) => p.type === 'nuke_cloud'), 'Nuke detonation must spawn nuke_cloud');
+
+  // Solo mode: CAN target an AI cop ('cop_1'), tracks moving cop over exact 5.0s, spawns nuke_cloud, & wrecks cop!
+  abilities.reset();
+  sim.resetRun(777123, { ...settings, playerRole: 'runner', aiCopsEnabled: true, isParty: false });
+  assert.ok(sim.cops.length >= 1, 'Solo mode with aiCopsEnabled: true must spawn initial AI cops');
+  const soloCop = sim.cops[0];
+  assert.equal(soloCop.id, 'cop_1', 'First spawned AI cop must have stable ID cop_1');
+  sim.localPlayer.items.heldItem = 'tactical_nuke';
+  sim.localPlayer.items.charges = 1;
+  const soloNukeFire = sim.fireTargetedNuke('cop_1', 'cop');
+  assert.equal(soloNukeFire.used, true, 'Solo mode must allow targeting AI cop cop_1');
+  const soloNukeProj = abilities.getProjectiles().find((p) => p.type === 'tactical_nuke');
+  assert.ok(soloNukeProj && soloNukeProj.targetId === 'cop_1' && soloNukeProj.targetKind === 'cop');
+
+  const soloNukeCtx = {
+    world,
+    cops: sim.cops,
+    traffic: sim.traffic,
+    localPlayer: sim.localPlayer,
+    remotePlayers: [],
+    isParty: false,
+    time: 1.0,
+    onEvent: () => {},
+  };
+  for (let s = 0; s < 19; s++) {
+    soloCop.x += 4;
+    soloCop.z -= 3;
+    abilities.updateProjectiles(0.25, soloNukeCtx);
+  }
+  assert.equal(soloCop.wrecked, false, 'Solo cop must remain alive until exact 5.0s impact');
+  assert.equal(soloNukeProj.x, soloCop.x, 'Solo Nuke must live-track moving cop X');
+  assert.equal(soloNukeProj.z, soloCop.z, 'Solo Nuke must live-track moving cop Z');
+
+  abilities.updateProjectiles(0.25, soloNukeCtx);
+  assert.equal(soloCop.wrecked, true, 'Solo Tactical Nuke must wreck locked cop_1 at 5.0s');
+  assert.equal(sim.localPlayer.playerKills, 0, 'Wrecking AI cops must NEVER increment real-player kills');
+  assert.ok(abilities.getProjectiles().some((p) => p.type === 'nuke_cloud'), 'Solo Nuke detonation must spawn nuke_cloud');
+
   console.log('4. Checking QR code generator...');
   const qr = generateQrMatrix('http://192.168.1.35:4567/?room=KART');
   assert.ok(qr.size >= 25);
@@ -579,6 +780,53 @@ async function runAllChecks() {
   assert.equal(sm.lobbyOverrideEnabled, false);
   assert.equal(sm.hasCustomSound('horn'), true, 'Clearing lobby sounds must preserve personal saved sounds');
 
+  // Verify custom 'nuke' sound slot (5.0s export, lobby overlay, & cloud relay sound/settings/nuked sync)
+  assert.ok(SOUND_SLOTS.includes('nuke'), 'SOUND_SLOTS must include nuke');
+  sm.customRecords.set('nuke', {
+    slot: 'nuke',
+    blob: new Blob([sampleWavBytes], { type: 'audio/wav' }),
+    buffer: null,
+    duration: 0.41,
+    label: 'Tanner Nuke Siren',
+    updatedAt: Date.now(),
+  });
+  const exportedNuke = await sm.exportSlotForNetwork('nuke');
+  assert.ok(exportedNuke && exportedNuke.slot === 'nuke' && exportedNuke.dataUrl.startsWith('data:audio/wav;base64,'));
+  assert.equal(await sm.setLobbySound('nuke', exportedNuke.dataUrl, 'Host Nuke Siren'), true);
+  sm.clearLobbySounds();
+
+  const cloudHost = new MultiplayerClient({ forceCloud: true });
+  cloudHost.isHost = true;
+  cloudHost.roomCode = 'NUKE';
+  cloudHost.mqtt = { connected: false, publish: () => {} };
+  cloudHost._cloudHostRoom = {
+    code: 'NUKE',
+    hostId: cloudHost.playerId,
+    state: 'lobby',
+    settings: {},
+    members: new Map([[cloudHost.playerId, { id: cloudHost.playerId, profile: { name: 'Tanner' } }]]),
+    hostSounds: new Map(),
+    match: null,
+  };
+  let cloudNukeSoundEvt = null;
+  cloudHost.on('sound_sync', (m) => {
+    if (m.slot === 'nuke') cloudNukeSoundEvt = m;
+  });
+  await cloudHost._sendCloudCommand({
+    type: 'update_room_settings',
+    settings: { nukeKillDoubleOdds: false, itemWeights: { tactical_nuke: 1000 } },
+  });
+  assert.equal(cloudHost._cloudHostRoom.settings.nukeKillDoubleOdds, false, 'Cloud relay must sync nukeKillDoubleOdds');
+  assert.equal(cloudHost._cloudHostRoom.settings.itemWeights?.tactical_nuke, 1000, 'Cloud relay must sync itemWeights.tactical_nuke');
+  await cloudHost._sendCloudCommand({
+    type: 'sound_sync',
+    slot: 'nuke',
+    dataUrl: exportedNuke.dataUrl,
+    label: 'Cloud Nuke Voice',
+  });
+  assert.equal(cloudHost._cloudHostRoom.hostSounds.get('nuke')?.label, 'Cloud Nuke Voice', 'Cloud host must cache nuke sound slot');
+  assert.equal(cloudNukeSoundEvt?.slot, 'nuke', 'Cloud client must accept and emit sound_sync for nuke slot');
+
   console.log('5. Checking HTTP static server, path traversal guard (negative check), & 2-phone Party WebSocket match...');
   const srv = await startServer(0, '127.0.0.1');
   try {
@@ -592,6 +840,10 @@ async function runAllChecks() {
     assert.ok(homeRes.body.includes('id="btn-brake"'), 'Visible Brake button must exist');
     assert.ok(homeRes.body.includes('id="hud-layout-editor"'), 'Customizable Claw HUD layout editor must exist');
     assert.ok(homeRes.body.includes('id="keybinds-list"'), 'Keyboard keybind remapper must exist');
+    assert.ok(homeRes.body.includes('id="nuke-flash"'), 'Nuke flash overlay must exist');
+    assert.ok(homeRes.body.includes('id="nuke-target-hint"'), 'Nuke target hint must exist');
+    assert.ok(homeRes.body.includes('id="nuke-countdown-banner"'), 'Nuke countdown banner must exist');
+    assert.ok(homeRes.body.includes('data-rpreset="nuke1000"'), '1000% Nuke Chaos preset chip must exist');
     assert.ok(homeRes.body.includes('icon-180.png'), 'iOS apple-touch-icon PNG must be linked');
 
     const iconRes = await httpGet(`http://127.0.0.1:${port}/icon-180.png`);
@@ -670,7 +922,9 @@ async function runAllChecks() {
       settings: {
         itemBoxDensity: 5.0,
         sugarBoxRate: 4.5,
+        nukeKillDoubleOdds: false,
         itemWeights: {
+          tactical_nuke: 1000,
           homing_rocket: 1000,
           lightning_zap: 0.1,
         },
@@ -690,6 +944,8 @@ async function runAllChecks() {
     assert.ok(lockedRoom.players.every((pl) => pl.vehicleId === 'monster' && pl.characterMode === 'car_driver'));
     assert.equal(lockedRoom.settings.itemBoxDensity, 5.0, 'Room must sync itemBoxDensity: 5.0 to guests');
     assert.equal(lockedRoom.settings.sugarBoxRate, 4.5, 'Room must sync sugarBoxRate: 4.5 to guests');
+    assert.equal(lockedRoom.settings.nukeKillDoubleOdds, false, 'Room must sync nukeKillDoubleOdds: false to all 16 players');
+    assert.equal(lockedRoom.settings.itemWeights?.tactical_nuke, 1000, 'Room must sync tactical_nuke: 1000');
     assert.equal(lockedRoom.settings.itemWeights?.homing_rocket, 1000, 'Room must sync homing_rocket: 1000');
     assert.equal(lockedRoom.settings.itemWeights?.lightning_zap, 0.1, 'Room must sync lightning_zap: 0.1');
     assert.equal(lockedRoom.settings.itemWeights?.sugar_rush, 100, 'Unspecified room weights must default to 100');
@@ -741,14 +997,19 @@ async function runAllChecks() {
     for (const ck of extraClients) ck.close();
     await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
 
-    // Verify Lobby Owner sound_sync broadcast, late-join replay, guest forgery rejection, & horn_event relay!
+    // Verify Lobby Owner sound_sync broadcast (including 'nuke' slot!), late-join replay, guest forgery rejection, & horn_event relay!
     p1.send({ type: 'sound_sync', slot: 'horn', dataUrl: sampleHornWav, label: 'Tanner Airhorn' });
     const guestSound = await p2.waitFor((m) => m.type === 'sound_sync' && m.slot === 'horn');
     assert.equal(guestSound.dataUrl, sampleHornWav, 'Guest must receive exact Host sound_sync WAV payload');
     assert.equal(guestSound.label, 'Tanner Airhorn');
     assert.equal(guestSound.hostName, 'Tanner');
 
-    // Late-joining Guest #3 must automatically receive cached Host sound_sync on join_room!
+    p1.send({ type: 'sound_sync', slot: 'nuke', dataUrl: sampleHornWav, label: 'Tanner Nuke Siren' });
+    const guestNukeSound = await p2.waitFor((m) => m.type === 'sound_sync' && m.slot === 'nuke');
+    assert.equal(guestNukeSound.dataUrl, sampleHornWav, 'Guest must receive exact Host nuke sound_sync WAV payload');
+    assert.equal(guestNukeSound.label, 'Tanner Nuke Siren');
+
+    // Late-joining Guest #3 must automatically receive cached Host sound_sync (horn + nuke) on join_room!
     const p3 = await connectTestWs(port);
     await p3.waitFor((m) => m.type === 'welcome');
     p3.send({
@@ -760,6 +1021,8 @@ async function runAllChecks() {
     const lateSound = await p3.waitFor((m) => m.type === 'sound_sync' && m.slot === 'horn');
     assert.equal(lateSound.dataUrl, sampleHornWav, 'Late-joining guest must receive cached Host sound_sync');
     assert.equal(lateSound.hostName, 'Tanner');
+    const lateNukeSound = await p3.waitFor((m) => m.type === 'sound_sync' && m.slot === 'nuke');
+    assert.equal(lateNukeSound.dataUrl, sampleHornWav, 'Late-joining guest must receive cached Host nuke sound_sync');
 
     // Negative security check: Guest forging sound_sync or sound_sync_clear MUST be rejected!
     p2.send({ type: 'sound_sync', slot: 'boost', dataUrl: sampleHornWav, label: 'Forged Boost' });
@@ -795,7 +1058,11 @@ async function runAllChecks() {
     const bumpRecv = await p2.waitFor((m) => m.type === 'pvp_bump');
     assert.equal(bumpRecv.vx, 25);
 
-    p2.send({ type: 'player_eliminated', reason: 'drowned', killerName: 'Tanner', survivalTime: 41.2, score: 1200, copsWrecked: 4 });
+    p2.send({ type: 'player_eliminated', reason: 'nuked', killerName: 'Tanner', killerId: created.playerId, survivalTime: 41.2, score: 1200, copsWrecked: 4 });
+    const elimRecv = await p1.waitFor((m) => m.type === 'player_eliminated');
+    assert.equal(elimRecv.reason, 'nuked', 'LAN server must preserve nuked elimination reason');
+    assert.equal(elimRecv.killerId, created.playerId, 'LAN server must relay killerId for 2x Nuke odds');
+    assert.ok(elimRecv.announcement.includes('☢️') && elimRecv.announcement.includes('NUKED'), 'LAN server must format Nuke announcement');
     const results = await p1.waitFor((m) => m.type === 'match_results');
     assert.equal(results.winnerName, 'Tanner');
     assert.equal(results.standings[0].name, 'Tanner');

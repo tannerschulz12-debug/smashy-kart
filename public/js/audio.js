@@ -1,5 +1,5 @@
 // Zero-Asset Web Audio Arcade Synthesizer + IndexedDB Custom Voice/Sound Studio
-export const SOUND_SLOTS = ['boost', 'crash', 'item', 'horn', 'busted'];
+export const SOUND_SLOTS = ['boost', 'crash', 'item', 'horn', 'busted', 'nuke'];
 
 const DB_NAME = 'smashy_kart_sounds_v1';
 const STORE_NAME = 'sounds';
@@ -533,6 +533,87 @@ export class SoundManager {
     src.stop(t0 + duration + 0.02);
   }
 
+  _playNukeSiren(
+    duration = 5.0,
+    gainScale = 1.0,
+    { cycles = 3, pipFreqs = [740, 820, 920, 1040, 1240], pipInterval = 1.0 } = {}
+  ) {
+    const ctx = this._ensureContext();
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const totalDur = Math.max(0.4, Number(duration) || 5.0);
+    const numCycles = Math.max(1, Math.round(cycles));
+    const cycleDur = totalDur / numCycles;
+    const peakGain = Math.max(0.001, 0.16 * gainScale);
+
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc2.type = 'triangle';
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.Q.value = 2.4;
+
+    const g = ctx.createGain();
+
+    osc1.frequency.setValueAtTime(360, t0);
+    osc2.frequency.setValueAtTime(540, t0);
+    filter.frequency.setValueAtTime(860, t0);
+
+    for (let i = 0; i < numCycles; i++) {
+      const cStart = t0 + i * cycleDur;
+      const cPeak = cStart + cycleDur * 0.52;
+      const cEnd = t0 + (i + 1) * cycleDur;
+
+      osc1.frequency.exponentialRampToValueAtTime(920, cPeak);
+      osc1.frequency.exponentialRampToValueAtTime(360, cEnd);
+
+      osc2.frequency.exponentialRampToValueAtTime(1380, cPeak);
+      osc2.frequency.exponentialRampToValueAtTime(540, cEnd);
+
+      filter.frequency.exponentialRampToValueAtTime(2200, cPeak);
+      filter.frequency.exponentialRampToValueAtTime(860, cEnd);
+    }
+
+    const attackEnd = t0 + Math.min(0.14, totalDur * 0.15);
+    const releaseStart = t0 + Math.max(totalDur - 0.22, totalDur * 0.78);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(peakGain, attackEnd);
+    g.gain.setValueAtTime(peakGain, releaseStart);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + totalDur);
+
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(g);
+    g.connect(this.actionBus || this.masterGain);
+
+    const stopAt = t0 + totalDur + 0.05;
+    osc1.onended = () => {
+      try {
+        osc1.disconnect();
+        osc2.disconnect();
+        filter.disconnect();
+        g.disconnect();
+      } catch {
+        // ignore cleanup race
+      }
+    };
+    osc1.start(t0);
+    osc2.start(t0);
+    osc1.stop(stopAt);
+    osc2.stop(stopAt);
+
+    if (Array.isArray(pipFreqs) && pipFreqs.length > 0) {
+      for (let i = 0; i < pipFreqs.length; i++) {
+        const delay = i * pipInterval;
+        if (delay >= totalDur) break;
+        const hz = pipFreqs[i];
+        this._playTone(hz, 0.11, 'square', 0.11 * gainScale, hz * 1.03, delay);
+      }
+    }
+  }
+
   playEvent(eventName, intensity = 1.0) {
     const ctx = this._ensureContext();
     if (!ctx) return;
@@ -592,6 +673,47 @@ export class SoundManager {
         this._playNoiseBurst(0.68, 'lowpass', 680, 1.2, 0.36 * scale, 65);
         this._playTone(110, 0.48, 'sine', 0.32 * scale, 28);
         this._playTone(82, 0.38, 'sawtooth', 0.18 * scale, 32);
+        break;
+      }
+
+      case 'nuke': {
+        if (this._playCustomSlotBuffer('nuke', scale)) return;
+        // Punchy 1.8s air-raid siren preview for Sound Studio testing
+        this._playNukeSiren(1.8, scale, {
+          cycles: 1,
+          pipFreqs: [740, 1040],
+          pipInterval: 0.85,
+        });
+        break;
+      }
+
+      case 'nuke_incoming': {
+        // Custom/lobby nuke voice clip (if active) + genuine 5.0-second air-raid siren & 5 countdown pips
+        const hasActiveNuke = this.lobbyOverrideEnabled
+          ? this.lobbyRecords.has('nuke')
+          : this.customRecords.has('nuke');
+        const playedCustomNuke = hasActiveNuke ? this._playCustomSlotBuffer('nuke', scale) : false;
+        const sirenScale = playedCustomNuke ? scale * 0.35 : scale;
+        this._playNukeSiren(5.0, sirenScale, {
+          cycles: 3,
+          pipFreqs: [740, 820, 920, 1040, 1240],
+          pipInterval: 1.0,
+        });
+        break;
+      }
+
+      case 'nuke_detonate': {
+        // Massive tectonic nuclear boom + sub-bass shockwave + optional custom crash layer
+        const hasActiveCrash = this.lobbyOverrideEnabled
+          ? this.lobbyRecords.has('crash')
+          : this.customRecords.has('crash');
+        if (hasActiveCrash) {
+          this._playCustomSlotBuffer('crash', Math.min(1.35, scale));
+        }
+        this._playNoiseBurst(1.55, 'lowpass', 920, 0.9, 0.44 * scale, 48);
+        this._playNoiseBurst(0.85, 'bandpass', 360, 0.8, 0.28 * scale, 75);
+        this._playTone(108, 1.15, 'sine', 0.42 * scale, 18, 0);
+        this._playTone(72, 0.95, 'sawtooth', 0.24 * scale, 22, 0.03);
         break;
       }
 
@@ -844,7 +966,7 @@ export class SoundManager {
     return this.customRecords.has(slot);
   }
 
-  async exportSlotForNetwork(slot, { maxDuration = 3.2, sampleRate = 11025 } = {}) {
+  async exportSlotForNetwork(slot, { maxDuration = slot === 'nuke' ? 5.0 : 3.2, sampleRate = 11025 } = {}) {
     if (!SOUND_SLOTS.includes(slot)) return null;
     const rec = this.customRecords.get(slot);
     if (!rec) return null;
@@ -976,7 +1098,10 @@ export class SoundManager {
     if (prevAction <= 0.02) {
       this.setChannelVolumes({ engine: this.engineVolume, action: 0.85 });
       this.playEvent(slot, 1.0);
-      setTimeout(() => this.setChannelVolumes({ engine: this.engineVolume, action: prevAction }), 400);
+      setTimeout(
+        () => this.setChannelVolumes({ engine: this.engineVolume, action: prevAction }),
+        slot === 'nuke' ? 1900 : 400
+      );
       return;
     }
     this.playEvent(slot, 1.0);

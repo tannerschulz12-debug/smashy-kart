@@ -315,6 +315,16 @@ export const COP_VEHICLES = [
 
 export const ABILITIES = [
   {
+    id: 'tactical_nuke',
+    name: 'Tactical Nuke',
+    shortName: 'NUKE',
+    icon: '☢️',
+    color: '#84cc16',
+    desc: 'Calls a sky-drop Tactical Nuke with a towering 3D mushroom cloud that vaporizes cops & blasts rivals within 75m',
+    weight: 0.25,
+    featured: true,
+  },
+  {
     id: 'homing_rocket',
     name: 'Twin-Rocket RPG',
     shortName: 'TWIN RPG',
@@ -560,14 +570,19 @@ export function dropPctToSlider(pct) {
   return 50;
 }
 
-export function computeAbilityDropOdds(enabledItems = {}, itemWeights = {}) {
+export function computeAbilityDropOdds(enabledItems = {}, itemWeights = {}, options = {}) {
   const en = enabledItems || {};
   const iw = itemWeights || {};
+  const nukeKillDoubleOdds = options?.nukeKillDoubleOdds !== false;
+  const playerKills = Math.max(0, Math.floor(Number(options?.playerKills) || 0));
   const rawWeights = {};
   let total = 0;
   for (const ab of ABILITIES) {
     if (en[ab.id] !== false) {
-      const w = (ab.weight || 1) * (clampDropRatePct(iw[ab.id] ?? 100) / 100);
+      let w = (ab.weight || 1) * (clampDropRatePct(iw[ab.id] ?? 100) / 100);
+      if (ab.id === 'tactical_nuke' && nukeKillDoubleOdds && playerKills > 0) {
+        w *= Math.pow(2, Math.min(8, playerKills));
+      }
       rawWeights[ab.id] = w;
       total += w;
     } else {
@@ -637,6 +652,7 @@ export function createDefaultSettings() {
     worldSeed: 777123,
     enabledItems,
     itemWeights: createDefaultItemWeights(), // 0.1 .. 1000 (% weight multiplier per ability)
+    nukeKillDoubleOdds: true,    // Doubles Tactical Nuke drop weight per real-player elimination!
     lobbyRules: {
       lockStats: true,
       allowCarChoice: true,

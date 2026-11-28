@@ -115,7 +115,7 @@ function createClosePayload(code = 1000, reason = '') {
 }
 
 const VALID_COP_VEHICLE_IDS = new Set(['cop_cruiser', 'cop_swat', 'cop_heli', 'cop_tank']);
-const VALID_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted']);
+const VALID_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted', 'nuke']);
 const SAFE_AUDIO_DATA_URL_RE = /^data:audio\/(?:wav|mpeg|mp3|ogg|webm|mp4);base64,[A-Za-z0-9+/=]+$/;
 const MAX_SOUND_DATA_URL_LEN = 190000;
 
@@ -163,6 +163,7 @@ function sanitizeProfile(raw = {}, fallbackName = 'Player') {
 }
 
 const ROOM_ABILITY_IDS = [
+  'tactical_nuke',
   'homing_rocket',
   'sugar_rush',
   'triple_boost',
@@ -197,9 +198,11 @@ function defaultRoomSettings() {
     trafficDensity: 1.0,
     itemBoxDensity: 1.2,
     sugarBoxRate: 1.0,
+    nukeKillDoubleOdds: true,
     gravityMult: 1.0,
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems: {
+      tactical_nuke: true,
       homing_rocket: true,
       sugar_rush: true,
       triple_boost: true,
@@ -252,6 +255,11 @@ function sanitizeRoomSettings(current, patch = {}) {
   }
   if (patch.sugarBoxRate !== undefined && patch.sugarBoxRate !== null && Number.isFinite(Number(patch.sugarBoxRate))) {
     next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(patch.sugarBoxRate))) * 100) / 100;
+  }
+  if (patch.nukeKillDoubleOdds !== undefined) {
+    next.nukeKillDoubleOdds = Boolean(patch.nukeKillDoubleOdds);
+  } else if (next.nukeKillDoubleOdds === undefined) {
+    next.nukeKillDoubleOdds = true;
   }
   if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
     next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
@@ -467,6 +475,7 @@ export function createSmashyServer() {
       copsWrecked: p.copsWrecked || 0,
       eliminatedReason: p.eliminatedReason,
       killerName: p.killerName,
+      killerId: p.killerId || null,
     }));
   }
 
@@ -575,6 +584,7 @@ export function createSmashyServer() {
           playerName: part.name,
           reason: 'disconnected',
           killerName: null,
+          killerId: null,
           announcement: `${part.name} disconnected!`,
           survivalTime: Number(part.survivalTime.toFixed(2)),
           standings: computeStandings(room),
@@ -586,7 +596,10 @@ export function createSmashyServer() {
     broadcastRoomState(room);
   }
 
-  function formatEliminationAnnouncement(playerName, reason, killerName) {
+  function formatEliminationAnnouncement(playerName, reason, killerName, isNuke = false) {
+    if (reason === 'nuked' || isNuke) {
+      return killerName ? `☢️ ${killerName} NUKED ${playerName}!` : `☢️ ${playerName} was NUKED!`;
+    }
     if (killerName) {
       if (reason === 'drowned') return `${killerName} slammed ${playerName} into the river!`;
       if (reason === 'busted') return `${killerName} boxed ${playerName} into the cops — BUSTED!`;
@@ -788,6 +801,7 @@ export function createSmashyServer() {
             stars: room.settings.startStars || 1,
             eliminatedReason: null,
             killerName: null,
+            killerId: null,
           });
           playersPayload.push(serializedPlayer);
         }
@@ -1032,11 +1046,16 @@ export function createSmashyServer() {
         if (!part || !part.alive) return;
 
         const reason =
-          msg.reason === 'drowned' || msg.reason === 'wrecked' || msg.reason === 'busted'
-            ? msg.reason
-            : 'busted';
+          msg.reason === 'nuked' || msg.isNuke
+            ? 'nuked'
+            : msg.reason === 'drowned' || msg.reason === 'wrecked' || msg.reason === 'busted'
+              ? msg.reason
+              : 'busted';
         const killerName = typeof msg.killerName === 'string' && msg.killerName.trim()
           ? msg.killerName.trim().slice(0, 22)
+          : null;
+        const killerId = typeof msg.killerId === 'string' && msg.killerId.trim()
+          ? msg.killerId.trim().slice(0, 48)
           : null;
         const elapsed = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
         const reportedSurvival = Number(msg.survivalTime);
@@ -1050,14 +1069,16 @@ export function createSmashyServer() {
         if (Number.isFinite(Number(msg.copsWrecked))) part.copsWrecked = Number(msg.copsWrecked);
         part.eliminatedReason = reason;
         part.killerName = killerName;
+        part.killerId = killerId;
 
-        const announcement = formatEliminationAnnouncement(part.name, reason, killerName);
+        const announcement = formatEliminationAnnouncement(part.name, reason, killerName, Boolean(msg.isNuke));
         broadcastRoom(room, {
           type: 'player_eliminated',
           playerId: client.id,
           playerName: part.name,
           reason,
           killerName,
+          killerId,
           announcement,
           survivalTime: part.survivalTime,
           standings: computeStandings(room),

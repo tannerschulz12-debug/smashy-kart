@@ -2296,6 +2296,66 @@ export function emitProjectileVisuals(batcher, proj, time = 0) {
   const type = proj.type || 'homing_rocket';
 
   switch (type) {
+    case 'tactical_nuke': {
+      // Heavy Sky-Drop Tactical Nuclear Warhead with Yellow/Black Hazard Stripes, Glowing Lime Core & Ground Target Ring!
+      const spin = time * 8.0;
+      const ny = Math.max(0.8, y);
+      const groundY = proj.targetY ?? 0;
+      const pulse = 0.72 + Math.sin(time * 22) * 0.28;
+      // Pulsing ground impact warning bullseye
+      emitTranslucentRing(batcher, x, groundY + 0.1, z, 11.5 * pulse, 20, '#84cc16', 0.48);
+      emitTranslucentRing(batcher, x, groundY + 0.14, z, 5.2, 14, '#ef4444', 0.62);
+      // Falling 3D nuclear bomb casing (vertical orientation, nose pointing down)
+      batcher.addBox(x, ny, z, 1.65, 3.4, 1.65, '#18181b', spin, 0, 0, 0.12);
+      batcher.addBox(x, ny + 0.6, z, 1.74, 0.52, 1.74, '#facc15', spin, 0, 0, 0.55);
+      batcher.addBox(x, ny - 0.55, z, 1.74, 0.46, 1.74, '#84cc16', spin, 0, 0, 0.95);
+      // Red warhead nosecone pointing downward
+      batcher.addBox(x, ny - 2.05, z, 1.15, 0.95, 1.15, '#ef4444', spin, 0, 0, 0.85);
+      batcher.addBox(x, ny - 2.65, z, 0.55, 0.45, 0.55, '#fef08a', spin, 0, 0, 1.0);
+      // 4 Stabilizer tail fins at top
+      batcher.addBox(x, ny + 1.85, z, 3.1, 1.05, 0.24, '#334155', spin, 0, 0, 0.2);
+      batcher.addBox(x, ny + 1.85, z, 0.24, 1.05, 3.1, '#334155', spin, 0, 0, 0.2);
+      // Glowing radioactive exhaust trail above bomb
+      batcher.addBox(x, ny + 3.2, z, 0.85, 2.2, 0.85, '#bef264', spin, 0, 0, 1.0);
+      break;
+    }
+
+    case 'nuke_cloud': {
+      // Towering Animated 3D Voxel Mushroom Cloud + Expanding Nuclear Shockwave Ring!
+      const maxTtl = proj.maxTtl || 4.4;
+      const ttl = Math.max(0, proj.ttl ?? 2.2);
+      const prog = Math.max(0, Math.min(1, 1 - ttl / maxTtl));
+      const grow = Math.min(1, prog * 2.4);
+      const fade = ttl < 1.1 ? Math.max(0.15, ttl / 1.1) : 1.0;
+      const baseY = proj.y ?? 0;
+      const stemH = (8 + grow * 26) * (0.65 + fade * 0.35);
+      const stemW = (4.8 + grow * 3.4) * (0.7 + fade * 0.3);
+      const capY = baseY + stemH;
+      const capW = (10 + grow * 19) * (0.7 + fade * 0.3);
+      const capH = (6 + grow * 8.5) * (0.7 + fade * 0.3);
+      const rot = time * 0.7;
+
+      // Blinding fiery base skirt
+      batcher.addBox(x, baseY + 2.4, z, stemW * 2.25, 4.8, stemW * 2.25, '#fb923c', rot, 0, 0, 0.92 * fade);
+      // Rising glowing nuclear stem
+      batcher.addBox(x, baseY + stemH * 0.45, z, stemW, stemH * 0.9, stemW, '#fde047', -rot * 0.6, 0, 0, 0.96 * fade);
+      batcher.addBox(x, baseY + stemH * 0.52, z, stemW * 1.25, stemH * 0.34, stemW * 1.25, '#f97316', rot * 1.1, 0, 0, 0.85 * fade);
+      // Massive billowing mushroom cap (multi-tier voxel dome + radioactive lime halo)
+      batcher.addBox(x, capY, z, capW, capH * 0.78, capW, '#f97316', rot * 0.5, 0, 0, 0.92 * fade);
+      batcher.addBox(x, capY + capH * 0.44, z, capW * 0.78, capH * 0.62, capW * 0.78, '#fef08a', -rot * 0.4, 0, 0, 1.0 * fade);
+      batcher.addBox(x, capY + capH * 0.82, z, capW * 0.46, capH * 0.36, capW * 0.46, '#ffffff', rot * 0.3, 0, 0, 1.0 * fade);
+      batcher.addBox(x, capY - capH * 0.32, z, capW * 1.12, capH * 0.28, capW * 1.12, '#84cc16', -rot * 0.8, 0, 0, 0.95 * fade);
+      // Condensation ring around stem
+      emitRingSegments(batcher, x, baseY + stemH * 0.62, z, stemW * 1.65, 16, '#fef08a', 0.9 * fade);
+      // Huge expanding ground nuclear shockwave ring!
+      const shockR = proj.radius ?? Math.min(65, 6 + prog * 68);
+      if (prog < 0.78) {
+        emitRingSegments(batcher, x, baseY + 1.1, z, shockR, 24, '#f97316', 0.98 * fade);
+        emitTranslucentRing(batcher, x, baseY + 0.16, z, shockR, 24, '#84cc16', 0.55 * fade);
+      }
+      break;
+    }
+
     case 'cop_missile': {
       // Sleek Tactical White/Crimson Finned Police Missile (Heli Air-to-Ground & Tank Cannon) + Glowing Cyan/Amber Exhaust!
       const rollSpin = time * 18.0;

@@ -28,6 +28,9 @@
   <!-- Screen-edge Hyper Speed Streaks (3x Sugar Rush & POV Boost) -->
   <div id="speed-lines" class="speed-lines hidden" aria-hidden="true"></div>
 
+  <!-- Fullscreen Tactical Nuke Detonation Flash -->
+  <div id="nuke-flash" class="nuke-flash hidden" aria-hidden="true"></div>
+
   <!-- ======================== IN-GAME HUD ======================== -->
   <div id="hud" class="hud hidden">
     <div class="hud-top">
@@ -94,6 +97,10 @@
 
     <!-- Live Center Kill / Chaos Feed -->
     <div id="chaos-toast" class="chaos-toast hidden"></div>
+
+    <!-- Tactical Nuke Tap-to-Target Hint & Live 5-Second Countdown Banner -->
+    <div id="nuke-target-hint" class="nuke-target-hint hidden">☢️ TAP ANY PLAYER'S NAME OR CAR TO NUKE (100% HIT)!</div>
+    <div id="nuke-countdown-banner" class="nuke-countdown-banner hidden">☢️ TACTICAL NUKE INBOUND — 5.0s</div>
 
     <!-- Countdown Banner (3.. 2.. 1.. SMASH!) -->
     <div id="countdown-banner" class="countdown-banner hidden">3</div>
@@ -832,6 +839,7 @@
             <span class="mixer-range-pill">0.1% – 1000%</span>
           </div>
           <div id="ability-rate-presets" class="ability-rate-presets" role="group" aria-label="Ability Drop Rate Quick Presets">
+            <button type="button" class="rate-preset-chip nuke-preset" data-rpreset="nuke1000">☢️ 1000% Nuke Chaos</button>
             <button type="button" class="rate-preset-chip" data-rpreset="default">↺ Reset 100%</button>
             <button type="button" class="rate-preset-chip" data-rpreset="equal">⚖️ Exact Equal %</button>
             <button type="button" class="rate-preset-chip" data-rpreset="boost500">🔥 All 500%</button>
