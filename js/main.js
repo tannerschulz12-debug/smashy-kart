@@ -1,9 +1,22 @@
-// Master Game Controller — Menus, Garage, Photo Studio, Custom Audio, Touch/Keyboard HUD & Party Multiplayer
+// Master Game Controller — Menus, Garage, Photo Studio, Custom Audio, Claw HUD Editor, Keybinds & 16-Player Party
 import {
+  WORLD_CONFIG,
   VEHICLES,
+  COP_VEHICLES,
   ABILITIES,
   BIOMES,
   CHARACTER_MODES,
+  DEFAULT_KEYBINDS,
+  HUD_LAYOUT_PRESETS,
+  formatKeyCodeLabel,
+  cloneHudLayout,
+  cloneKeybinds,
+  clampDropRatePct,
+  createDefaultItemWeights,
+  cloneItemWeights,
+  sliderToDropPct,
+  dropPctToSlider,
+  computeAbilityDropOdds,
   createDefaultSettings,
 } from './config.js';
 import { World } from './world.js';
@@ -16,6 +29,67 @@ import { MultiplayerClient } from './multiplayer.js';
 
 const SETTINGS_STORAGE_KEY = 'smashy_kart_settings_v1';
 const BEST_STORAGE_KEY = 'smashy_kart_best_v1';
+
+const BIOME_SHORT_LABELS = {
+  city: '🏙️ City',
+  desert: '🌵 Desert',
+  snow: '❄️ Snow',
+};
+
+const HUD_WIDGET_LABELS = {
+  steerLeft: 'Steer Left (◀)',
+  steerRight: 'Steer Right (▶)',
+  joystick: 'Thumb Joystick',
+  brake: 'Brake / Drift Pedal',
+  gas: 'Manual Gas Pedal',
+  useItem: 'Mystery Item Button',
+  horn: 'Horn / Taunt Button',
+};
+
+const KEYBIND_ACTIONS = [
+  { id: 'steerLeft', label: 'Steer Left', hint: 'Turn car left' },
+  { id: 'steerRight', label: 'Steer Right', hint: 'Turn car right' },
+  { id: 'brake', label: 'Brake / Drift', hint: 'Handbrake drift & reverse' },
+  { id: 'gas', label: 'Manual Gas', hint: 'Used when Auto-Accelerate is off' },
+  { id: 'useItem', label: 'Use Mystery Item', hint: 'Fire RPG, Star, Boost, Bomb' },
+  { id: 'horn', label: 'Horn / Shockwave', hint: 'Honk custom voice or horn' },
+  { id: 'cycleCamera', label: 'Switch Camera', hint: 'Smashy / Chase / Hood POV' },
+  { id: 'pause', label: 'Pause / Settings', hint: 'Toggle in-game settings menu' },
+];
+
+const HUD_KEYCAP_MAP = [
+  ['keycap-brake', 'brake'],
+  ['keycap-useItem', 'useItem'],
+  ['keycap-horn', 'horn'],
+  ['keycap-steerLeft', 'steerLeft'],
+  ['keycap-steerRight', 'steerRight'],
+  ['keycap-gas', 'gas'],
+  ['keycap-cam', 'cycleCamera'],
+];
+
+function clampNum(val, lo, hi, fallback) {
+  const n = Number(val);
+  if (val === null || val === undefined || val === '' || !Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function formatDropPctNumber(val) {
+  const c = clampDropRatePct(val);
+  const rounded1 = Math.round(c * 10) / 10;
+  return Number.isInteger(rounded1) ? String(rounded1) : rounded1.toFixed(1);
+}
+
+function formatRollOddsLabel(oddsPct, enabled) {
+  if (!enabled) return 'OFF';
+  const v = Math.max(0, Number(oddsPct) || 0);
+  if (v >= 99.995) return '100% roll';
+  if (v <= 0) return '0% roll';
+  if (v < 0.005) return '<0.01% roll';
+  if (v < 1 || v > 99.9) return `${v.toFixed(2)}% roll`;
+  return `${v.toFixed(1)}% roll`;
+}
 
 const PAINT_SWATCHES = [
   ['#ef4444', '#fef08a'],
@@ -47,21 +121,85 @@ function loadSavedSettings() {
     const validCam = ['smashy', 'chase', 'pov'].includes(parsed.cameraMode)
       ? parsed.cameraMode
       : defaults.cameraMode;
-    const povFov = Math.max(62, Math.min(92, Number(parsed.povFov) || defaults.povFov));
-    const steerSensitivity = Math.max(
-      0.7,
-      Math.min(1.4, Number(parsed.steerSensitivity) || defaults.steerSensitivity)
+    const validGfx = ['high', 'balanced', 'performance'].includes(parsed.graphicsQuality)
+      ? parsed.graphicsQuality
+      : defaults.graphicsQuality;
+    const validUnit = ['mph', 'kmh'].includes(parsed.speedUnit)
+      ? parsed.speedUnit
+      : defaults.speedUnit;
+    const validTouch = ['split', 'buttons', 'joystick'].includes(parsed.touchStyle)
+      ? parsed.touchStyle
+      : defaults.touchStyle;
+    const validHudPreset = ['thumbs', 'claw', 'lefty', 'custom'].includes(parsed.hudLayoutPreset)
+      ? parsed.hudLayoutPreset
+      : defaults.hudLayoutPreset;
+
+    const baseHudLayout = cloneHudLayout(
+      ['thumbs', 'claw', 'lefty'].includes(validHudPreset) ? validHudPreset : 'thumbs'
     );
+    const mergedHudLayout = {};
+    for (const [wid, defPos] of Object.entries(baseHudLayout)) {
+      const savedPos = parsed.hudLayout?.[wid];
+      if (savedPos && typeof savedPos === 'object') {
+        mergedHudLayout[wid] = {
+          xPct: clampNum(savedPos.xPct, 6, 94, defPos.xPct),
+          yPct: clampNum(savedPos.yPct, 8, 93, defPos.yPct),
+          scale: clampNum(savedPos.scale, 0.7, 1.6, defPos.scale),
+          opacity: clampNum(savedPos.opacity, 0.4, 1.0, defPos.opacity),
+        };
+      } else {
+        mergedHudLayout[wid] = { ...defPos };
+      }
+    }
+
+    const rawKeybinds = cloneKeybinds(parsed.keybinds);
+    const mergedKeybinds = {};
+    for (const [act, defCodes] of Object.entries(DEFAULT_KEYBINDS)) {
+      const clean = (rawKeybinds[act] || []).filter((c) => typeof c === 'string' && c.length > 0);
+      mergedKeybinds[act] = clean.length > 0 ? clean : [...defCodes];
+    }
+
     return {
       ...defaults,
       ...parsed,
       cameraMode: validCam,
-      povFov,
-      steerSensitivity,
+      povFov: Math.round(clampNum(parsed.povFov, 62, 96, defaults.povFov)),
+      cameraShakeMult: clampNum(parsed.cameraShakeMult, 0, 1.5, defaults.cameraShakeMult),
+      graphicsQuality: validGfx,
+      speedUnit: validUnit,
+      touchStyle: validTouch,
+      autoAccelerate: typeof parsed.autoAccelerate === 'boolean' ? parsed.autoAccelerate : defaults.autoAccelerate,
+      invertSteer: Boolean(parsed.invertSteer),
+      steerSensitivity: clampNum(parsed.steerSensitivity, 0.7, 1.4, defaults.steerSensitivity),
+      steerDeadzone: clampNum(parsed.steerDeadzone, 0, 0.22, defaults.steerDeadzone),
+      showTouchControlsDesktop: parsed.showTouchControlsDesktop !== false,
+      showKeyHints: parsed.showKeyHints !== false,
       showSpeedometer: parsed.showSpeedometer !== false,
+      showMinimap: parsed.showMinimap !== false,
+      showFps: Boolean(parsed.showFps),
       showQuickCamBtn: parsed.showQuickCamBtn !== false,
+      screenEffects: parsed.screenEffects !== false,
+      haptics: parsed.haptics !== false,
+      soundVolume: clampNum(parsed.soundVolume, 0, 1, defaults.soundVolume),
+      sfxEngineVol: clampNum(parsed.sfxEngineVol, 0, 1, defaults.sfxEngineVol),
+      sfxActionVol: clampNum(parsed.sfxActionVol, 0, 1, defaults.sfxActionVol),
+      hudLayoutPreset: validHudPreset,
+      hudLayout: mergedHudLayout,
+      keybinds: mergedKeybinds,
+      aiCopsEnabled: parsed.aiCopsEnabled !== false,
+      playerRole: parsed.playerRole === 'cop' ? 'cop' : 'runner',
+      copVehicleId: COP_VEHICLES.some((c) => c.id === parsed.copVehicleId)
+        ? parsed.copVehicleId
+        : (defaults.copVehicleId || 'cop_heli'),
+      itemBoxDensity: Number(clampNum(parsed.itemBoxDensity, 0.1, 5.0, defaults.itemBoxDensity ?? 1.2).toFixed(2)),
+      sugarBoxRate: Number(clampNum(parsed.sugarBoxRate, 0, 5.0, defaults.sugarBoxRate ?? 1.0).toFixed(2)),
       enabledItems: { ...defaults.enabledItems, ...(parsed.enabledItems || {}) },
-      lobbyRules: { ...defaults.lobbyRules, ...(parsed.lobbyRules || {}) },
+      itemWeights: cloneItemWeights(parsed.itemWeights),
+      lobbyRules: {
+        ...defaults.lobbyRules,
+        ...(parsed.lobbyRules || {}),
+        allowPlayerCops: parsed.lobbyRules?.allowPlayerCops !== false,
+      },
     };
   } catch {
     return defaults;
@@ -114,12 +252,18 @@ class SmashyKartApp {
 
     this.canvas = document.getElementById('game-canvas');
     this.renderer = new Renderer3D(this.canvas);
+    this.renderer.setGraphicsQuality?.(this.settings.graphicsQuality || 'high');
     this.world = new World(this.settings.worldSeed, this.settings.biome, {
       itemBoxDensity: this.settings.itemBoxDensity,
+      sugarBoxRate: this.settings.sugarBoxRate,
     });
     this.abilities = new AbilitySystem(this.settings);
     this.sim = new Simulation(this.world, this.abilities, this.settings);
     this.sound = new SoundManager(this.settings.soundVolume);
+    this.sound.setChannelVolumes?.({
+      engine: this.settings.sfxEngineVol ?? 0.85,
+      action: this.settings.sfxActionVol ?? 1.0,
+    });
     this.photos = new PhotoStudio();
     this.net = new MultiplayerClient();
 
@@ -134,11 +278,21 @@ class SmashyKartApp {
     this.partyStandings = [];
     this.remoteAvatarCache = new Map(); // playerId -> dataUrl
 
+    // PWA Install, HUD Layout Editor & Keybind Remapper state
+    this.deferredInstallPrompt = null;
+    this.editingHudLayout = false;
+    this.selectedHudWidget = 'brake';
+    this._hudEditorPrevScreen = null;
+    this.listeningKeybind = null; // { action, slotIndex } | null
+    this.activeSettingsTab = 'camera';
+
     // Input state
     this.keys = new Set();
     this.touchSteerLeft = false;
     this.touchSteerRight = false;
     this.touchBrake = false;
+    this.touchGas = false;
+    this.joystickPullBrake = false;
     this.touchUseItemQueued = false;
     this.touchHornQueued = false;
     this.joystickTouchId = null;
@@ -146,6 +300,10 @@ class SmashyKartApp {
     this.joystickAxis = 0;
     this.leftZoneTouches = new Set();
     this.rightZoneTouches = new Set();
+    this.leftBtnPointers = new Set();
+    this.rightBtnPointers = new Set();
+    this.brakePointers = new Set();
+    this.gasPointers = new Set();
 
     // Photo editor state (60fps cached session)
     this.editingImage = null;
@@ -165,11 +323,15 @@ class SmashyKartApp {
     this._lastFrameMs = performance.now();
     this._elapsedTime = 0;
     this._attractSteerPhase = 0;
+    this._fpsFrames = 0;
+    this._fpsAccum = 0;
+    this._currentFps = 60;
   }
 
   async init() {
     this._handleResize();
     window.addEventListener('resize', () => this._handleResize());
+    this._registerServiceWorkerAndInstallFlow();
 
     await Promise.all([
       this.photos.init().catch(() => {}),
@@ -181,6 +343,7 @@ class SmashyKartApp {
     this._bindGlobalAudioUnlock();
     this._bindKeyboardInput();
     this._bindTouchControls();
+    this._bindHudLayoutEditor();
     this._bindHomeAndModals();
     this._bindPersonalSettings();
     this._bindPeopleStudio();
@@ -229,8 +392,14 @@ class SmashyKartApp {
 
   _buildLocalNetProfile() {
     const person = this._getSelectedPerson();
+    const guestCopsBlocked = Boolean(
+      this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowPlayerCops === false
+    );
+    const role = guestCopsBlocked ? 'runner' : (this.settings.playerRole === 'cop' ? 'cop' : 'runner');
     return {
       name: (this.settings.playerName || 'Player').trim().slice(0, 16) || 'Player',
+      playerRole: role,
+      copVehicleId: this.settings.copVehicleId || 'cop_heli',
       characterMode: this.settings.characterMode,
       vehicleId: this.settings.vehicleId,
       primaryColor: this.settings.primaryColor,
@@ -251,34 +420,189 @@ class SmashyKartApp {
     window.addEventListener('keydown', unlockOnce, { passive: true });
   }
 
+  _registerServiceWorkerAndInstallFlow() {
+    if ('serviceWorker' in navigator) {
+      const registerSw = () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      };
+      if (document.readyState === 'complete') {
+        registerSw();
+      } else {
+        window.addEventListener('load', registerSw, { once: true });
+      }
+    }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      this.deferredInstallPrompt = e;
+      this._syncInstallAppUi();
+    });
+
+    window.addEventListener('appinstalled', () => {
+      this.deferredInstallPrompt = null;
+      document.getElementById('install-modal')?.classList.add('hidden');
+      this._syncInstallAppUi();
+      this._showChaosToast('📲 Smashy Kart added to Home Screen!');
+    });
+
+    const mq = window.matchMedia?.('(display-mode: standalone)');
+    mq?.addEventListener?.('change', () => this._syncInstallAppUi());
+  }
+
+  _isStandaloneApp() {
+    return Boolean(
+      window.matchMedia?.('(display-mode: standalone)')?.matches ||
+      window.matchMedia?.('(display-mode: fullscreen)')?.matches ||
+      window.navigator?.standalone === true
+    );
+  }
+
+  _syncInstallAppUi() {
+    const isInstalled = this._isStandaloneApp();
+    const installBtn = document.getElementById('btn-install-app');
+    if (installBtn) {
+      installBtn.classList.toggle('hidden', isInstalled);
+    }
+    const nativeBtn = document.getElementById('btn-trigger-native-install');
+    if (nativeBtn) {
+      nativeBtn.classList.toggle('hidden', !this.deferredInstallPrompt);
+    }
+  }
+
+  async _triggerNativeInstallPrompt() {
+    if (!this.deferredInstallPrompt) return false;
+    const promptEvent = this.deferredInstallPrompt;
+    this.deferredInstallPrompt = null;
+    this._syncInstallAppUi();
+    try {
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice;
+      if (choice?.outcome === 'accepted') {
+        document.getElementById('install-modal')?.classList.add('hidden');
+        return true;
+      }
+    } catch {
+      // Ignore user dismissal
+    }
+    return false;
+  }
+
+  _triggerHaptic(pattern = 16) {
+    if (this.settings.haptics === false) return;
+    try {
+      navigator.vibrate?.(pattern);
+    } catch {
+      // Ignore unsupported browsers
+    }
+  }
+
+  _isActionPressed(actionName) {
+    const codes = this.settings.keybinds?.[actionName] || DEFAULT_KEYBINDS[actionName] || [];
+    for (let i = 0; i < codes.length; i++) {
+      if (codes[i] && this.keys.has(codes[i])) return true;
+    }
+    return false;
+  }
+
+  _matchesActionCode(actionName, code) {
+    if (!code) return false;
+    const codes = this.settings.keybinds?.[actionName] || DEFAULT_KEYBINDS[actionName] || [];
+    return codes.includes(code);
+  }
+
   _bindKeyboardInput() {
     window.addEventListener('keydown', (e) => {
+      // 1. Interactive MacBook / PC Keybind Remapper capture mode
+      if (this.listeningKeybind) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.code === 'Escape') {
+          this.listeningKeybind = null;
+          this._renderKeybindsList();
+          return;
+        }
+        const { action, slotIndex } = this.listeningKeybind;
+        const current = Array.isArray(this.settings.keybinds[action])
+          ? [...this.settings.keybinds[action]]
+          : [...(DEFAULT_KEYBINDS[action] || [])];
+        while (current.length <= slotIndex) current.push('');
+        current[slotIndex] = e.code;
+        const deduped = [];
+        for (const c of current) {
+          if (c && !deduped.includes(c)) deduped.push(c);
+        }
+        this.settings.keybinds[action] = deduped.length > 0 ? deduped : [e.code];
+        this.listeningKeybind = null;
+        saveSettings(this.settings);
+        this._renderKeybindsList();
+        this._updateHudKeycaps();
+        this._showChaosToast(`⌨️ Bound ${formatKeyCodeLabel(e.code)}!`);
+        return;
+      }
+
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
-      this.keys.add(e.code);
-      if ((e.code === 'KeyC' || e.code === 'KeyV') && !e.repeat) {
-        this._cycleCameraMode();
-      } else if (e.code === 'Space' || e.code === 'KeyE' || e.code === 'Enter') {
-        if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
+
+      if (this.editingHudLayout) {
+        if (e.code === 'Escape' && !e.repeat) {
           e.preventDefault();
-          this.touchUseItemQueued = true;
+          this._closeHudLayoutEditor();
         }
-      } else if (e.code === 'KeyH' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-        if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
-          this.touchHornQueued = true;
+        return;
+      }
+
+      this.keys.add(e.code);
+
+      const inMatch =
+        this.mode === 'playing_solo' ||
+        this.mode === 'playing_party' ||
+        this.mode === 'spectating' ||
+        this.mode === 'countdown';
+
+      if (
+        inMatch &&
+        (e.code === 'Space' ||
+          e.code === 'ArrowUp' ||
+          e.code === 'ArrowDown' ||
+          e.code === 'ArrowLeft' ||
+          e.code === 'ArrowRight')
+      ) {
+        e.preventDefault();
+      }
+
+      if (this._matchesActionCode('pause', e.code) && !e.repeat) {
+        const subModalIds = ['install-modal', 'sound-modal', 'people-modal', 'garage-modal', 'world-modal'];
+        for (const id of subModalIds) {
+          const el = document.getElementById(id);
+          if (el && !el.classList.contains('hidden')) {
+            el.classList.add('hidden');
+            return;
+          }
         }
-      } else if (e.code === 'Escape') {
-        const soundModal = document.getElementById('sound-modal');
         const settingsModal = document.getElementById('settings-modal');
-        if (soundModal && !soundModal.classList.contains('hidden')) {
-          soundModal.classList.add('hidden');
+        if (inMatch && settingsModal) {
+          e.preventDefault();
+          const willOpen = settingsModal.classList.contains('hidden');
+          settingsModal.classList.toggle('hidden', !willOpen);
+          if (willOpen) {
+            this.keys.clear();
+            this._clearTouchState();
+          }
           return;
         }
         if (settingsModal && !settingsModal.classList.contains('hidden')) {
           settingsModal.classList.add('hidden');
           return;
         }
-        if (this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'spectating') {
-          this._exitToMainMenu();
+      } else if (this._matchesActionCode('cycleCamera', e.code) && !e.repeat) {
+        this._cycleCameraMode();
+      } else if (this._matchesActionCode('useItem', e.code) && !e.repeat) {
+        if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
+          e.preventDefault();
+          this.touchUseItemQueued = true;
+        }
+      } else if (this._matchesActionCode('horn', e.code) && !e.repeat) {
+        if (this.mode === 'playing_solo' || this.mode === 'playing_party') {
+          this.touchHornQueued = true;
         }
       }
     });
@@ -296,13 +620,27 @@ class SmashyKartApp {
   _clearTouchState() {
     this.leftZoneTouches.clear();
     this.rightZoneTouches.clear();
+    this.leftBtnPointers.clear();
+    this.rightBtnPointers.clear();
+    this.brakePointers.clear();
+    this.gasPointers.clear();
     this.touchSteerLeft = false;
     this.touchSteerRight = false;
     this.touchBrake = false;
+    this.touchGas = false;
+    this.joystickPullBrake = false;
     this.joystickTouchId = null;
     this.joystickAxis = 0;
-    document.getElementById('steer-left-zone')?.classList.remove('pressed');
-    document.getElementById('steer-right-zone')?.classList.remove('pressed');
+    for (const id of [
+      'steer-left-zone',
+      'steer-right-zone',
+      'btn-steer-left',
+      'btn-steer-right',
+      'btn-brake',
+      'btn-gas',
+    ]) {
+      document.getElementById(id)?.classList.remove('pressed');
+    }
     const stick = document.getElementById('joystick-stick');
     if (stick) stick.style.transform = 'translate(-50%, -50%)';
   }
@@ -310,108 +648,133 @@ class SmashyKartApp {
   _bindTouchControls() {
     const leftZone = document.getElementById('steer-left-zone');
     const rightZone = document.getElementById('steer-right-zone');
-    const syncSplitVisuals = () => {
-      this.touchSteerLeft = this.leftZoneTouches.size > 0;
-      this.touchSteerRight = this.rightZoneTouches.size > 0;
-      leftZone.classList.toggle('pressed', this.touchSteerLeft);
-      rightZone.classList.toggle('pressed', this.touchSteerRight);
+    const leftPadBtn = document.getElementById('btn-steer-left');
+    const rightPadBtn = document.getElementById('btn-steer-right');
+    const brakeBtn = document.getElementById('btn-brake');
+    const gasBtn = document.getElementById('btn-gas');
+    const useItemBtn = document.getElementById('btn-use-item');
+    const hornBtn = document.getElementById('btn-horn');
+
+    const syncSteerAndPedals = () => {
+      this.touchSteerLeft = this.leftZoneTouches.size > 0 || this.leftBtnPointers.size > 0;
+      this.touchSteerRight = this.rightZoneTouches.size > 0 || this.rightBtnPointers.size > 0;
+      this.touchBrake = this.brakePointers.size > 0;
+      this.touchGas = this.gasPointers.size > 0;
+
+      leftZone?.classList.toggle('pressed', this.leftZoneTouches.size > 0);
+      rightZone?.classList.toggle('pressed', this.rightZoneTouches.size > 0);
+      leftPadBtn?.classList.toggle('pressed', this.leftBtnPointers.size > 0);
+      rightPadBtn?.classList.toggle('pressed', this.rightBtnPointers.size > 0);
+      brakeBtn?.classList.toggle('pressed', this.touchBrake);
+      gasBtn?.classList.toggle('pressed', this.touchGas);
     };
 
-    const bindZone = (el, set) => {
+    const bindHoldControl = (el, pointerSet, stopProp = false) => {
+      if (!el) return;
       el.addEventListener('pointerdown', (e) => {
+        if (this.editingHudLayout) return;
         e.preventDefault();
+        if (stopProp) e.stopPropagation();
         el.setPointerCapture?.(e.pointerId);
-        set.add(e.pointerId);
-        syncSplitVisuals();
+        pointerSet.add(e.pointerId);
+        syncSteerAndPedals();
       });
       const release = (e) => {
-        set.delete(e.pointerId);
-        syncSplitVisuals();
+        if (!pointerSet.has(e.pointerId)) return;
+        pointerSet.delete(e.pointerId);
+        syncSteerAndPedals();
       };
       el.addEventListener('pointerup', release);
       el.addEventListener('pointercancel', release);
       el.addEventListener('lostpointercapture', release);
     };
 
-    bindZone(leftZone, this.leftZoneTouches);
-    bindZone(rightZone, this.rightZoneTouches);
+    bindHoldControl(leftZone, this.leftZoneTouches, false);
+    bindHoldControl(rightZone, this.rightZoneTouches, false);
+    bindHoldControl(leftPadBtn, this.leftBtnPointers, true);
+    bindHoldControl(rightPadBtn, this.rightBtnPointers, true);
+    bindHoldControl(brakeBtn, this.brakePointers, true);
+    bindHoldControl(gasBtn, this.gasPointers, true);
 
     // Optional Thumbstick steering
     const joyZone = document.getElementById('joystick-zone');
     const joyStick = document.getElementById('joystick-stick');
     const maxRadius = 42;
 
-    joyZone.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      joyZone.setPointerCapture?.(e.pointerId);
-      this.joystickTouchId = e.pointerId;
-      const rect = joyZone.getBoundingClientRect();
-      this.joystickOrigin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-      this._updateJoystick(e.clientX, e.clientY, joyStick, maxRadius);
-    });
+    if (joyZone && joyStick) {
+      joyZone.addEventListener('pointerdown', (e) => {
+        if (this.editingHudLayout) return;
+        e.preventDefault();
+        e.stopPropagation();
+        joyZone.setPointerCapture?.(e.pointerId);
+        this.joystickTouchId = e.pointerId;
+        const rect = joyZone.getBoundingClientRect();
+        this.joystickOrigin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        this._updateJoystick(e.clientX, e.clientY, joyStick, maxRadius);
+      });
 
-    joyZone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== this.joystickTouchId) return;
-      this._updateJoystick(e.clientX, e.clientY, joyStick, maxRadius);
-    });
+      joyZone.addEventListener('pointermove', (e) => {
+        if (this.editingHudLayout || e.pointerId !== this.joystickTouchId) return;
+        this._updateJoystick(e.clientX, e.clientY, joyStick, maxRadius);
+      });
 
-    const endJoy = (e) => {
-      if (e.pointerId !== this.joystickTouchId) return;
-      this.joystickTouchId = null;
-      this.joystickAxis = 0;
-      joyStick.style.transform = 'translate(-50%, -50%)';
-    };
-    joyZone.addEventListener('pointerup', endJoy);
-    joyZone.addEventListener('pointercancel', endJoy);
+      const endJoy = (e) => {
+        if (e.pointerId !== this.joystickTouchId) return;
+        this.joystickTouchId = null;
+        this.joystickAxis = 0;
+        this.joystickPullBrake = false;
+        joyStick.style.transform = 'translate(-50%, -50%)';
+      };
+      joyZone.addEventListener('pointerup', endJoy);
+      joyZone.addEventListener('pointercancel', endJoy);
+      joyZone.addEventListener('lostpointercapture', endJoy);
+    }
 
-    // Side-only Mystery Box Ability Button
-    const fireItem = (e) => {
+    useItemBtn?.addEventListener('pointerdown', (e) => {
+      if (this.editingHudLayout) return;
       e.preventDefault();
       e.stopPropagation();
       this.touchUseItemQueued = true;
-    };
-    document.getElementById('btn-use-item').addEventListener('pointerdown', fireItem);
-
-    // Brake & Horn buttons
-    const brakeBtn = document.getElementById('btn-brake');
-    brakeBtn.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      brakeBtn.setPointerCapture?.(e.pointerId);
-      this.touchBrake = true;
     });
-    const endBrake = () => { this.touchBrake = false; };
-    brakeBtn.addEventListener('pointerup', endBrake);
-    brakeBtn.addEventListener('pointercancel', endBrake);
-    brakeBtn.addEventListener('lostpointercapture', endBrake);
 
-    document.getElementById('btn-horn').addEventListener('pointerdown', (e) => {
+    hornBtn?.addEventListener('pointerdown', (e) => {
+      if (this.editingHudLayout) return;
       e.preventDefault();
       e.stopPropagation();
       this.touchHornQueued = true;
     });
 
     const quickCamBtn = document.getElementById('btn-quick-cam');
-    quickCamBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-    quickCamBtn.addEventListener('click', () => {
+    quickCamBtn?.addEventListener('pointerdown', (e) => e.stopPropagation());
+    quickCamBtn?.addEventListener('click', () => {
+      if (this.editingHudLayout) return;
       this._cycleCameraMode();
     });
 
     const ingameSettingsBtn = document.getElementById('btn-ingame-settings');
-    ingameSettingsBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-    ingameSettingsBtn.addEventListener('click', () => {
+    ingameSettingsBtn?.addEventListener('pointerdown', (e) => e.stopPropagation());
+    ingameSettingsBtn?.addEventListener('click', () => {
+      if (this.editingHudLayout) return;
       this._clearTouchState();
-      document.getElementById('settings-modal').classList.remove('hidden');
+      document.getElementById('settings-modal')?.classList.remove('hidden');
     });
 
     const pauseBtn = document.getElementById('btn-pause');
-    pauseBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
-    pauseBtn.addEventListener('click', () => {
+    pauseBtn?.addEventListener('pointerdown', (e) => e.stopPropagation());
+    pauseBtn?.addEventListener('click', () => {
+      if (this.editingHudLayout) {
+        this._closeHudLayoutEditor();
+        return;
+      }
       this._exitToMainMenu();
     });
 
-    document.getElementById('btn-next-spectate').addEventListener('click', () => {
+    document.getElementById('btn-next-spectate')?.addEventListener('click', () => {
       this.spectateIndex += 1;
+    });
+
+    window.matchMedia?.('(pointer: coarse)')?.addEventListener?.('change', () => {
+      this._applyHudLayout();
     });
   }
 
@@ -425,38 +788,498 @@ class SmashyKartApp {
     const oy = Math.sin(angle) * clamped;
     stickEl.style.transform = `translate(calc(-50% + ${ox}px), calc(-50% + ${oy}px))`;
     this.joystickAxis = Math.max(-1, Math.min(1, ox / maxR));
-    this.touchBrake = oy > maxR * 0.68;
+    this.joystickPullBrake = oy > maxR * 0.68;
   }
 
   _gatherGameplayInput() {
-    const keyLeft = this.keys.has('ArrowLeft') || this.keys.has('KeyA');
-    const keyRight = this.keys.has('ArrowRight') || this.keys.has('KeyD');
-    const keyBrake = this.keys.has('ArrowDown') || this.keys.has('KeyS');
+    if (this.editingHudLayout) {
+      this.touchUseItemQueued = false;
+      this.touchHornQueued = false;
+      return { left: false, right: false, brake: false, gas: false, useItem: false, horn: false, steerAxis: null };
+    }
+
+    const keyLeft = this._isActionPressed('steerLeft');
+    const keyRight = this._isActionPressed('steerRight');
+    const keyBrake = this._isActionPressed('brake');
+    const keyGas = this._isActionPressed('gas');
 
     const left = keyLeft || this.touchSteerLeft;
     const right = keyRight || this.touchSteerRight;
-    const brake = keyBrake || this.touchBrake || (left && right);
+    const brake = keyBrake || this.touchBrake || this.joystickPullBrake || (left && right);
+    const gas = keyGas || this.touchGas;
 
     const useItem = this.touchUseItemQueued;
     const horn = this.touchHornQueued;
     this.touchUseItemQueued = false;
     this.touchHornQueued = false;
 
+    const deadzone = clampNum(this.settings.steerDeadzone, 0, 0.22, 0.05);
     const steerAxis =
-      this.settings.touchStyle === 'joystick' && Math.abs(this.joystickAxis) > 0.05
+      this.settings.touchStyle === 'joystick' && Math.abs(this.joystickAxis) > deadzone
         ? this.joystickAxis
         : null;
 
-    return { left, right, brake, useItem, horn, steerAxis };
+    return { left, right, brake, gas, useItem, horn, steerAxis };
+  }
+
+  // ======================== CLAW & FREE-DRAG HUD LAYOUT EDITOR ========================
+
+  _isCoarseTouchDevice() {
+    return Boolean(
+      window.matchMedia?.('(pointer: coarse)')?.matches ||
+      (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0)
+    );
+  }
+
+  _applyHudLayout() {
+    const s = this.settings;
+    if (!s.hudLayout) {
+      s.hudLayout = cloneHudLayout(s.hudLayoutPreset || 'thumbs');
+    }
+
+    const touchRoot = document.getElementById('touch-controls');
+    const splitSteer = document.getElementById('split-steer');
+    const isGameplayHudActive =
+      this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'countdown';
+
+    if (touchRoot) {
+      if (this.editingHudLayout) {
+        touchRoot.classList.remove('hidden');
+      } else if (isGameplayHudActive) {
+        const hideOnDesktop = !this._isCoarseTouchDevice() && s.showTouchControlsDesktop === false;
+        touchRoot.classList.toggle('hidden', hideOnDesktop);
+      } else if (this.mode === 'spectating') {
+        touchRoot.classList.add('hidden');
+      }
+    }
+
+    if (splitSteer) {
+      splitSteer.classList.toggle('hidden', this.editingHudLayout || s.touchStyle !== 'split');
+    }
+
+    const widgets = document.querySelectorAll('[data-hud-widget]');
+    widgets.forEach((el) => {
+      const wid = el.dataset.hudWidget;
+      const fallback = HUD_LAYOUT_PRESETS.thumbs[wid] || { xPct: 50, yPct: 80, scale: 1.0, opacity: 0.95 };
+      const cfg = s.hudLayout[wid] || fallback;
+      const xPct = clampNum(cfg.xPct, 6, 94, fallback.xPct);
+      const yPct = clampNum(cfg.yPct, 8, 93, fallback.yPct);
+      const scale = clampNum(cfg.scale, 0.7, 1.6, fallback.scale);
+      const opacity = clampNum(cfg.opacity, 0.4, 1.0, fallback.opacity);
+
+      el.style.left = `${xPct.toFixed(1)}%`;
+      el.style.top = `${yPct.toFixed(1)}%`;
+      el.style.transform = `translate(-50%, -50%) scale(${scale.toFixed(2)})`;
+      el.style.opacity = String(opacity.toFixed(2));
+
+      let shouldHide = false;
+      if (wid === 'joystick') {
+        shouldHide = s.touchStyle !== 'joystick';
+      } else if (wid === 'steerLeft' || wid === 'steerRight') {
+        shouldHide = s.touchStyle === 'joystick';
+      } else if (wid === 'gas') {
+        shouldHide = Boolean(s.autoAccelerate !== false && !this.editingHudLayout);
+      }
+      el.classList.toggle('hidden', shouldHide);
+      el.classList.toggle('selected', this.editingHudLayout && this.selectedHudWidget === wid);
+    });
+  }
+
+  _applyHudPreset(presetName, announce = false) {
+    if (!HUD_LAYOUT_PRESETS[presetName]) return;
+    this.settings.hudLayoutPreset = presetName;
+    this.settings.hudLayout = cloneHudLayout(presetName);
+    saveSettings(this.settings);
+    this._applyHudLayout();
+    this._syncHudEditorInspector();
+    this._refreshAllUiFromSettings();
+    if (announce) {
+      const names = {
+        thumbs: '👍 Classic Thumbs HUD applied!',
+        claw: '🦅 4-Finger Claw HUD applied!',
+        lefty: '🫲 Left-Handed HUD applied!',
+      };
+      this._showChaosToast(names[presetName] || '✓ HUD preset applied!');
+    }
+  }
+
+  _syncHudEditorInspector() {
+    const wid = this.selectedHudWidget || 'brake';
+    const fallback = HUD_LAYOUT_PRESETS.thumbs[wid] || { xPct: 74, yPct: 86, scale: 1.0, opacity: 0.95 };
+    const cfg = this.settings.hudLayout?.[wid] || fallback;
+
+    const nameEl = document.getElementById('hud-editor-selected-name');
+    if (nameEl) nameEl.textContent = HUD_WIDGET_LABELS[wid] || wid;
+
+    const scaleVal = clampNum(cfg.scale, 0.7, 1.6, 1.0);
+    const opVal = clampNum(cfg.opacity, 0.4, 1.0, 0.95);
+
+    const scaleRng = document.getElementById('rng-widget-scale');
+    const scaleLbl = document.getElementById('val-widget-scale');
+    if (scaleRng) scaleRng.value = String(scaleVal);
+    if (scaleLbl) scaleLbl.textContent = `${Math.round(scaleVal * 100)}%`;
+
+    const opRng = document.getElementById('rng-widget-opacity');
+    const opLbl = document.getElementById('val-widget-opacity');
+    if (opRng) opRng.value = String(opVal);
+    if (opLbl) opLbl.textContent = `${Math.round(opVal * 100)}%`;
+
+    document.querySelectorAll('#hud-preset-btns [data-hpreset], #settings-hpreset-btns [data-hpreset]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.hpreset === this.settings.hudLayoutPreset);
+    });
+  }
+
+  _openHudLayoutEditor() {
+    const homeEl = document.getElementById('home-screen');
+    const lobbyEl = document.getElementById('lobby-modal');
+    const hudEl = document.getElementById('hud');
+    const editorEl = document.getElementById('hud-layout-editor');
+    if (!editorEl) return;
+
+    this._hudEditorPrevScreen = {
+      homeHidden: homeEl ? homeEl.classList.contains('hidden') : true,
+      lobbyHidden: lobbyEl ? lobbyEl.classList.contains('hidden') : true,
+      hudHidden: hudEl ? hudEl.classList.contains('hidden') : true,
+    };
+
+    if (
+      this.settings.touchStyle === 'joystick' &&
+      (this.selectedHudWidget === 'steerLeft' || this.selectedHudWidget === 'steerRight')
+    ) {
+      this.selectedHudWidget = 'joystick';
+    } else if (this.settings.touchStyle !== 'joystick' && this.selectedHudWidget === 'joystick') {
+      this.selectedHudWidget = 'steerLeft';
+    }
+
+    this._clearTouchState();
+    this.editingHudLayout = true;
+    document.body.classList.add('editing-hud-layout');
+
+    document.getElementById('settings-modal')?.classList.add('hidden');
+    homeEl?.classList.add('hidden');
+    lobbyEl?.classList.add('hidden');
+    hudEl?.classList.remove('hidden');
+    editorEl.classList.remove('hidden');
+
+    this._applyHudLayout();
+    this._syncHudEditorInspector();
+  }
+
+  _closeHudLayoutEditor() {
+    if (!this.editingHudLayout) return;
+    this.editingHudLayout = false;
+    document.body.classList.remove('editing-hud-layout');
+    document.getElementById('hud-layout-editor')?.classList.add('hidden');
+    saveSettings(this.settings);
+
+    const prev = this._hudEditorPrevScreen;
+    this._hudEditorPrevScreen = null;
+
+    const inActiveMatch =
+      this.mode === 'playing_solo' ||
+      this.mode === 'playing_party' ||
+      this.mode === 'countdown' ||
+      this.mode === 'spectating';
+
+    if (inActiveMatch) {
+      document.getElementById('hud')?.classList.remove('hidden');
+      document.getElementById('home-screen')?.classList.add('hidden');
+    } else {
+      document.getElementById('hud')?.classList.toggle('hidden', prev ? prev.hudHidden : true);
+      if (prev && !prev.homeHidden) {
+        document.getElementById('home-screen')?.classList.remove('hidden');
+      }
+      if (prev && !prev.lobbyHidden) {
+        document.getElementById('lobby-modal')?.classList.remove('hidden');
+      }
+    }
+
+    this._applyHudLayout();
+    this._refreshAllUiFromSettings();
+    this._showChaosToast('✓ HUD button layout saved!');
+  }
+
+  _bindHudLayoutEditor() {
+    const widgets = document.querySelectorAll('[data-hud-widget]');
+    let activeDrag = null; // { pointerId, wid, startX, startY, origX, origY }
+
+    widgets.forEach((widgetEl) => {
+      const wid = widgetEl.dataset.hudWidget;
+      if (!wid) return;
+
+      widgetEl.addEventListener(
+        'pointerdown',
+        (e) => {
+          if (!this.editingHudLayout) return;
+          e.preventDefault();
+          e.stopPropagation();
+          widgetEl.setPointerCapture?.(e.pointerId);
+          this.selectedHudWidget = wid;
+          if (!this.settings.hudLayout[wid]) {
+            this.settings.hudLayout[wid] = { ...(HUD_LAYOUT_PRESETS.thumbs[wid] || { xPct: 50, yPct: 80, scale: 1, opacity: 0.95 }) };
+          }
+          activeDrag = {
+            pointerId: e.pointerId,
+            wid,
+            startX: e.clientX,
+            startY: e.clientY,
+            origX: this.settings.hudLayout[wid].xPct,
+            origY: this.settings.hudLayout[wid].yPct,
+          };
+          widgetEl.classList.add('dragging');
+          this._applyHudLayout();
+          this._syncHudEditorInspector();
+        },
+        { capture: true }
+      );
+
+      widgetEl.addEventListener(
+        'pointermove',
+        (e) => {
+          if (!this.editingHudLayout || !activeDrag || activeDrag.pointerId !== e.pointerId || activeDrag.wid !== wid) {
+            return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          const vw = Math.max(1, window.innerWidth || 390);
+          const vh = Math.max(1, window.innerHeight || 844);
+          const dxPct = ((e.clientX - activeDrag.startX) / vw) * 100;
+          const dyPct = ((e.clientY - activeDrag.startY) / vh) * 100;
+          const nx = clampNum(activeDrag.origX + dxPct, 6, 94, activeDrag.origX);
+          const ny = clampNum(activeDrag.origY + dyPct, 8, 93, activeDrag.origY);
+          this.settings.hudLayout[wid].xPct = Number(nx.toFixed(1));
+          this.settings.hudLayout[wid].yPct = Number(ny.toFixed(1));
+          if (Math.hypot(e.clientX - activeDrag.startX, e.clientY - activeDrag.startY) > 3) {
+            this.settings.hudLayoutPreset = 'custom';
+          }
+          this._applyHudLayout();
+          this._syncHudEditorInspector();
+        },
+        { capture: true }
+      );
+
+      const finishDrag = (e) => {
+        if (!activeDrag || activeDrag.pointerId !== e.pointerId) return;
+        widgetEl.classList.remove('dragging');
+        activeDrag = null;
+        saveSettings(this.settings);
+      };
+      widgetEl.addEventListener('pointerup', finishDrag, { capture: true });
+      widgetEl.addEventListener('pointercancel', finishDrag, { capture: true });
+      widgetEl.addEventListener('lostpointercapture', finishDrag, { capture: true });
+    });
+
+    document.getElementById('hud-preset-btns')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-hpreset]');
+      if (!btn) return;
+      this._applyHudPreset(btn.dataset.hpreset, true);
+    });
+
+    const scaleRng = document.getElementById('rng-widget-scale');
+    scaleRng?.addEventListener('input', () => {
+      const wid = this.selectedHudWidget || 'brake';
+      if (!this.settings.hudLayout[wid]) return;
+      const sc = clampNum(scaleRng.value, 0.7, 1.6, 1.0);
+      this.settings.hudLayout[wid].scale = Number(sc.toFixed(2));
+      this.settings.hudLayoutPreset = 'custom';
+      saveSettings(this.settings);
+      this._applyHudLayout();
+      this._syncHudEditorInspector();
+    });
+
+    const opRng = document.getElementById('rng-widget-opacity');
+    opRng?.addEventListener('input', () => {
+      const wid = this.selectedHudWidget || 'brake';
+      if (!this.settings.hudLayout[wid]) return;
+      const op = clampNum(opRng.value, 0.4, 1.0, 0.95);
+      this.settings.hudLayout[wid].opacity = Number(op.toFixed(2));
+      this.settings.hudLayoutPreset = 'custom';
+      saveSettings(this.settings);
+      this._applyHudLayout();
+      this._syncHudEditorInspector();
+    });
+
+    document.getElementById('btn-hud-editor-reset')?.addEventListener('click', () => {
+      const targetPreset = ['thumbs', 'claw', 'lefty'].includes(this.settings.hudLayoutPreset)
+        ? this.settings.hudLayoutPreset
+        : 'thumbs';
+      this._applyHudPreset(targetPreset, false);
+      this._showChaosToast('↺ HUD layout reset!');
+    });
+
+    document.getElementById('btn-hud-editor-done')?.addEventListener('click', () => {
+      this._closeHudLayoutEditor();
+    });
+  }
+
+  _stepVehicleOnHome(delta) {
+    if (this.settings.playerRole === 'cop') {
+      const curIdx = Math.max(0, COP_VEHICLES.findIndex((c) => c.id === this.settings.copVehicleId));
+      const nextIdx = (curIdx + delta + COP_VEHICLES.length) % COP_VEHICLES.length;
+      const copVeh = COP_VEHICLES[nextIdx];
+      this.settings.copVehicleId = copVeh.id;
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+      if (this.mode === 'attract') this._respawnAttractHero();
+      if (this.net.roomCode) {
+        this.net.updateProfile(this._buildLocalNetProfile());
+      }
+      return;
+    }
+
+    if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowCarChoice === false) {
+      this._showChaosToast('🔒 Car choice is locked by the Lobby Manager!');
+      return;
+    }
+    const curIdx = Math.max(0, VEHICLES.findIndex((v) => v.id === this.settings.vehicleId));
+    const nextIdx = (curIdx + delta + VEHICLES.length) % VEHICLES.length;
+    const veh = VEHICLES[nextIdx];
+    this.settings.vehicleId = veh.id;
+    this.settings.primaryColor = veh.color;
+    this.settings.accentColor = veh.accent;
+    if (!this.net.roomCode || this.net.isHost) {
+      this.settings.lobbyRules.universalVehicleId = veh.id;
+    }
+    saveSettings(this.settings);
+    this._refreshAllUiFromSettings();
+
+    // Live-swap 3D hero car & paint right on the Home Screen without resetting the chase!
+    if (this.mode === 'attract' && this.sim.localPlayer) {
+      const lp = this.sim.localPlayer;
+      lp.vehicleId = veh.id;
+      lp.primaryColor = veh.color;
+      lp.accentColor = veh.accent;
+      if (lp.characterMode !== 'runner') {
+        const isPhotoCar = lp.characterMode === 'photo_car';
+        lp.radius = veh.radius * (this.settings.scaleMult || 1.0);
+        lp.baseSpeed = veh.speed * (isPhotoCar ? 1.03 : 1.0) * (this.settings.speedMult || 1.0);
+        lp.maxSpeed = lp.baseSpeed;
+        lp.accel = veh.accel * (isPhotoCar ? 1.08 : 1.0) * (this.settings.accelMult || 1.0);
+        lp.handling = veh.handling * (isPhotoCar ? 1.05 : 1.0);
+        lp.mass = veh.mass * (this.settings.massMult || 1.0);
+      }
+    }
+
+    if (this.net.roomCode) {
+      this.net.updateProfile(this._buildLocalNetProfile());
+      if (this.net.isHost) this.net.updateRoomSettings(this.settings);
+    }
+  }
+
+  _setPlayerRole(role) {
+    const nextRole = role === 'cop' ? 'cop' : 'runner';
+    if (
+      nextRole === 'cop' &&
+      this.net.roomCode &&
+      !this.net.isHost &&
+      this.settings.lobbyRules?.allowPlayerCops === false
+    ) {
+      this._showChaosToast('🔒 Playing as Police is disabled by the Lobby Host!');
+      return;
+    }
+    if (!COP_VEHICLES.some((c) => c.id === this.settings.copVehicleId)) {
+      this.settings.copVehicleId = 'cop_heli';
+    }
+    this.settings.playerRole = nextRole;
+    saveSettings(this.settings);
+    this._refreshAllUiFromSettings();
+    if (this.mode === 'attract') this._respawnAttractHero();
+    if (this.net.roomCode) {
+      this.net.updateProfile(this._buildLocalNetProfile());
+      if (this.net.roomState && !document.getElementById('lobby-modal')?.classList.contains('hidden')) {
+        this._renderLobbyRoom(this.net.roomState);
+      }
+    }
   }
 
   _bindHomeAndModals() {
     const nameInput = document.getElementById('home-player-name');
-    nameInput.value = this.settings.playerName || 'Tanner';
-    nameInput.addEventListener('input', () => {
-      this.settings.playerName = nameInput.value.trim().slice(0, 16) || 'Player';
+    if (nameInput) {
+      nameInput.value = this.settings.playerName || 'Tanner';
+      nameInput.addEventListener('input', () => {
+        this.settings.playerName = nameInput.value.trim().slice(0, 16) || 'Player';
+        saveSettings(this.settings);
+        if (this.net.roomCode) this.net.updateProfile(this._buildLocalNetProfile());
+      });
+    }
+
+    // Home Screen Live 3D Car Stepper & Biome Cycler
+    document.getElementById('btn-prev-car')?.addEventListener('click', () => {
+      this.sound.unlock();
+      this._stepVehicleOnHome(-1);
+    });
+    document.getElementById('btn-next-car')?.addEventListener('click', () => {
+      this.sound.unlock();
+      this._stepVehicleOnHome(1);
+    });
+
+    document.getElementById('btn-cycle-biome')?.addEventListener('click', () => {
+      this.sound.unlock();
+      if (this.net.roomCode && !this.net.isHost) {
+        this._showChaosToast('🔒 Map is controlled by the Lobby Manager!');
+        return;
+      }
+      const order = ['city', 'desert', 'snow'];
+      const curIdx = Math.max(0, order.indexOf(this.settings.biome));
+      this.settings.biome = order[(curIdx + 1) % order.length];
       saveSettings(this.settings);
-      if (this.net.roomCode) this.net.updateProfile(this._buildLocalNetProfile());
+      this.world.reset(this.settings.worldSeed, this.settings.biome, {
+        itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
+      });
+      this._refreshAllUiFromSettings();
+      if (this.mode === 'attract') this._respawnAttractHero();
+      if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+    });
+
+    // Native Install App button + modal
+    document.getElementById('btn-install-app')?.addEventListener('click', async () => {
+      this.sound.unlock();
+      if (this.deferredInstallPrompt) {
+        await this._triggerNativeInstallPrompt();
+      } else {
+        this._syncInstallAppUi();
+        document.getElementById('install-modal')?.classList.remove('hidden');
+      }
+    });
+
+    document.getElementById('btn-trigger-native-install')?.addEventListener('click', async () => {
+      await this._triggerNativeInstallPrompt();
+    });
+
+    const installModal = document.getElementById('install-modal');
+    installModal?.addEventListener('click', (e) => {
+      if (e.target === installModal) installModal.classList.add('hidden');
+    });
+
+    // Team Role switchers across Home, Lobby, and Garage
+    for (const roleContainerId of ['home-role-pills', 'lobby-role-pills', 'garage-role-cards']) {
+      document.getElementById(roleContainerId)?.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-role]');
+        if (!btn) return;
+        this.sound.unlock();
+        this._setPlayerRole(btn.dataset.role);
+      });
+    }
+
+    document.getElementById('lobby-cop-pills')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-cop-veh]');
+      if (!btn) return;
+      if (this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowPlayerCops === false) {
+        this._showChaosToast('🔒 Playing as Police is disabled by the Lobby Host!');
+        return;
+      }
+      const cid = btn.dataset.copVeh;
+      if (!COP_VEHICLES.some((c) => c.id === cid)) return;
+      this.sound.unlock();
+      this.settings.playerRole = 'cop';
+      this.settings.copVehicleId = cid;
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+      if (this.mode === 'attract') this._respawnAttractHero();
+      if (this.net.roomCode) {
+        this.net.updateProfile(this._buildLocalNetProfile());
+      }
     });
 
     // Character Mode switchers across Home, Lobby, and Garage
@@ -466,6 +1289,7 @@ class SmashyKartApp {
         this._showChaosToast('🔒 Runner style is locked by the Lobby Manager!');
         return;
       }
+      this.settings.playerRole = 'runner';
       this.settings.characterMode = mode;
       if (!this.net.roomCode || this.net.isHost) {
         this.settings.lobbyRules.universalCharacterMode = mode;
@@ -481,7 +1305,7 @@ class SmashyKartApp {
 
     for (const containerId of ['home-mode-pills', 'lobby-mode-pills', 'garage-mode-cards']) {
       const container = document.getElementById(containerId);
-      container.addEventListener('click', (e) => {
+      container?.addEventListener('click', (e) => {
         const btn = e.target.closest('[data-mode]');
         if (!btn) return;
         setCharacterMode(btn.dataset.mode);
@@ -496,36 +1320,40 @@ class SmashyKartApp {
       });
     });
 
-    document.getElementById('btn-quick-photo').addEventListener('click', () => {
-      document.getElementById('people-modal').classList.remove('hidden');
-      document.getElementById('photo-file-input').click();
+    document.getElementById('btn-quick-photo')?.addEventListener('click', () => {
+      document.getElementById('people-modal')?.classList.remove('hidden');
+      document.getElementById('photo-file-input')?.click();
     });
 
     // Close modals
     document.querySelectorAll('[data-close-modal]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (btn.dataset.closeModal === 'settings-modal' && this.listeningKeybind) {
+          this.listeningKeybind = null;
+          this._renderKeybindsList();
+        }
         document.getElementById(btn.dataset.closeModal)?.classList.add('hidden');
       });
     });
 
     // Play Solo & Open Party Lobby
-    document.getElementById('btn-play-solo').addEventListener('click', () => {
+    document.getElementById('btn-play-solo')?.addEventListener('click', () => {
       this.sound.unlock();
       this._startSoloMatch();
     });
 
-    document.getElementById('btn-open-lobby').addEventListener('click', () => {
+    document.getElementById('btn-open-lobby')?.addEventListener('click', () => {
       this.sound.unlock();
       this._openLobbyModal();
     });
 
     document.querySelector('[data-close-lobby]')?.addEventListener('click', () => {
-      document.getElementById('lobby-modal').classList.add('hidden');
+      document.getElementById('lobby-modal')?.classList.add('hidden');
     });
 
     // Game over buttons
-    document.getElementById('btn-play-again').addEventListener('click', () => {
-      document.getElementById('gameover-modal').classList.add('hidden');
+    document.getElementById('btn-play-again')?.addEventListener('click', () => {
+      document.getElementById('gameover-modal')?.classList.add('hidden');
       if (this.net.roomCode) {
         if (this.net.isHost) {
           this.net.startMatch();
@@ -538,8 +1366,8 @@ class SmashyKartApp {
       }
     });
 
-    document.getElementById('btn-back-lobby').addEventListener('click', () => {
-      document.getElementById('gameover-modal').classList.add('hidden');
+    document.getElementById('btn-back-lobby')?.addEventListener('click', () => {
+      document.getElementById('gameover-modal')?.classList.add('hidden');
       if (this.net.roomCode) {
         this.net.returnToLobby();
         this._openLobbyModal();
@@ -548,7 +1376,7 @@ class SmashyKartApp {
       }
     });
 
-    document.getElementById('btn-back-home').addEventListener('click', () => {
+    document.getElementById('btn-back-home')?.addEventListener('click', () => {
       if (this.net.roomCode) this.net.leaveRoom();
       this._exitToMainMenu();
     });
@@ -563,7 +1391,7 @@ class SmashyKartApp {
       const camNames = {
         smashy: '🎥 Smashy Overhead Cam',
         chase: '🎥 Behind Chase Cam',
-        pov: '🎥 First-Person POV Cam',
+        pov: '🎥 First-Person Hood POV',
       };
       this._showChaosToast(camNames[cam] || '🎥 Camera Switched');
     }
@@ -586,23 +1414,106 @@ class SmashyKartApp {
         ...this.sim.settings,
         cameraMode: s.cameraMode,
         povFov: s.povFov,
+        cameraShakeMult: s.cameraShakeMult,
+        speedUnit: s.speedUnit,
         touchStyle: s.touchStyle,
+        autoAccelerate: s.autoAccelerate,
+        invertSteer: s.invertSteer,
         steerSensitivity: s.steerSensitivity,
+        steerDeadzone: s.steerDeadzone,
       });
     } else {
       this.sim.updateSettings(s);
     }
   }
 
+  _setSettingsTab(tabId) {
+    if (!['camera', 'controls', 'keyboard', 'audio'].includes(tabId)) return;
+    this.activeSettingsTab = tabId;
+    if (tabId !== 'keyboard' && this.listeningKeybind) {
+      this.listeningKeybind = null;
+      this._renderKeybindsList();
+    }
+    document.querySelectorAll('#settings-tabs [data-stab]').forEach((btn) => {
+      const active = btn.dataset.stab === tabId;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-stab-pane]').forEach((pane) => {
+      const active = pane.dataset.stabPane === tabId;
+      pane.classList.toggle('hidden', !active);
+      pane.classList.toggle('active', active);
+    });
+  }
+
+  _updateHudKeycaps() {
+    const show = this.settings.showKeyHints !== false;
+    for (const [domId, action] of HUD_KEYCAP_MAP) {
+      const el = document.getElementById(domId);
+      if (!el) continue;
+      const code = this.settings.keybinds?.[action]?.[0] || DEFAULT_KEYBINDS[action]?.[0] || '';
+      el.textContent = formatKeyCodeLabel(code);
+      el.classList.toggle('hidden', !show);
+    }
+  }
+
+  _renderKeybindsList() {
+    const list = document.getElementById('keybinds-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    for (const act of KEYBIND_ACTIONS) {
+      const codes = this.settings.keybinds?.[act.id] || DEFAULT_KEYBINDS[act.id] || [];
+      const row = document.createElement('div');
+      row.className = 'keybind-row';
+
+      const slot0Listening =
+        this.listeningKeybind?.action === act.id && this.listeningKeybind?.slotIndex === 0;
+      const slot1Listening =
+        this.listeningKeybind?.action === act.id && this.listeningKeybind?.slotIndex === 1;
+
+      const label0 = slot0Listening ? 'Press a key...' : formatKeyCodeLabel(codes[0] || '');
+      const label1 = slot1Listening ? 'Press a key...' : formatKeyCodeLabel(codes[1] || '');
+
+      row.innerHTML = `
+        <div class="keybind-meta">
+          <strong class="keybind-label">${this._escapeHtml(act.label)}</strong>
+          <span class="keybind-hint">${this._escapeHtml(act.hint)}</span>
+        </div>
+        <div class="keybind-slots">
+          <button type="button" class="keybind-pill${slot0Listening ? ' listening active' : ''}" data-kaction="${act.id}" data-kslot="0">
+            ${this._escapeHtml(label0)}
+          </button>
+          <button type="button" class="keybind-pill secondary${slot1Listening ? ' listening active' : ''}" data-kaction="${act.id}" data-kslot="1">
+            ${this._escapeHtml(label1)}
+          </button>
+        </div>
+      `;
+      list.appendChild(row);
+    }
+  }
+
   _bindPersonalSettings() {
     const settingsModal = document.getElementById('settings-modal');
-    settingsModal.addEventListener('click', (e) => {
+    settingsModal?.addEventListener('click', (e) => {
       if (e.target === settingsModal) {
+        if (this.listeningKeybind) {
+          this.listeningKeybind = null;
+          this._renderKeybindsList();
+        }
         settingsModal.classList.add('hidden');
       }
     });
 
-    document.getElementById('settings-cam-btns').addEventListener('click', (e) => {
+    // 4-Tab Switcher
+    document.getElementById('settings-tabs')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-stab]');
+      if (!btn) return;
+      this._setSettingsTab(btn.dataset.stab);
+    });
+
+    // Tab 1: Camera & Display
+    document.getElementById('settings-cam-btns')?.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-cam]');
       if (!btn) return;
       const inMatch = this.mode === 'playing_solo' || this.mode === 'playing_party' || this.mode === 'spectating';
@@ -610,75 +1521,232 @@ class SmashyKartApp {
     });
 
     const fovRng = document.getElementById('rng-pov-fov');
-    fovRng.addEventListener('input', () => {
-      const fov = Math.max(62, Math.min(92, Math.round(Number(fovRng.value) || 76)));
+    fovRng?.addEventListener('input', () => {
+      const fov = Math.round(clampNum(fovRng.value, 62, 96, 78));
       this.settings.povFov = fov;
-      document.getElementById('val-pov-fov').textContent = `${fov}°`;
+      const lbl = document.getElementById('val-pov-fov');
+      if (lbl) lbl.textContent = `${fov}°`;
       saveSettings(this.settings);
       this._syncSimPersonalSettings();
     });
 
-    document.getElementById('settings-touch-btns').addEventListener('click', (e) => {
+    const shakeRng = document.getElementById('rng-cam-shake');
+    shakeRng?.addEventListener('input', () => {
+      const shake = clampNum(shakeRng.value, 0, 1.5, 1.0);
+      this.settings.cameraShakeMult = Number(shake.toFixed(2));
+      const lbl = document.getElementById('val-cam-shake');
+      if (lbl) lbl.textContent = `${Math.round(shake * 100)}%`;
+      saveSettings(this.settings);
+      this._syncSimPersonalSettings();
+    });
+
+    document.getElementById('settings-gfx-btns')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-gfx]');
+      if (!btn) return;
+      const gfx = btn.dataset.gfx;
+      if (!['high', 'balanced', 'performance'].includes(gfx)) return;
+      this.settings.graphicsQuality = gfx;
+      this.renderer.setGraphicsQuality?.(gfx);
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+    });
+
+    document.getElementById('settings-unit-btns')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-unit]');
+      if (!btn) return;
+      const unit = btn.dataset.unit;
+      if (!['mph', 'kmh'].includes(unit)) return;
+      this.settings.speedUnit = unit;
+      saveSettings(this.settings);
+      this._refreshAllUiFromSettings();
+      this._updateHud();
+    });
+
+    const bindBoolToggle = (id, key, onChange) => {
+      const el = document.getElementById(id);
+      el?.addEventListener('change', () => {
+        this.settings[key] = el.checked;
+        saveSettings(this.settings);
+        if (onChange) onChange(el.checked);
+      });
+    };
+
+    bindBoolToggle('chk-show-desktop-btns', 'showTouchControlsDesktop', () => this._applyHudLayout());
+    bindBoolToggle('chk-show-keyhints', 'showKeyHints', () => this._updateHudKeycaps());
+    bindBoolToggle('chk-show-minimap', 'showMinimap', (v) => {
+      document.getElementById('hud-minimap')?.classList.toggle('hidden', !v);
+    });
+    bindBoolToggle('chk-show-speedo', 'showSpeedometer', (v) => {
+      document.getElementById('hud-speedo')?.classList.toggle('hidden', !v);
+    });
+    bindBoolToggle('chk-show-fps', 'showFps', (v) => {
+      document.getElementById('hud-fps')?.classList.toggle('hidden', !v);
+    });
+    bindBoolToggle('chk-show-quickcam', 'showQuickCamBtn', (v) => {
+      document.getElementById('btn-quick-cam')?.classList.toggle('hidden', !v);
+    });
+    bindBoolToggle('chk-screen-fx', 'screenEffects', (v) => {
+      if (!v) {
+        document.getElementById('speed-lines')?.classList.add('hidden');
+        document.getElementById('danger-vignette')?.classList.add('hidden');
+      }
+    });
+
+    // Tab 2: Controls & Claw HUD
+    document.getElementById('btn-open-hud-editor')?.addEventListener('click', () => {
+      this._openHudLayoutEditor();
+    });
+
+    document.getElementById('settings-hpreset-btns')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-hpreset]');
+      if (!btn) return;
+      this._applyHudPreset(btn.dataset.hpreset, true);
+    });
+
+    document.getElementById('settings-touch-btns')?.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-touch]');
       if (!btn) return;
+      if (!['split', 'buttons', 'joystick'].includes(btn.dataset.touch)) return;
       this.settings.touchStyle = btn.dataset.touch;
       this._clearTouchState();
       saveSettings(this.settings);
       this._refreshAllUiFromSettings();
     });
 
+    bindBoolToggle('chk-auto-accel', 'autoAccelerate', () => {
+      this._syncSimPersonalSettings();
+      this._applyHudLayout();
+    });
+    bindBoolToggle('chk-invert-steer', 'invertSteer', () => this._syncSimPersonalSettings());
+    bindBoolToggle('chk-haptics', 'haptics', (v) => {
+      if (v) this._triggerHaptic(18);
+    });
+
     const sensRng = document.getElementById('rng-steer-sens');
-    sensRng.addEventListener('input', () => {
-      const sens = Math.max(0.7, Math.min(1.4, Number(sensRng.value) || 1.0));
+    sensRng?.addEventListener('input', () => {
+      const sens = clampNum(sensRng.value, 0.7, 1.4, 1.0);
       this.settings.steerSensitivity = sens;
-      document.getElementById('val-steer-sens').textContent = `${Math.round(sens * 100)}%`;
+      const lbl = document.getElementById('val-steer-sens');
+      if (lbl) lbl.textContent = `${Math.round(sens * 100)}%`;
       saveSettings(this.settings);
       this._syncSimPersonalSettings();
     });
 
+    const dzRng = document.getElementById('rng-steer-deadzone');
+    dzRng?.addEventListener('input', () => {
+      const dz = clampNum(dzRng.value, 0, 0.22, 0.05);
+      this.settings.steerDeadzone = Number(dz.toFixed(2));
+      const lbl = document.getElementById('val-steer-deadzone');
+      if (lbl) lbl.textContent = `${Math.round(dz * 100)}%`;
+      saveSettings(this.settings);
+      this._syncSimPersonalSettings();
+    });
+
+    // Tab 3: Mac / PC Keybinds
+    document.getElementById('keybinds-list')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-kaction]');
+      if (!btn) return;
+      const action = btn.dataset.kaction;
+      const slotIndex = Number(btn.dataset.kslot) || 0;
+      if (
+        this.listeningKeybind &&
+        this.listeningKeybind.action === action &&
+        this.listeningKeybind.slotIndex === slotIndex
+      ) {
+        this.listeningKeybind = null;
+      } else {
+        this.listeningKeybind = { action, slotIndex };
+      }
+      this._renderKeybindsList();
+    });
+
+    document.getElementById('btn-reset-keybinds')?.addEventListener('click', () => {
+      this.listeningKeybind = null;
+      this.settings.keybinds = cloneKeybinds();
+      saveSettings(this.settings);
+      this._renderKeybindsList();
+      this._updateHudKeycaps();
+      this._showChaosToast('⌨️ Default keyboard keys restored!');
+    });
+
+    // Tab 4: Audio & Voice
     const settingsVolRng = document.getElementById('rng-settings-vol');
-    settingsVolRng.addEventListener('input', () => {
-      const v = Math.max(0, Math.min(1, Number(settingsVolRng.value)));
+    settingsVolRng?.addEventListener('input', () => {
+      const v = clampNum(settingsVolRng.value, 0, 1, 0.85);
       this.settings.soundVolume = v;
       this.sound.setVolume(v);
       const pct = `${Math.round(v * 100)}%`;
-      document.getElementById('val-settings-vol').textContent = pct;
-      document.getElementById('rng-volume').value = String(v);
-      document.getElementById('val-volume').textContent = pct;
+      const sLbl = document.getElementById('val-settings-vol');
+      if (sLbl) sLbl.textContent = pct;
+      const volEl = document.getElementById('rng-volume');
+      if (volEl) volEl.value = String(v);
+      const vLbl = document.getElementById('val-volume');
+      if (vLbl) vLbl.textContent = pct;
       saveSettings(this.settings);
     });
 
-    const speedoChk = document.getElementById('chk-show-speedo');
-    speedoChk.addEventListener('change', () => {
-      this.settings.showSpeedometer = speedoChk.checked;
-      document.getElementById('hud-speedo').classList.toggle('hidden', !speedoChk.checked);
+    const engVolRng = document.getElementById('rng-engine-vol');
+    engVolRng?.addEventListener('input', () => {
+      const v = clampNum(engVolRng.value, 0, 1, 0.85);
+      this.settings.sfxEngineVol = v;
+      this.sound.setChannelVolumes?.({ engine: v, action: this.settings.sfxActionVol ?? 1.0 });
+      const lbl = document.getElementById('val-engine-vol');
+      if (lbl) lbl.textContent = `${Math.round(v * 100)}%`;
       saveSettings(this.settings);
     });
 
-    const quickCamChk = document.getElementById('chk-show-quickcam');
-    quickCamChk.addEventListener('change', () => {
-      this.settings.showQuickCamBtn = quickCamChk.checked;
-      document.getElementById('btn-quick-cam').classList.toggle('hidden', !quickCamChk.checked);
+    const actVolRng = document.getElementById('rng-action-vol');
+    actVolRng?.addEventListener('input', () => {
+      const v = clampNum(actVolRng.value, 0, 1, 1.0);
+      this.settings.sfxActionVol = v;
+      this.sound.setChannelVolumes?.({ engine: this.settings.sfxEngineVol ?? 0.85, action: v });
+      const lbl = document.getElementById('val-action-vol');
+      if (lbl) lbl.textContent = `${Math.round(v * 100)}%`;
       saveSettings(this.settings);
     });
 
-    document.getElementById('btn-settings-voice-studio').addEventListener('click', () => {
-      document.getElementById('sound-modal').classList.remove('hidden');
+    document.getElementById('btn-settings-voice-studio')?.addEventListener('click', () => {
+      document.getElementById('sound-modal')?.classList.remove('hidden');
     });
 
-    document.getElementById('btn-reset-personal-settings').addEventListener('click', () => {
-      this.settings.cameraMode = 'smashy';
-      this.settings.povFov = 76;
-      this.settings.touchStyle = 'split';
-      this.settings.steerSensitivity = 1.0;
-      this.settings.soundVolume = 0.85;
-      this.settings.showSpeedometer = true;
-      this.settings.showQuickCamBtn = true;
-      this.sound.setVolume(0.85);
+    document.getElementById('btn-reset-personal-settings')?.addEventListener('click', () => {
+      const defs = createDefaultSettings();
+      this.listeningKeybind = null;
+      this.settings.cameraMode = defs.cameraMode;
+      this.settings.povFov = defs.povFov;
+      this.settings.cameraShakeMult = defs.cameraShakeMult;
+      this.settings.graphicsQuality = defs.graphicsQuality;
+      this.settings.speedUnit = defs.speedUnit;
+      this.settings.touchStyle = defs.touchStyle;
+      this.settings.autoAccelerate = defs.autoAccelerate;
+      this.settings.invertSteer = defs.invertSteer;
+      this.settings.steerSensitivity = defs.steerSensitivity;
+      this.settings.steerDeadzone = defs.steerDeadzone;
+      this.settings.showTouchControlsDesktop = defs.showTouchControlsDesktop;
+      this.settings.showKeyHints = defs.showKeyHints;
+      this.settings.showSpeedometer = defs.showSpeedometer;
+      this.settings.showMinimap = defs.showMinimap;
+      this.settings.showFps = defs.showFps;
+      this.settings.showQuickCamBtn = defs.showQuickCamBtn;
+      this.settings.screenEffects = defs.screenEffects;
+      this.settings.haptics = defs.haptics;
+      this.settings.soundVolume = defs.soundVolume;
+      this.settings.sfxEngineVol = defs.sfxEngineVol;
+      this.settings.sfxActionVol = defs.sfxActionVol;
+      this.settings.hudLayoutPreset = 'thumbs';
+      this.settings.hudLayout = cloneHudLayout('thumbs');
+      this.settings.keybinds = cloneKeybinds();
+
+      this.renderer.setGraphicsQuality?.(this.settings.graphicsQuality);
+      this.sound.setVolume(this.settings.soundVolume);
+      this.sound.setChannelVolumes?.({
+        engine: this.settings.sfxEngineVol,
+        action: this.settings.sfxActionVol,
+      });
       this._clearTouchState();
       saveSettings(this.settings);
       this._refreshAllUiFromSettings();
-      this._showChaosToast('⚙️ Personal settings reset!');
+      this._showChaosToast('⚙️ All personal settings reset!');
     });
   }
 
@@ -976,8 +2044,8 @@ class SmashyKartApp {
         <img src="${safePersonImg}" alt="${this._escapeHtml(person.name)}" />
         <div class="person-card-name">${this._escapeHtml(person.name)}</div>
         <div class="person-card-actions">
-          <button type="button" class="tiny-pill ${person.useAsCop ? 'cop-on' : ''}" data-toggle-cop="${person.id}">
-            ${person.useAsCop ? '🚔 Cop ON' : 'Cop OFF'}
+          <button type="button" class="tiny-pill ${person.useAsCop ? 'cop-on' : ''}" data-toggle-cop="${person.id}" title="Put this person's face onto AI police cars">
+            ${person.useAsCop ? '🚔 Cop Face: ON' : 'Cop Face: OFF'}
           </button>
           ${
             person.builtIn
@@ -1079,13 +2147,21 @@ class SmashyKartApp {
       massMult: 'universalMassMult',
       scaleMult: 'universalScaleMult',
     };
+    const hostWorldKeys = new Set(['copIntensity', 'startStars', 'gravityMult']);
     const bindSlider = (id, key, fmt) => {
       const el = document.getElementById(id);
       el.addEventListener('input', () => {
-        if (this.net.roomCode && !this.net.isHost && key in universalRuleKeyMap && this.settings.lobbyRules?.lockStats !== false) {
-          this._refreshAllUiFromSettings();
-          this._showChaosToast('🔒 Car stats are locked by the Lobby Manager!');
-          return;
+        if (this.net.roomCode && !this.net.isHost) {
+          if (hostWorldKeys.has(key)) {
+            this._refreshAllUiFromSettings();
+            this._showChaosToast('🔒 World settings are controlled by the Lobby Host!');
+            return;
+          }
+          if (key in universalRuleKeyMap && this.settings.lobbyRules?.lockStats !== false) {
+            this._refreshAllUiFromSettings();
+            this._showChaosToast('🔒 Car stats are locked by the Lobby Manager!');
+            return;
+          }
         }
         const v = Number(el.value);
         this.settings[key] = v;
@@ -1152,14 +2228,43 @@ class SmashyKartApp {
     document.getElementById('biome-btns').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-biome]');
       if (!btn) return;
+      if (this.net.roomCode && !this.net.isHost) {
+        this._showChaosToast('🔒 Map is controlled by the Lobby Host!');
+        return;
+      }
       this.settings.biome = btn.dataset.biome;
       saveSettings(this.settings);
       this.world.reset(this.settings.worldSeed, this.settings.biome, {
         itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
       });
       this._refreshAllUiFromSettings();
       if (this.mode === 'attract') this._respawnAttractHero();
       if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+    });
+
+    document.getElementById('chk-ai-cops')?.addEventListener('change', (e) => {
+      if (this.net.roomCode && !this.net.isHost) {
+        this._refreshAllUiFromSettings();
+        this._showChaosToast('🔒 AI Police setting is controlled by the Lobby Host!');
+        return;
+      }
+      this.settings.aiCopsEnabled = Boolean(e.target.checked);
+      saveSettings(this.settings);
+      this.sim.updateSettings(this.settings);
+      if (!this.settings.aiCopsEnabled) {
+        this.sim.cops.length = 0;
+        if (this.sim.localPlayer) this.sim.localPlayer.bustedProgress = 0;
+      } else if (this.mode === 'attract') {
+        this._respawnAttractHero();
+      }
+      this._refreshAllUiFromSettings();
+      if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+      this._showChaosToast(
+        this.settings.aiCopsEnabled
+          ? '🚔 AI Police Chase turned ON!'
+          : '🚫 AI Police turned OFF — Zero computer cops!'
+      );
     });
 
     bindSlider('rng-cop-intensity', 'copIntensity');
@@ -1167,13 +2272,45 @@ class SmashyKartApp {
     bindSlider('rng-gravity', 'gravityMult');
 
     document.getElementById('rng-box-density').addEventListener('input', (e) => {
-      this.settings.itemBoxDensity = Number(e.target.value);
+      if (this.net.roomCode && !this.net.isHost) {
+        this._refreshAllUiFromSettings();
+        this._showChaosToast('🔒 Drop rates & map settings are controlled by the Lobby Host!');
+        return;
+      }
+      this.settings.itemBoxDensity = Number(clampNum(e.target.value, 0.1, 5.0, 1.2).toFixed(2));
       saveSettings(this.settings);
       this.world.reset(this.settings.worldSeed, this.settings.biome, {
         itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
       });
       this._refreshAllUiFromSettings();
       if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+    });
+
+    document.getElementById('rng-sugar-rate')?.addEventListener('input', (e) => {
+      if (this.net.roomCode && !this.net.isHost) {
+        this._refreshAllUiFromSettings();
+        this._showChaosToast('🔒 Drop rates & map settings are controlled by the Lobby Host!');
+        return;
+      }
+      this.settings.sugarBoxRate = Number(clampNum(e.target.value, 0, 5.0, 1.0).toFixed(2));
+      saveSettings(this.settings);
+      this.world.reset(this.settings.worldSeed, this.settings.biome, {
+        itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
+      });
+      this._refreshAllUiFromSettings();
+      if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+    });
+
+    document.getElementById('ability-rate-presets')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-rpreset]');
+      if (!btn) return;
+      if (this.net.roomCode && !this.net.isHost) {
+        this._showChaosToast('🔒 Ability drop rates are controlled by the Lobby Host!');
+        return;
+      }
+      this._applyAbilityRatePreset(btn.dataset.rpreset);
     });
 
     document.getElementById('camera-mode-btns').addEventListener('click', (e) => {
@@ -1192,6 +2329,66 @@ class SmashyKartApp {
     });
   }
 
+  _renderCopVehicleGrid() {
+    const grid = document.getElementById('cop-vehicle-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    const guestCopsBlocked = Boolean(
+      this.net.roomCode && !this.net.isHost && this.settings.lobbyRules?.allowPlayerCops === false
+    );
+    grid.classList.toggle('locked-ctrl', guestCopsBlocked);
+
+    for (const cv of COP_VEHICLES) {
+      const isSelected = this.settings.playerRole === 'cop' && this.settings.copVehicleId === cv.id;
+      const spdPct = Math.round(Math.min(100, (cv.speed / 60) * 100));
+      const hdlPct = Math.round(Math.min(100, (cv.handling / 4.6) * 100));
+      const hpPct = Math.round(Math.min(100, (cv.maxHp / 225) * 100));
+
+      const perks = [];
+      if (cv.flying) {
+        perks.push('<span class="cop-card-perk sky">🚁 Flies Over Buildings</span>');
+      }
+      if (cv.hasMissile) {
+        perks.push('<span class="cop-card-perk missile">🎯 2s Soft-Homing Missiles</span>');
+      } else {
+        perks.push('<span class="cop-card-perk surge">🚨 2s Siren Surge + ? Items</span>');
+      }
+
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = `cop-vehicle-card${isSelected ? ' selected' : ''}`;
+      card.dataset.copCard = cv.id;
+      card.innerHTML = `
+        <div class="cop-card-top">
+          <span class="cop-card-title"><span>${cv.icon}</span><span>${this._escapeHtml(cv.name)}</span></span>
+          <span class="veh-stats">SPD ${cv.speed} · HP ${cv.maxHp}</span>
+        </div>
+        <div class="cop-card-perks">${perks.join('')}</div>
+        <div class="cop-card-desc">${this._escapeHtml(cv.desc || '')}</div>
+        <div class="veh-bars">
+          <div class="veh-bar-row"><span class="veh-bar-lbl">SPD</span><div class="veh-bar-track"><div class="veh-bar-fill" style="width:${spdPct}%"></div></div></div>
+          <div class="veh-bar-row"><span class="veh-bar-lbl">HDL</span><div class="veh-bar-track"><div class="veh-bar-fill hdl" style="width:${hdlPct}%"></div></div></div>
+          <div class="veh-bar-row"><span class="veh-bar-lbl">HP</span><div class="veh-bar-track"><div class="veh-bar-fill hp" style="width:${hpPct}%"></div></div></div>
+        </div>
+      `;
+      card.addEventListener('click', () => {
+        if (guestCopsBlocked) {
+          this._showChaosToast('🔒 Playing as Police is disabled by the Lobby Host!');
+          return;
+        }
+        this.settings.playerRole = 'cop';
+        this.settings.copVehicleId = cv.id;
+        saveSettings(this.settings);
+        this._refreshAllUiFromSettings();
+        if (this.mode === 'attract') this._respawnAttractHero();
+        if (this.net.roomCode) {
+          this.net.updateProfile(this._buildLocalNetProfile());
+        }
+      });
+      grid.appendChild(card);
+    }
+  }
+
   _renderVehicleGrid() {
     const grid = document.getElementById('vehicle-grid');
     grid.innerHTML = '';
@@ -1199,9 +2396,10 @@ class SmashyKartApp {
       const spdPct = Math.round(Math.min(100, (veh.speed / 60) * 100));
       const hdlPct = Math.round(Math.min(100, (veh.handling / 4.6) * 100));
       const hpPct = Math.round(Math.min(100, (veh.maxHp / 190) * 100));
+      const isSelected = this.settings.playerRole !== 'cop' && veh.id === this.settings.vehicleId;
       const card = document.createElement('button');
       card.type = 'button';
-      card.className = `vehicle-card${veh.id === this.settings.vehicleId ? ' selected' : ''}`;
+      card.className = `vehicle-card${isSelected ? ' selected' : ''}`;
       card.innerHTML = `
         <div class="veh-swatch" style="background: linear-gradient(90deg, ${veh.color} 72%, ${veh.accent} 72%)"></div>
         <div class="veh-name">${veh.name}</div>
@@ -1217,6 +2415,7 @@ class SmashyKartApp {
           this._showChaosToast('🔒 Car choice is locked to Same Car by the Lobby Manager!');
           return;
         }
+        this.settings.playerRole = 'runner';
         this.settings.vehicleId = veh.id;
         this.settings.primaryColor = veh.color;
         this.settings.accentColor = veh.accent;
@@ -1235,35 +2434,352 @@ class SmashyKartApp {
     }
   }
 
+  _ensureItemWeights() {
+    this.settings.itemWeights = cloneItemWeights(this.settings.itemWeights);
+    return this.settings.itemWeights;
+  }
+
+  _updateLoadoutSummaryLabel() {
+    const s = this.settings;
+    const summaryEl = document.getElementById('home-loadout-summary');
+    if (!summaryEl) return;
+    const biome = BIOMES[s.biome] || BIOMES.city;
+    const enabledCount = ABILITIES.filter((a) => s.enabledItems[a.id] !== false).length;
+    if (s.playerRole === 'cop') {
+      const copVeh = COP_VEHICLES.find((c) => c.id === s.copVehicleId) || COP_VEHICLES[2] || COP_VEHICLES[0];
+      summaryEl.textContent = `Police Team · ${copVeh.name} · ${biome.name} · ${enabledCount} Items`;
+      return;
+    }
+    const veh = VEHICLES.find((v) => v.id === s.vehicleId) || VEHICLES[0];
+    const modeObj = CHARACTER_MODES.find((m) => m.id === s.characterMode) || CHARACTER_MODES[0];
+    summaryEl.textContent = `${modeObj.name} · ${veh.name} · ${biome.name} · ${enabledCount} Items`;
+  }
+
+  _applyAbilityRatePreset(presetId) {
+    if (document.activeElement?.matches?.('.ab-rate-num')) {
+      document.activeElement.blur();
+    }
+    const weights = this._ensureItemWeights();
+    let toastMsg = '';
+
+    if (presetId === 'default') {
+      for (const ab of ABILITIES) {
+        this.settings.enabledItems[ab.id] = true;
+        weights[ab.id] = 100;
+      }
+      toastMsg = '↺ Reset all 9 abilities to 100% drop rate!';
+    } else if (presetId === 'equal') {
+      const anyEnabled = ABILITIES.some((ab) => this.settings.enabledItems[ab.id] !== false);
+      if (!anyEnabled) {
+        for (const ab of ABILITIES) this.settings.enabledItems[ab.id] = true;
+      }
+      for (const ab of ABILITIES) {
+        weights[ab.id] = clampDropRatePct(100 / (ab.weight || 1));
+      }
+      toastMsg = '⚖️ Exact equal roll % set across active abilities!';
+    } else if (presetId === 'boost500') {
+      for (const ab of ABILITIES) {
+        this.settings.enabledItems[ab.id] = true;
+        weights[ab.id] = 500;
+      }
+      toastMsg = '🔥 All 9 abilities cranked to 500% drop rate!';
+    } else if (presetId === 'rpg1000') {
+      for (const ab of ABILITIES) {
+        this.settings.enabledItems[ab.id] = true;
+        weights[ab.id] = ab.id === 'homing_rocket' ? 1000 : 0.1;
+      }
+      toastMsg = '🚀 1000% Twin RPG / 0.1% everything else!';
+    } else if (presetId === 'sugar1000') {
+      this.settings.enabledItems.sugar_rush = true;
+      for (const ab of ABILITIES) {
+        weights[ab.id] = ab.id === 'sugar_rush' ? 1000 : 100;
+      }
+      toastMsg = '🍭 1000% 3x Sugar Rush drop rate!';
+    } else {
+      return;
+    }
+
+    saveSettings(this.settings);
+    this.abilities.updateSettings(this.settings);
+    this._updateAbilityOddsLabels();
+    this._updateLoadoutSummaryLabel();
+    if (this.net.roomCode && this.net.isHost) {
+      this.net.updateRoomSettings(this.settings);
+    }
+    if (toastMsg) this._showChaosToast(toastMsg);
+  }
+
   _renderAbilityMixer() {
     const grid = document.getElementById('ability-mixer-grid');
-    grid.innerHTML = '';
-    for (const ab of ABILITIES) {
-      const enabled = this.settings.enabledItems[ab.id] !== false;
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `ability-toggle-card${enabled ? '' : ' off'}`;
-      btn.innerHTML = `
-        <span class="ab-icon">${ab.icon}</span>
-        <div>
-          <span class="ab-name">${ab.name}</span>
-          <span class="ab-desc">${enabled ? 'ACTIVE IN ? BOXES' : 'TURNED OFF'}</span>
-        </div>
-      `;
-      btn.addEventListener('click', () => {
-        const activeCount = ABILITIES.filter((a) => this.settings.enabledItems[a.id] !== false).length;
-        if (enabled && activeCount <= 1) {
-          this._showChaosToast('Keep at least 1 Mario Kart ability turned on!');
-          return;
-        }
-        this.settings.enabledItems[ab.id] = !enabled;
-        saveSettings(this.settings);
-        this.abilities.updateSettings(this.settings);
-        this._refreshAllUiFromSettings();
-        if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
-      });
-      grid.appendChild(btn);
+    if (!grid) return;
+    this._ensureItemWeights();
+
+    // Build persistent DOM cards once so slider drags & number typing NEVER destroy active <input> focus!
+    if (grid.querySelectorAll('[data-ability-card]').length !== ABILITIES.length) {
+      grid.innerHTML = '';
+      for (const ab of ABILITIES) {
+        const card = document.createElement('div');
+        card.className = 'ability-mixer-card';
+        card.dataset.abilityCard = ab.id;
+        card.style.setProperty('--ab-accent', ab.color || '#facc15');
+        card.innerHTML = `
+          <div class="ab-card-head">
+            <div class="ab-title-group">
+              <span class="ab-icon" aria-hidden="true">${ab.icon}</span>
+              <span class="ab-name">${this._escapeHtml(ab.name)}</span>
+            </div>
+            <div class="ab-head-actions">
+              <span class="ab-odds-badge" data-odds-badge="${ab.id}">11.1% roll</span>
+              <button
+                type="button"
+                class="ab-toggle-pill on"
+                data-toggle-item="${ab.id}"
+                aria-pressed="true"
+                aria-label="Toggle ${this._escapeHtml(ab.name)}"
+              >ON</button>
+            </div>
+          </div>
+          <div class="ab-rate-controls" data-rate-row="${ab.id}">
+            <div class="ab-slider-line">
+              <input
+                type="range"
+                class="ab-rate-slider"
+                data-rate-slider="${ab.id}"
+                min="0"
+                max="100"
+                step="0.5"
+                value="50"
+                aria-label="${this._escapeHtml(ab.name)} drop probability slider"
+              />
+              <label class="ab-num-wrap">
+                <input
+                  type="number"
+                  class="ab-rate-num"
+                  data-rate-input="${ab.id}"
+                  min="0.1"
+                  max="1000"
+                  step="0.1"
+                  inputmode="decimal"
+                  value="100"
+                  aria-label="${this._escapeHtml(ab.name)} drop rate percent"
+                />
+                <span class="ab-pct-suffix">%</span>
+              </label>
+            </div>
+            <div class="ab-quick-chips" role="group" aria-label="${this._escapeHtml(ab.name)} quick drop rates">
+              <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="0.1">0.1%</button>
+              <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="100">100%</button>
+              <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="500">500%</button>
+              <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="1000">1000%</button>
+            </div>
+          </div>
+        `;
+
+        const toggleBtn = card.querySelector('[data-toggle-item]');
+        const sliderEl = card.querySelector('[data-rate-slider]');
+        const numEl = card.querySelector('[data-rate-input]');
+
+        toggleBtn?.addEventListener('click', () => {
+          if (this.net.roomCode && !this.net.isHost) {
+            this._showChaosToast('🔒 Ability drop rates are controlled by the Lobby Host!');
+            return;
+          }
+          const curEnabled = this.settings.enabledItems[ab.id] !== false;
+          const activeCount = ABILITIES.filter((a) => this.settings.enabledItems[a.id] !== false).length;
+          if (curEnabled && activeCount <= 1) {
+            this._showChaosToast('Keep at least 1 Mario Kart ability turned on!');
+            return;
+          }
+          this.settings.enabledItems[ab.id] = !curEnabled;
+          saveSettings(this.settings);
+          this.abilities.updateSettings(this.settings);
+          this._updateAbilityOddsLabels();
+          this._updateLoadoutSummaryLabel();
+          if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+        });
+
+        sliderEl?.addEventListener('input', () => {
+          if (this.net.roomCode && !this.net.isHost) {
+            this._updateAbilityOddsLabels();
+            this._showChaosToast('🔒 Ability drop rates are controlled by the Lobby Host!');
+            return;
+          }
+          if (numEl && document.activeElement === numEl) {
+            numEl.blur();
+          }
+          const pct = clampDropRatePct(sliderToDropPct(Number(sliderEl.value)));
+          this._ensureItemWeights()[ab.id] = pct;
+          if (numEl) numEl.value = formatDropPctNumber(pct);
+          saveSettings(this.settings);
+          this.abilities.updateSettings(this.settings);
+          this._updateAbilityOddsLabels({ skipSliderId: ab.id });
+          if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+        });
+
+        numEl?.addEventListener('input', () => {
+          if (this.net.roomCode && !this.net.isHost) {
+            this._updateAbilityOddsLabels();
+            return;
+          }
+          const raw = numEl.value.trim();
+          if (raw === '' || raw === '.' || raw === '0' || raw === '0.') return;
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed) || parsed <= 0) return;
+          const pct = clampDropRatePct(parsed);
+          this._ensureItemWeights()[ab.id] = pct;
+          if (sliderEl) {
+            sliderEl.value = String(Number(dropPctToSlider(pct).toFixed(2)));
+          }
+          saveSettings(this.settings);
+          this.abilities.updateSettings(this.settings);
+          this._updateAbilityOddsLabels({ skipNumberId: ab.id, skipSliderId: ab.id });
+          if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+        });
+
+        const commitNumberInput = () => {
+          if (this.net.roomCode && !this.net.isHost) {
+            this._updateAbilityOddsLabels();
+            return;
+          }
+          const raw = numEl.value.trim();
+          const fallback = this.settings.itemWeights?.[ab.id] ?? 100;
+          const parsed = raw === '' ? fallback : Number(raw);
+          const pct = clampDropRatePct(Number.isFinite(parsed) ? parsed : fallback);
+          this._ensureItemWeights()[ab.id] = pct;
+          numEl.value = formatDropPctNumber(pct);
+          if (sliderEl) {
+            sliderEl.value = String(Number(dropPctToSlider(pct).toFixed(2)));
+          }
+          saveSettings(this.settings);
+          this.abilities.updateSettings(this.settings);
+          this._updateAbilityOddsLabels({ skipNumberId: ab.id });
+          if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+        };
+
+        numEl?.addEventListener('change', commitNumberInput);
+        numEl?.addEventListener('blur', commitNumberInput);
+        numEl?.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            numEl.blur();
+          }
+        });
+
+        card.querySelectorAll('[data-quick-rate]').forEach((chip) => {
+          chip.addEventListener('click', () => {
+            if (this.net.roomCode && !this.net.isHost) {
+              this._showChaosToast('🔒 Ability drop rates are controlled by the Lobby Host!');
+              return;
+            }
+            if (this.settings.enabledItems[ab.id] === false) return;
+            if (document.activeElement?.matches?.('.ab-rate-num')) {
+              document.activeElement.blur();
+            }
+            const pct = clampDropRatePct(Number(chip.dataset.quickRate));
+            this._ensureItemWeights()[ab.id] = pct;
+            saveSettings(this.settings);
+            this.abilities.updateSettings(this.settings);
+            this._updateAbilityOddsLabels();
+            if (this.net.roomCode && this.net.isHost) this.net.updateRoomSettings(this.settings);
+          });
+        });
+
+        grid.appendChild(card);
+      }
     }
+
+    this._updateAbilityOddsLabels();
+  }
+
+  _updateAbilityOddsLabels(opts = {}) {
+    const grid = document.getElementById('ability-mixer-grid');
+    if (!grid) return;
+    const weights = this._ensureItemWeights();
+    const enabledItems = this.settings.enabledItems || {};
+    const oddsMap = computeAbilityDropOdds(enabledItems, weights);
+    const isGuestLocked = Boolean(this.net.roomCode && !this.net.isHost);
+
+    for (const ab of ABILITIES) {
+      const enabled = enabledItems[ab.id] !== false;
+      const pct = clampDropRatePct(weights[ab.id] ?? 100);
+      const odds = oddsMap[ab.id] ?? 0;
+
+      const card = grid.querySelector(`[data-ability-card="${ab.id}"]`);
+      if (!card) continue;
+      card.classList.toggle('off', !enabled);
+      card.classList.toggle('guest-locked', isGuestLocked);
+
+      const badge = card.querySelector(`[data-odds-badge="${ab.id}"]`);
+      if (badge) {
+        badge.textContent = formatRollOddsLabel(odds, enabled);
+        badge.classList.toggle('is-off', !enabled);
+        badge.classList.toggle('is-boosted', enabled && pct > 100.05);
+        badge.classList.toggle('is-low', enabled && pct < 10);
+      }
+
+      const toggleBtn = card.querySelector(`[data-toggle-item="${ab.id}"]`);
+      if (toggleBtn) {
+        toggleBtn.textContent = enabled ? 'ON' : 'OFF';
+        toggleBtn.classList.toggle('on', enabled);
+        toggleBtn.classList.toggle('off', !enabled);
+        toggleBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+        toggleBtn.disabled = isGuestLocked;
+      }
+
+      const rateRow = card.querySelector(`[data-rate-row="${ab.id}"]`);
+      const controlsDisabled = !enabled || isGuestLocked;
+      rateRow?.classList.toggle('is-disabled', controlsDisabled);
+
+      const sliderEl = card.querySelector(`[data-rate-slider="${ab.id}"]`);
+      if (sliderEl) {
+        sliderEl.disabled = controlsDisabled;
+        if (opts.skipSliderId !== ab.id) {
+          sliderEl.value = String(Number(dropPctToSlider(pct).toFixed(2)));
+        }
+      }
+
+      const numEl = card.querySelector(`[data-rate-input="${ab.id}"]`);
+      if (numEl) {
+        numEl.disabled = controlsDisabled;
+        if (opts.skipNumberId !== ab.id && document.activeElement !== numEl) {
+          numEl.value = formatDropPctNumber(pct);
+        }
+      }
+
+      card.querySelectorAll('[data-quick-rate]').forEach((chip) => {
+        const chipRate = Number(chip.dataset.quickRate);
+        chip.disabled = controlsDisabled;
+        chip.classList.toggle('active', enabled && Math.abs(pct - chipRate) < 0.05);
+      });
+    }
+
+    const allEnabled = ABILITIES.every((a) => enabledItems[a.id] !== false);
+    const activeAbilities = ABILITIES.filter((a) => enabledItems[a.id] !== false);
+    const presetMatches = {
+      default: allEnabled && ABILITIES.every((a) => Math.abs((weights[a.id] ?? 100) - 100) < 0.05),
+      equal:
+        activeAbilities.length > 0 &&
+        activeAbilities.every(
+          (a) => Math.abs((weights[a.id] ?? 100) - clampDropRatePct(100 / (a.weight || 1))) < 0.15
+        ),
+      boost500: allEnabled && ABILITIES.every((a) => Math.abs((weights[a.id] ?? 100) - 500) < 0.05),
+      rpg1000:
+        allEnabled &&
+        ABILITIES.every((a) =>
+          Math.abs((weights[a.id] ?? 100) - (a.id === 'homing_rocket' ? 1000 : 0.1)) < 0.05
+        ),
+      sugar1000:
+        enabledItems.sugar_rush !== false &&
+        ABILITIES.every((a) =>
+          Math.abs((weights[a.id] ?? 100) - (a.id === 'sugar_rush' ? 1000 : 100)) < 0.05
+        ),
+    };
+
+    document.querySelectorAll('#ability-rate-presets [data-rpreset]').forEach((btn) => {
+      const pid = btn.dataset.rpreset;
+      btn.disabled = isGuestLocked;
+      btn.classList.toggle('active', Boolean(presetMatches[pid]));
+    });
   }
 
   _bindSoundStudio() {
@@ -1379,24 +2895,70 @@ class SmashyKartApp {
     const s = this.settings;
     const person = this._getSelectedPerson();
     const homeImg = document.getElementById('home-avatar-img');
-    if (person?.dataUrl) homeImg.src = person.dataUrl;
+    if (homeImg && person?.dataUrl) homeImg.src = person.dataUrl;
 
+    const isCopRole = s.playerRole === 'cop';
+    const copVeh = COP_VEHICLES.find((c) => c.id === s.copVehicleId) || COP_VEHICLES[2] || COP_VEHICLES[0];
+
+    document.querySelectorAll('[data-role]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.role === (isCopRole ? 'cop' : 'runner'));
+    });
+    document.querySelectorAll('#lobby-cop-pills [data-cop-veh]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.copVeh === copVeh?.id);
+    });
     document.querySelectorAll('[data-mode]').forEach((el) => {
-      el.classList.toggle('active', el.dataset.mode === s.characterMode);
+      el.classList.toggle('active', !isCopRole && el.dataset.mode === s.characterMode);
     });
 
     const veh = VEHICLES.find((v) => v.id === s.vehicleId) || VEHICLES[0];
-    const biome = BIOMES[s.biome] || BIOMES.city;
-    const enabledCount = ABILITIES.filter((a) => s.enabledItems[a.id] !== false).length;
-    const modeObj = CHARACTER_MODES.find((m) => m.id === s.characterMode) || CHARACTER_MODES[0];
-    document.getElementById('home-loadout-summary').textContent =
-      `${modeObj.name} · ${veh.name} · ${biome.name} · ${enabledCount} Items`;
+    this._updateLoadoutSummaryLabel();
 
-    document.getElementById('best-time-label').textContent = `${this.best.bestTime.toFixed(1)}s`;
-    document.getElementById('best-score-label').textContent = String(Math.round(this.best.bestScore));
+    const homeCarName = document.getElementById('home-car-name');
+    if (homeCarName) {
+      homeCarName.textContent = isCopRole ? `${copVeh.icon} ${copVeh.name}` : veh.name;
+      homeCarName.classList.toggle('cop-active', isCopRole);
+    }
 
-    document.getElementById('inp-primary-color').value = s.primaryColor;
-    document.getElementById('inp-accent-color').value = s.accentColor;
+    document.getElementById('home-mode-pills')?.classList.toggle('hidden', isCopRole);
+    const homeCopPerk = document.getElementById('home-cop-perk-badge');
+    if (homeCopPerk) {
+      homeCopPerk.classList.toggle('hidden', !isCopRole);
+      if (isCopRole) {
+        homeCopPerk.textContent =
+          copVeh.id === 'cop_heli'
+            ? '🚁 Flies + 🎯 2s Missiles'
+            : copVeh.id === 'cop_tank'
+              ? '🪖 Tank Armor + 🎯 2s Missiles'
+              : copVeh.id === 'cop_swat'
+                ? '🛡️ SWAT Ram + 🚨 2s Surge'
+                : '🚔 V8 Pursuit + 🚨 2s Surge';
+      }
+    }
+
+    document.getElementById('lobby-mode-pills')?.classList.toggle('hidden', isCopRole);
+    document.getElementById('lobby-cop-pills')?.classList.toggle('hidden', !isCopRole);
+
+    const soloSubEl = document.querySelector('#btn-play-solo .btn-sub-text');
+    if (soloSubEl) {
+      soloSubEl.textContent = isCopRole
+        ? `${copVeh.icon} Hunt Outlaws · ${copVeh.hasMissile ? '2s Missiles' : 'Siren Purge'}`
+        : s.aiCopsEnabled === false
+          ? 'Free-Roam Stunt & ? Box Run'
+          : 'Instant 5-Star Police Chase';
+    }
+
+    const cycleBiomeBtn = document.getElementById('btn-cycle-biome');
+    if (cycleBiomeBtn) cycleBiomeBtn.textContent = BIOME_SHORT_LABELS[s.biome] || '🏙️ City';
+
+    const bestTimeEl = document.getElementById('best-time-label');
+    if (bestTimeEl) bestTimeEl.textContent = `${this.best.bestTime.toFixed(1)}s`;
+    const bestScoreEl = document.getElementById('best-score-label');
+    if (bestScoreEl) bestScoreEl.textContent = String(Math.round(this.best.bestScore));
+
+    const primInp = document.getElementById('inp-primary-color');
+    if (primInp) primInp.value = s.primaryColor;
+    const accInp = document.getElementById('inp-accent-color');
+    if (accInp) accInp.value = s.accentColor;
 
     const guestStatsLocked = Boolean(this.net.roomCode && !this.net.isHost && s.lobbyRules?.lockStats !== false);
     const dispSpeed = guestStatsLocked ? s.lobbyRules?.universalSpeedMult ?? 1.0 : s.speedMult;
@@ -1405,63 +2967,162 @@ class SmashyKartApp {
     const dispScale = guestStatsLocked ? s.lobbyRules?.universalScaleMult ?? 1.0 : s.scaleMult;
     const lockSuffix = guestStatsLocked ? ' 🔒' : '';
 
-    document.getElementById('rng-speed-mult').value = String(dispSpeed);
-    document.getElementById('rng-speed-mult').disabled = guestStatsLocked;
-    document.getElementById('val-speed-mult').textContent = `${Math.round(dispSpeed * 100)}%${lockSuffix}`;
-    document.getElementById('rng-drift-mult').value = String(dispDrift);
-    document.getElementById('rng-drift-mult').disabled = guestStatsLocked;
-    document.getElementById('val-drift-mult').textContent = `${Math.round(dispDrift * 100)}%${lockSuffix}`;
-    document.getElementById('rng-mass-mult').value = String(dispMass);
-    document.getElementById('rng-mass-mult').disabled = guestStatsLocked;
-    document.getElementById('val-mass-mult').textContent = `${Math.round(dispMass * 100)}%${lockSuffix}`;
-    document.getElementById('rng-scale-mult').value = String(dispScale);
-    document.getElementById('rng-scale-mult').disabled = guestStatsLocked;
-    document.getElementById('val-scale-mult').textContent = `${Math.round(dispScale * 100)}%${lockSuffix}`;
+    const setRangeAndVal = (rngId, valId, val, text, disabled = false) => {
+      const rEl = document.getElementById(rngId);
+      const vEl = document.getElementById(valId);
+      if (rEl) {
+        rEl.value = String(val);
+        rEl.disabled = disabled;
+      }
+      if (vEl) vEl.textContent = text;
+    };
+
+    setRangeAndVal('rng-speed-mult', 'val-speed-mult', dispSpeed, `${Math.round(dispSpeed * 100)}%${lockSuffix}`, guestStatsLocked);
+    setRangeAndVal('rng-drift-mult', 'val-drift-mult', dispDrift, `${Math.round(dispDrift * 100)}%${lockSuffix}`, guestStatsLocked);
+    setRangeAndVal('rng-mass-mult', 'val-mass-mult', dispMass, `${Math.round(dispMass * 100)}%${lockSuffix}`, guestStatsLocked);
+    setRangeAndVal('rng-scale-mult', 'val-scale-mult', dispScale, `${Math.round(dispScale * 100)}%${lockSuffix}`, guestStatsLocked);
+
+    const guestWorldLocked = Boolean(this.net.roomCode && !this.net.isHost);
+    const worldLockSuffix = guestWorldLocked ? ' 🔒' : '';
+    const aiCopsOn = s.aiCopsEnabled !== false;
+    document.getElementById('world-guest-lock-note')?.classList.toggle('hidden', !guestWorldLocked);
+    document.getElementById('biome-btns')?.classList.toggle('locked-ctrl', guestWorldLocked);
+
+    const chkAiCops = document.getElementById('chk-ai-cops');
+    if (chkAiCops) {
+      chkAiCops.checked = aiCopsOn;
+      chkAiCops.disabled = guestWorldLocked;
+    }
+    const aiCopsLabelWrap = chkAiCops?.closest('.ai-cops-world-switch');
+    aiCopsLabelWrap?.classList.toggle('is-off', !aiCopsOn);
+    const aiCopsStateLbl = document.getElementById('lbl-ai-cops-state');
+    if (aiCopsStateLbl) {
+      aiCopsStateLbl.textContent = aiCopsOn
+        ? `ON — 5-Star Police Pursuit${worldLockSuffix}`
+        : `OFF — No AI Cops${worldLockSuffix}`;
+    }
+    document.getElementById('ai-cop-sliders-wrap')?.classList.toggle('is-off', !aiCopsOn);
 
     document.querySelectorAll('#biome-btns .seg-btn').forEach((b) =>
       b.classList.toggle('active', b.dataset.biome === s.biome)
     );
-    document.getElementById('rng-cop-intensity').value = String(s.copIntensity);
-    document.getElementById('val-cop-intensity').textContent = `${Math.round(s.copIntensity * 100)}%`;
-    document.getElementById('rng-start-stars').value = String(s.startStars);
-    document.getElementById('val-start-stars').textContent = `${s.startStars} ★`;
-    document.getElementById('rng-box-density').value = String(s.itemBoxDensity);
-    document.getElementById('val-box-density').textContent = `${Math.round(s.itemBoxDensity * 100)}%`;
-    document.getElementById('rng-gravity').value = String(s.gravityMult);
-    document.getElementById('val-gravity').textContent =
-      s.gravityMult < 0.85 ? 'Moon Jumps' : s.gravityMult > 1.1 ? 'Heavy' : 'Normal';
+    const boxDens = clampNum(s.itemBoxDensity, 0.1, 5.0, 1.2);
+    const sugarRate = clampNum(s.sugarBoxRate, 0, 5.0, 1.0);
+    setRangeAndVal(
+      'rng-cop-intensity',
+      'val-cop-intensity',
+      s.copIntensity,
+      aiCopsOn ? `${Math.round(s.copIntensity * 100)}%${worldLockSuffix}` : `OFF — No AI Cops${worldLockSuffix}`,
+      guestWorldLocked || !aiCopsOn
+    );
+    setRangeAndVal(
+      'rng-start-stars',
+      'val-start-stars',
+      s.startStars,
+      aiCopsOn ? `${s.startStars} ★${worldLockSuffix}` : `OFF${worldLockSuffix}`,
+      guestWorldLocked || !aiCopsOn
+    );
+    setRangeAndVal(
+      'rng-box-density',
+      'val-box-density',
+      boxDens,
+      `${Math.round(boxDens * 100)}%${worldLockSuffix}`,
+      guestWorldLocked
+    );
+    setRangeAndVal(
+      'rng-sugar-rate',
+      'val-sugar-rate',
+      sugarRate,
+      `${Math.round(sugarRate * 100)}%${worldLockSuffix}`,
+      guestWorldLocked
+    );
+    setRangeAndVal(
+      'rng-gravity',
+      'val-gravity',
+      s.gravityMult,
+      `${s.gravityMult < 0.85 ? 'Moon Jumps' : s.gravityMult > 1.1 ? 'Heavy' : 'Normal'}${worldLockSuffix}`,
+      guestWorldLocked
+    );
 
-    document.querySelectorAll('#camera-mode-btns .seg-btn, #settings-cam-btns .seg-btn').forEach((b) =>
+    document.querySelectorAll('#camera-mode-btns [data-cam], #settings-cam-btns [data-cam]').forEach((b) =>
       b.classList.toggle('active', b.dataset.cam === s.cameraMode)
     );
-    document.querySelectorAll('#touch-style-btns .seg-btn, #settings-touch-btns .seg-btn').forEach((b) =>
+    document.querySelectorAll('#touch-style-btns [data-touch], #settings-touch-btns [data-touch]').forEach((b) =>
       b.classList.toggle('active', b.dataset.touch === s.touchStyle)
     );
+    document.querySelectorAll('#settings-gfx-btns [data-gfx]').forEach((b) =>
+      b.classList.toggle('active', b.dataset.gfx === s.graphicsQuality)
+    );
+    document.querySelectorAll('#settings-unit-btns [data-unit]').forEach((b) =>
+      b.classList.toggle('active', b.dataset.unit === s.speedUnit)
+    );
+    document.querySelectorAll('#hud-preset-btns [data-hpreset], #settings-hpreset-btns [data-hpreset]').forEach((b) =>
+      b.classList.toggle('active', b.dataset.hpreset === s.hudLayoutPreset)
+    );
 
-    // Sync Personal Settings controls
-    const fov = Math.max(62, Math.min(92, Math.round(Number(s.povFov) || 76)));
-    document.getElementById('rng-pov-fov').value = String(fov);
-    document.getElementById('val-pov-fov').textContent = `${fov}°`;
+    // Sync Personal Settings sliders & toggles
+    const fov = Math.round(clampNum(s.povFov, 62, 96, 78));
+    setRangeAndVal('rng-pov-fov', 'val-pov-fov', fov, `${fov}°`);
 
-    const sens = Math.max(0.7, Math.min(1.4, Number(s.steerSensitivity) || 1.0));
-    document.getElementById('rng-steer-sens').value = String(sens);
-    document.getElementById('val-steer-sens').textContent = `${Math.round(sens * 100)}%`;
+    const shake = clampNum(s.cameraShakeMult, 0, 1.5, 1.0);
+    setRangeAndVal('rng-cam-shake', 'val-cam-shake', shake, `${Math.round(shake * 100)}%`);
 
-    const vol = Math.max(0, Math.min(1, Number(s.soundVolume ?? 0.85)));
+    const sens = clampNum(s.steerSensitivity, 0.7, 1.4, 1.0);
+    setRangeAndVal('rng-steer-sens', 'val-steer-sens', sens, `${Math.round(sens * 100)}%`);
+
+    const dz = clampNum(s.steerDeadzone, 0, 0.22, 0.05);
+    setRangeAndVal('rng-steer-deadzone', 'val-steer-deadzone', dz, `${Math.round(dz * 100)}%`);
+
+    const vol = clampNum(s.soundVolume, 0, 1, 0.85);
     const volPct = `${Math.round(vol * 100)}%`;
-    document.getElementById('rng-volume').value = String(vol);
-    document.getElementById('val-volume').textContent = volPct;
-    document.getElementById('rng-settings-vol').value = String(vol);
-    document.getElementById('val-settings-vol').textContent = volPct;
+    setRangeAndVal('rng-volume', 'val-volume', vol, volPct);
+    setRangeAndVal('rng-settings-vol', 'val-settings-vol', vol, volPct);
 
+    const engVol = clampNum(s.sfxEngineVol, 0, 1, 0.85);
+    setRangeAndVal('rng-engine-vol', 'val-engine-vol', engVol, `${Math.round(engVol * 100)}%`);
+
+    const actVol = clampNum(s.sfxActionVol, 0, 1, 1.0);
+    setRangeAndVal('rng-action-vol', 'val-action-vol', actVol, `${Math.round(actVol * 100)}%`);
+
+    this.renderer.setGraphicsQuality?.(s.graphicsQuality || 'high');
+    this.sound.setVolume(vol);
+    this.sound.setChannelVolumes?.({ engine: engVol, action: actVol });
+
+    const setChk = (id, checked) => {
+      const el = document.getElementById(id);
+      if (el) el.checked = Boolean(checked);
+    };
     const showSpeedo = s.showSpeedometer !== false;
     const showQuickCam = s.showQuickCamBtn !== false;
-    document.getElementById('chk-show-speedo').checked = showSpeedo;
-    document.getElementById('chk-show-quickcam').checked = showQuickCam;
-    document.getElementById('hud-speedo').classList.toggle('hidden', !showSpeedo);
+    const showMinimap = s.showMinimap !== false;
+    const showFps = Boolean(s.showFps);
+
+    setChk('chk-show-desktop-btns', s.showTouchControlsDesktop !== false);
+    setChk('chk-show-keyhints', s.showKeyHints !== false);
+    setChk('chk-show-minimap', showMinimap);
+    setChk('chk-show-speedo', showSpeedo);
+    setChk('chk-show-fps', showFps);
+    setChk('chk-show-quickcam', showQuickCam);
+    setChk('chk-screen-fx', s.screenEffects !== false);
+    setChk('chk-auto-accel', s.autoAccelerate !== false);
+    setChk('chk-invert-steer', Boolean(s.invertSteer));
+    setChk('chk-haptics', s.haptics !== false);
+
+    const speedoEl = document.getElementById('hud-speedo');
+    if (speedoEl) {
+      speedoEl.classList.toggle('hidden', !showSpeedo);
+      const unitEl = speedoEl.querySelector('#hud-speedo-unit, .speedo-unit');
+      if (unitEl) unitEl.textContent = s.speedUnit === 'kmh' ? 'KM/H' : 'MPH';
+    }
+
+    document.getElementById('hud-minimap')?.classList.toggle('hidden', !showMinimap);
+    document.getElementById('hud-fps')?.classList.toggle('hidden', !showFps);
+
     const quickCamBtn = document.getElementById('btn-quick-cam');
-    quickCamBtn.classList.toggle('hidden', !showQuickCam);
-    quickCamBtn.classList.toggle('pov-active', s.cameraMode === 'pov');
+    if (quickCamBtn) {
+      quickCamBtn.classList.toggle('hidden', !showQuickCam);
+      quickCamBtn.classList.toggle('pov-active', s.cameraMode === 'pov');
+    }
 
     // Highlight matching 1-tap garage preset pill if active
     const presetChecks = {
@@ -1481,11 +3142,14 @@ class SmashyKartApp {
       pill.classList.toggle('active', isMatch);
     });
 
-    // Toggle mobile touch steering layout
-    document.getElementById('split-steer').classList.toggle('hidden', s.touchStyle === 'joystick');
-    document.getElementById('joystick-zone').classList.toggle('hidden', s.touchStyle !== 'joystick');
-
+    this._setSettingsTab(this.activeSettingsTab || 'camera');
+    this._updateHudKeycaps();
+    this._renderKeybindsList();
+    this._applyHudLayout();
+    this._syncHudEditorInspector();
+    this._syncInstallAppUi();
     this._renderPeopleGrid();
+    this._renderCopVehicleGrid();
     this._renderVehicleGrid();
     this._renderAbilityMixer();
     this._syncSimPersonalSettings();
@@ -1562,6 +3226,7 @@ class SmashyKartApp {
     document.getElementById('btn-leave-room').addEventListener('click', () => {
       this.net.leaveRoom();
       window.history.replaceState({}, '', window.location.pathname);
+      this._refreshAllUiFromSettings();
       this._openLobbyModal();
     });
 
@@ -1612,6 +3277,7 @@ class SmashyKartApp {
 
     this.net.on('kicked', (msg) => {
       window.history.replaceState({}, '', window.location.pathname);
+      this._refreshAllUiFromSettings();
       this._openLobbyModal();
       this._showLobbyError(msg?.message || 'Removed from lobby by Lobby Manager.');
     });
@@ -1677,6 +3343,7 @@ class SmashyKartApp {
       this.sim.applyIncomingPvpBump(bump);
       this.cameraShake = Math.max(this.cameraShake, 0.7);
       this.sound.playEvent('crash', 0.85);
+      this._triggerHaptic([24, 28, 34]);
       if (bump.fromName) {
         this._showChaosToast(`💥 ${bump.fromName} SLAMMED YOU!`);
       }
@@ -1694,6 +3361,7 @@ class SmashyKartApp {
         isParty: true,
         winnerId: msg.winnerId,
         winnerName: msg.winnerName,
+        winnerTeam: msg.winnerTeam || null,
         standings: this.partyStandings,
       });
     });
@@ -1728,15 +3396,24 @@ class SmashyKartApp {
         rules.allowCarChoice = true;
         rules.allowModeChoice = true;
         rules.allowCustomPhotos = true;
+        rules.allowPlayerCops = true;
         rules.universalSpeedMult = 1.0;
         rules.universalDriftMult = 1.0;
         rules.universalMassMult = 1.0;
         rules.universalScaleMult = 1.0;
+        this.settings.aiCopsEnabled = true;
         this.settings.speedMult = 1.0;
         this.settings.copIntensity = 1.0;
         this.settings.startStars = 1;
         this.settings.itemBoxDensity = 1.2;
+        this.settings.sugarBoxRate = 1.0;
+        this.settings.itemWeights = createDefaultItemWeights();
         for (const ab of ABILITIES) this.settings.enabledItems[ab.id] = true;
+        this.abilities.updateSettings(this.settings);
+        this.world.reset(this.settings.worldSeed, this.settings.biome, {
+          itemBoxDensity: this.settings.itemBoxDensity,
+          sugarBoxRate: this.settings.sugarBoxRate,
+        });
       } else if (p === 'same_car') {
         rules.lockStats = true;
         rules.allowCarChoice = false;
@@ -1764,6 +3441,10 @@ class SmashyKartApp {
         this.settings.itemBoxDensity = 2.0;
         this.settings.copIntensity = 1.4;
         this.settings.startStars = 3;
+        this.world.reset(this.settings.worldSeed, this.settings.biome, {
+          itemBoxDensity: this.settings.itemBoxDensity,
+          sugarBoxRate: this.settings.sugarBoxRate,
+        });
       }
 
       document.querySelectorAll('#host-preset-btns .preset-pill').forEach((el) =>
@@ -1790,6 +3471,7 @@ class SmashyKartApp {
       this.settings.biome = btn.dataset.ubiome;
       this.world.reset(this.settings.worldSeed, this.settings.biome, {
         itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
       });
       syncHostRules();
     });
@@ -1810,6 +3492,26 @@ class SmashyKartApp {
       });
     };
 
+    const permAiCopsEl = document.getElementById('perm-ai-cops');
+    permAiCopsEl?.addEventListener('change', () => {
+      if (!this.net.isHost) return;
+      this.settings.aiCopsEnabled = Boolean(permAiCopsEl.checked);
+      this.sim.updateSettings(this.settings);
+      if (!this.settings.aiCopsEnabled) {
+        this.sim.cops.length = 0;
+        if (this.sim.localPlayer) this.sim.localPlayer.bustedProgress = 0;
+      } else if (this.mode === 'attract') {
+        this._respawnAttractHero();
+      }
+      syncHostRules();
+      this._showChaosToast(
+        this.settings.aiCopsEnabled
+          ? '🚔 AI Police Chase ON for Party!'
+          : '🚫 AI Police OFF — Pure Friends PvP / Human Cops!'
+      );
+    });
+
+    bindPerm('perm-allow-cops', 'allowPlayerCops');
     bindPerm('perm-lock-stats', 'lockStats');
     bindPerm('perm-allow-car', 'allowCarChoice');
     bindPerm('perm-allow-mode', 'allowModeChoice');
@@ -1818,13 +3520,36 @@ class SmashyKartApp {
 
   _applyHostSettings(rs) {
     if (!rs) return;
+    const prevBiome = this.settings.biome;
+    const prevBoxDensity = this.settings.itemBoxDensity;
+    const prevSugarRate = this.settings.sugarBoxRate;
+    const prevAiCops = this.settings.aiCopsEnabled;
+
     if (rs.biome) this.settings.biome = rs.biome;
+    if (rs.aiCopsEnabled !== undefined) {
+      this.settings.aiCopsEnabled = Boolean(rs.aiCopsEnabled);
+    }
     if (rs.copIntensity !== undefined) this.settings.copIntensity = rs.copIntensity;
     if (rs.startStars !== undefined) this.settings.startStars = rs.startStars;
     if (rs.trafficDensity !== undefined) this.settings.trafficDensity = rs.trafficDensity;
-    if (rs.itemBoxDensity !== undefined) this.settings.itemBoxDensity = rs.itemBoxDensity;
+    if (rs.itemBoxDensity !== undefined) {
+      this.settings.itemBoxDensity = Number(
+        clampNum(rs.itemBoxDensity, 0.1, 5.0, this.settings.itemBoxDensity ?? 1.2).toFixed(2)
+      );
+    }
+    if (rs.sugarBoxRate !== undefined) {
+      this.settings.sugarBoxRate = Number(
+        clampNum(rs.sugarBoxRate, 0, 5.0, this.settings.sugarBoxRate ?? 1.0).toFixed(2)
+      );
+    }
     if (rs.gravityMult !== undefined) this.settings.gravityMult = rs.gravityMult;
     if (rs.enabledItems) this.settings.enabledItems = { ...this.settings.enabledItems, ...rs.enabledItems };
+    if (rs.itemWeights) {
+      this.settings.itemWeights = cloneItemWeights({
+        ...(this.settings.itemWeights || {}),
+        ...rs.itemWeights,
+      });
+    }
     if (rs.lobbyRules) {
       this.settings.lobbyRules = { ...this.settings.lobbyRules, ...rs.lobbyRules };
       if (this.settings.lobbyRules.allowModeChoice === false && this.settings.lobbyRules.universalCharacterMode) {
@@ -1833,6 +3558,29 @@ class SmashyKartApp {
       if (this.settings.lobbyRules.allowCarChoice === false && this.settings.lobbyRules.universalVehicleId) {
         this.settings.vehicleId = this.settings.lobbyRules.universalVehicleId;
       }
+      if (this.settings.lobbyRules.allowPlayerCops === false && this.settings.playerRole === 'cop') {
+        this.settings.playerRole = 'runner';
+        if (this.net.roomCode) {
+          this.net.updateProfile(this._buildLocalNetProfile());
+        }
+      }
+    }
+    if (!this.settings.aiCopsEnabled) {
+      this.sim.cops.length = 0;
+      if (this.sim.localPlayer) this.sim.localPlayer.bustedProgress = 0;
+    }
+    if (
+      this.mode === 'attract' &&
+      (prevBiome !== this.settings.biome ||
+        prevBoxDensity !== this.settings.itemBoxDensity ||
+        prevSugarRate !== this.settings.sugarBoxRate ||
+        prevAiCops !== this.settings.aiCopsEnabled)
+    ) {
+      this.world.reset(this.settings.worldSeed, this.settings.biome, {
+        itemBoxDensity: this.settings.itemBoxDensity,
+        sugarBoxRate: this.settings.sugarBoxRate,
+      });
+      if (this.settings.aiCopsEnabled) this._respawnAttractHero();
     }
     this.abilities.updateSettings(this.settings);
     this._refreshAllUiFromSettings();
@@ -1865,6 +3613,10 @@ class SmashyKartApp {
     guestBanner.classList.toggle('hidden', isHost);
 
     if (isHost) {
+      const aiCopsChk = document.getElementById('perm-ai-cops');
+      if (aiCopsChk) aiCopsChk.checked = room.settings?.aiCopsEnabled !== false;
+      const allowCopsChk = document.getElementById('perm-allow-cops');
+      if (allowCopsChk) allowCopsChk.checked = rules.allowPlayerCops !== false;
       document.getElementById('perm-lock-stats').checked = rules.lockStats !== false;
       document.getElementById('perm-allow-car').checked = rules.allowCarChoice !== false;
       document.getElementById('perm-allow-mode').checked = rules.allowModeChoice !== false;
@@ -1880,7 +3632,12 @@ class SmashyKartApp {
     } else {
       const spdPct = Math.round((rules.universalSpeedMult || 1.0) * 100);
       const biomeObj = BIOMES[room.settings?.biome || 'city'] || BIOMES.city;
+      const aiCopsStatus = room.settings?.aiCopsEnabled === false ? '🚫 AI Cops OFF' : '🚔 AI Cops ON';
+      const playerCopsStatus =
+        rules.allowPlayerCops === false ? '🔒 Police Team Disabled' : '🚔 Police Team Open';
       const parts = [
+        aiCopsStatus,
+        playerCopsStatus,
         rules.lockStats !== false ? `🔒 Equal ${spdPct}% Speed & Stats` : '🔓 Custom Car Tuning Allowed',
         biomeObj.name,
         rules.allowCarChoice === false ? '🔒 Same Car Forced' : 'Any Car',
@@ -1890,13 +3647,17 @@ class SmashyKartApp {
     }
 
     // Lock/unlock Guest buttons right inside Lobby & Garage
+    document.getElementById('lobby-role-pills')?.classList.toggle(
+      'locked-ctrl',
+      !isHost && rules.allowPlayerCops === false
+    );
     document.getElementById('lobby-mode-pills')?.classList.toggle(
       'locked-ctrl',
       !isHost && rules.allowModeChoice === false
     );
     document.getElementById('btn-lobby-car')?.classList.toggle(
       'locked-ctrl',
-      !isHost && rules.allowCarChoice === false && rules.lockStats !== false
+      !isHost && rules.allowCarChoice === false && rules.lockStats !== false && rules.allowPlayerCops === false
     );
     document.getElementById('btn-lobby-photo')?.classList.toggle(
       'locked-ctrl',
@@ -1906,25 +3667,38 @@ class SmashyKartApp {
     const players = room.players || [];
     document.getElementById('lobby-player-count').textContent = String(players.length);
 
+    const COP_BADGE_MAP = {
+      cop_cruiser: '🚔 Cruiser',
+      cop_swat: '🛡️ SWAT',
+      cop_heli: '🚁 Heli',
+      cop_tank: '🪖 Tank',
+    };
+
     const rosterEl = document.getElementById('lobby-roster');
     rosterEl.innerHTML = '';
     for (const p of players) {
+      const isCopPlayer = p.playerRole === 'cop';
       const card = document.createElement('div');
-      card.className = `roster-card${p.ready ? ' ready' : ''}`;
+      card.className = `roster-card${p.ready ? ' ready' : ''}${isCopPlayer ? ' cop-roster-card' : ''}`;
       const veh = VEHICLES.find((v) => v.id === p.vehicleId) || VEHICLES[0];
-      const modeLabel =
-        p.characterMode === 'runner'
+      const copVeh = COP_VEHICLES.find((c) => c.id === p.copVehicleId) || COP_VEHICLES[2] || COP_VEHICLES[0];
+      const modeLabel = isCopPlayer
+        ? `${copVeh.icon} ${copVeh.name}`
+        : p.characterMode === 'runner'
           ? 'On Foot'
           : p.characterMode === 'photo_car'
-          ? 'Photo-Car'
-          : veh.name;
+            ? 'Photo-Car'
+            : veh.name;
+      const copTagHtml = isCopPlayer
+        ? `<span class="roster-cop-badge">${COP_BADGE_MAP[copVeh.id] || '🚔 COP'}</span>`
+        : '';
       const fallbackImg = this._safeImgSrc(this._getSelectedPerson()?.dataUrl);
       const safeAvatar = this._safeImgSrc(p.avatarDataUrl) || fallbackImg;
       const canKick = isHost && p.id !== room.hostId;
       card.innerHTML = `
         <img src="${safeAvatar}" alt="${this._escapeHtml(p.name)}" />
         <div class="roster-meta">
-          <div class="roster-name">${this._escapeHtml(p.name)} ${p.id === room.hostId ? '👑' : ''}</div>
+          <div class="roster-name">${this._escapeHtml(p.name)} ${p.id === room.hostId ? '👑' : ''} ${copTagHtml}</div>
           <div class="roster-sub">${this._escapeHtml(modeLabel)} · ${p.ready ? 'READY' : 'Picking...'}</div>
         </div>
         ${canKick ? `<button type="button" class="tiny-pill" data-kick-id="${this._escapeHtml(p.id)}">Kick</button>` : ''}
@@ -1959,15 +3733,39 @@ class SmashyKartApp {
   _respawnAttractHero() {
     this.world.reset(this.settings.worldSeed, this.settings.biome, {
       itemBoxDensity: this.settings.itemBoxDensity,
+      sugarBoxRate: this.settings.sugarBoxRate,
     });
+    this.abilities.updateSettings(this.settings);
+    const aiCopsOn = this.settings.aiCopsEnabled !== false;
     this.sim.resetRun(this.settings.worldSeed, {
       ...this.settings,
+      aiCopsEnabled: aiCopsOn,
+      startStars: aiCopsOn ? 2 : 1,
+      autoAccelerate: true,
       playerId: 'local',
       spawnIndex: 0,
     });
+    if (aiCopsOn && this.settings.playerRole !== 'cop') {
+      this.sim.wantedStars = 2;
+      if (this.sim.localPlayer) {
+        this.sim.localPlayer.stars = 2;
+      }
+      let safety = 0;
+      while (this.sim.cops.length < 2 && safety < 4 && typeof this.sim._spawnCop === 'function') {
+        this.sim._spawnCop(this.sim.localPlayer);
+        safety++;
+      }
+    } else if (!aiCopsOn) {
+      this.sim.cops.length = 0;
+    }
   }
 
   _startSoloMatch() {
+    if (this.editingHudLayout) {
+      this.editingHudLayout = false;
+      document.body.classList.remove('editing-hud-layout');
+      document.getElementById('hud-layout-editor')?.classList.add('hidden');
+    }
     if (this.net.roomCode) {
       this.net.leaveRoom();
       window.history.replaceState({}, '', window.location.pathname);
@@ -1980,7 +3778,9 @@ class SmashyKartApp {
 
     this.world.reset(freshSeed, this.settings.biome, {
       itemBoxDensity: this.settings.itemBoxDensity,
+      sugarBoxRate: this.settings.sugarBoxRate,
     });
+    this.abilities.updateSettings(this.settings);
     this._syncAllPhotoTextures();
     this.sim.resetRun(freshSeed, {
       ...this.settings,
@@ -1988,27 +3788,66 @@ class SmashyKartApp {
       spawnIndex: 0,
     });
 
-    document.getElementById('home-screen').classList.add('hidden');
-    document.getElementById('lobby-modal').classList.add('hidden');
-    document.getElementById('gameover-modal').classList.add('hidden');
-    document.getElementById('spectator-bar').classList.add('hidden');
-    document.getElementById('survivor-strip').classList.add('hidden');
-    document.getElementById('touch-controls').classList.remove('hidden');
-    document.getElementById('hud').classList.remove('hidden');
+    document.getElementById('home-screen')?.classList.add('hidden');
+    document.getElementById('lobby-modal')?.classList.add('hidden');
+    document.getElementById('gameover-modal')?.classList.add('hidden');
+    document.getElementById('settings-modal')?.classList.add('hidden');
+    document.getElementById('spectator-bar')?.classList.add('hidden');
+    document.getElementById('survivor-strip')?.classList.add('hidden');
+    document.getElementById('hud')?.classList.remove('hidden');
 
     this.mode = 'playing_solo';
+    this._applyHudLayout();
   }
 
   _beginPartyCountdown(msg) {
+    if (this.editingHudLayout) {
+      this.editingHudLayout = false;
+      document.body.classList.remove('editing-hud-layout');
+      document.getElementById('hud-layout-editor')?.classList.add('hidden');
+    }
     const roomSettings = msg.settings || {};
     const rules = roomSettings.lobbyRules || this.settings.lobbyRules || {};
     const lockStats = rules.lockStats !== false;
     const allowCar = rules.allowCarChoice !== false;
     const allowMode = rules.allowModeChoice !== false;
     const allowPhotos = rules.allowCustomPhotos !== false;
+    const allowPlayerCops = rules.allowPlayerCops !== false;
+    const roomAiCops =
+      roomSettings.aiCopsEnabled !== undefined
+        ? Boolean(roomSettings.aiCopsEnabled)
+        : this.settings.aiCopsEnabled !== false;
+
+    const players = (msg.players || []).map((p, idx) => ({
+      ...p,
+      playerRole: p.playerRole === 'cop' ? 'cop' : 'runner',
+      copVehicleId: p.copVehicleId || 'cop_heli',
+      avatarId: p.avatarId || `net_${p.id}`,
+      spawnIndex: Number.isFinite(p.spawnIndex) ? p.spawnIndex : idx,
+    }));
+    const meInRoster = players.find((p) => p.id === this.net.playerId);
+
+    const localRole =
+      !allowPlayerCops && !this.net.isHost
+        ? 'runner'
+        : meInRoster?.playerRole || (this.settings.playerRole === 'cop' ? 'cop' : 'runner');
+    const localCopVehicleId = meInRoster?.copVehicleId || this.settings.copVehicleId || 'cop_heli';
+
+    const mergedItemBoxDensity = Number(
+      clampNum(roomSettings.itemBoxDensity ?? this.settings.itemBoxDensity, 0.1, 5.0, 1.2).toFixed(2)
+    );
+    const mergedSugarBoxRate = Number(
+      clampNum(roomSettings.sugarBoxRate ?? this.settings.sugarBoxRate, 0, 5.0, 1.0).toFixed(2)
+    );
+    const mergedItemWeights = cloneItemWeights(
+      roomSettings.itemWeights || this.settings.itemWeights
+    );
 
     const mergedSettings = {
       ...this.settings,
+      aiCopsEnabled: roomAiCops,
+      playerRole: localRole,
+      copVehicleId: localCopVehicleId,
       characterMode: allowMode ? this.settings.characterMode : rules.universalCharacterMode || 'car_driver',
       vehicleId: allowCar ? this.settings.vehicleId : rules.universalVehicleId || 'sedan',
       speedMult: lockStats ? rules.universalSpeedMult ?? 1.0 : this.settings.speedMult,
@@ -2020,9 +3859,11 @@ class SmashyKartApp {
       copIntensity: roomSettings.copIntensity ?? this.settings.copIntensity,
       startStars: roomSettings.startStars ?? this.settings.startStars,
       trafficDensity: roomSettings.trafficDensity ?? this.settings.trafficDensity,
-      itemBoxDensity: roomSettings.itemBoxDensity ?? this.settings.itemBoxDensity,
+      itemBoxDensity: mergedItemBoxDensity,
+      sugarBoxRate: mergedSugarBoxRate,
       gravityMult: roomSettings.gravityMult ?? this.settings.gravityMult,
       enabledItems: roomSettings.enabledItems || this.settings.enabledItems,
+      itemWeights: mergedItemWeights,
       worldSeed: msg.seed,
       playerId: this.net.playerId || 'local',
       avatarId: !allowPhotos
@@ -2038,17 +3879,13 @@ class SmashyKartApp {
       this.renderer.registerPhotoTexture(`net_${this.net.playerId}`, myPerson.dataUrl);
     }
 
-    const players = (msg.players || []).map((p, idx) => ({
-      ...p,
-      avatarId: p.avatarId || `net_${p.id}`,
-      spawnIndex: Number.isFinite(p.spawnIndex) ? p.spawnIndex : idx,
-    }));
-    const meInRoster = players.find((p) => p.id === this.net.playerId);
     if (meInRoster) mergedSettings.spawnIndex = meInRoster.spawnIndex;
 
     this.world.reset(msg.seed, mergedSettings.biome, {
       itemBoxDensity: mergedSettings.itemBoxDensity,
+      sugarBoxRate: mergedSettings.sugarBoxRate,
     });
+    this.abilities.updateSettings(mergedSettings);
     this._syncAllPhotoTextures();
     this.sim.resetRun(msg.seed, mergedSettings, players);
 
@@ -2061,27 +3898,34 @@ class SmashyKartApp {
       survivalTime: 0,
     }));
 
-    document.getElementById('home-screen').classList.add('hidden');
-    document.getElementById('lobby-modal').classList.add('hidden');
-    document.getElementById('gameover-modal').classList.add('hidden');
-    document.getElementById('spectator-bar').classList.add('hidden');
-    document.getElementById('touch-controls').classList.remove('hidden');
-    document.getElementById('hud').classList.remove('hidden');
-    document.getElementById('survivor-strip').classList.add('hidden');
+    document.getElementById('home-screen')?.classList.add('hidden');
+    document.getElementById('lobby-modal')?.classList.add('hidden');
+    document.getElementById('gameover-modal')?.classList.add('hidden');
+    document.getElementById('settings-modal')?.classList.add('hidden');
+    document.getElementById('spectator-bar')?.classList.add('hidden');
+    document.getElementById('hud')?.classList.remove('hidden');
+    document.getElementById('survivor-strip')?.classList.add('hidden');
 
     this.countdownLeft = msg.countdownSec || 3.0;
     this.mode = 'countdown';
+    this._applyHudLayout();
   }
 
   _exitToMainMenu() {
+    if (this.editingHudLayout) {
+      this.editingHudLayout = false;
+      document.body.classList.remove('editing-hud-layout');
+      document.getElementById('hud-layout-editor')?.classList.add('hidden');
+    }
     if (this.net.roomCode) {
       this.net.leaveRoom();
       window.history.replaceState({}, '', window.location.pathname);
     }
     this._startAttractDemo();
-    document.getElementById('home-screen').classList.remove('hidden');
-    document.getElementById('lobby-modal').classList.add('hidden');
-    document.getElementById('gameover-modal').classList.add('hidden');
+    document.getElementById('home-screen')?.classList.remove('hidden');
+    document.getElementById('lobby-modal')?.classList.add('hidden');
+    document.getElementById('gameover-modal')?.classList.add('hidden');
+    document.getElementById('settings-modal')?.classList.add('hidden');
     this._refreshAllUiFromSettings();
   }
 
@@ -2091,10 +3935,25 @@ class SmashyKartApp {
     const dt = Math.min(0.05, Math.max(0.001, rawDt));
     this._elapsedTime += dt;
 
+    // Rolling FPS counter readout
+    if (rawDt > 0 && rawDt < 1.0) {
+      this._fpsFrames += 1;
+      this._fpsAccum += rawDt;
+      if (this._fpsAccum >= 0.35) {
+        this._currentFps = Math.min(240, Math.max(1, Math.round(this._fpsFrames / this._fpsAccum)));
+        this._fpsFrames = 0;
+        this._fpsAccum = 0;
+        if (this.settings.showFps) {
+          const fpsEl = document.getElementById('hud-fps');
+          if (fpsEl) fpsEl.textContent = `${this._currentFps} FPS`;
+        }
+      }
+    }
+
     if (this.toastTimer > 0) {
       this.toastTimer -= dt;
       if (this.toastTimer <= 0) {
-        document.getElementById('chaos-toast').classList.add('hidden');
+        document.getElementById('chaos-toast')?.classList.add('hidden');
       }
     }
 
@@ -2110,28 +3969,55 @@ class SmashyKartApp {
 
   _stepSimulation(dt, nowMs) {
     if (this.mode === 'attract') {
-      // Autonomous AI driver weaving through downtown behind menus!
+      // Autonomous showcase getaway chase or playable Police Heli/Tank patrol!
       this._attractSteerPhase += dt;
       const lp = this.sim.localPlayer;
       if (!lp || !lp.alive) {
         this._respawnAttractHero();
       } else {
+        const aiCopsOn = this.settings.aiCopsEnabled !== false;
+        if (aiCopsOn) {
+          this.sim.wantedStars = Math.max(2, this.sim.wantedStars || 2);
+          lp.stars = this.sim.wantedStars;
+        } else {
+          this.sim.cops.length = 0;
+        }
+        // Ensure auto-acceleration drives the showcase car even if user unchecked Auto-Accelerate for manual play!
+        const prevAuto = this.sim.settings.autoAccelerate;
+        this.sim.settings.autoAccelerate = true;
         const wave = Math.sin(this._attractSteerPhase * 0.9) + Math.cos(this._attractSteerPhase * 2.1) * 0.5;
-        const autoUse = Boolean(lp.items?.heldItem && Math.random() < dt * 0.8);
+        const autoUse =
+          lp.playerRole === 'cop' && (lp.copVehicleId === 'cop_heli' || lp.copVehicleId === 'cop_tank')
+            ? Boolean((lp.copMissileCooldown || 0) <= 0 && Math.random() < dt * 0.28)
+            : Boolean(lp.items?.heldItem && Math.random() < dt * 0.8);
         const events = this.sim.update(
           dt,
           {
             left: wave > 0.45,
             right: wave < -0.45,
             brake: false,
+            gas: true,
             useItem: autoUse,
             horn: false,
             steerAxis: null,
           },
           this._elapsedTime
         );
+        this.sim.settings.autoAccelerate = prevAuto;
+        if (aiCopsOn && lp.playerRole !== 'cop') {
+          const activeCops = this.sim.cops.filter((c) => !c.wrecked).length;
+          if (activeCops < 2 && typeof this.sim._spawnCop === 'function') {
+            this.sim._spawnCop(lp);
+          }
+        }
         this._processVisualEventsOnly(events);
       }
+      return;
+    }
+
+    if (this.editingHudLayout && this.mode === 'playing_solo') {
+      this.sound.updateLoopSounds(0, false, 1, false, true);
+      this._updateHud();
       return;
     }
 
@@ -2179,7 +4065,7 @@ class SmashyKartApp {
       const lp = this.sim.localPlayer;
       if (lp) {
         // Tire skid ribbons & damage smoke
-        if (lp.alive && lp.drifting && lp.grounded && lp.characterMode !== 'runner') {
+        if (lp.alive && lp.drifting && lp.grounded && !lp.flying && lp.characterMode !== 'runner') {
           this.renderer.addSkidMark(lp.prevX, lp.prevZ, lp.x, lp.z, 0.48 * (lp.scale || 1), 0.45);
           if (Math.random() < 0.45) {
             this.renderer.spawnSmoke(lp.x, lp.y + 0.25, lp.z, '#e2e8f0', 1, 0.55);
@@ -2191,10 +4077,19 @@ class SmashyKartApp {
         }
 
         const speedRatio = Math.min(1.3, (lp.speed || 0) / Math.max(20, lp.maxSpeed || 45));
+        const aiCopsActive = (this.sim.settings?.aiCopsEnabled ?? this.settings.aiCopsEnabled) !== false;
+        const anyHumanCopAlive =
+          Boolean(lp.alive && lp.playerRole === 'cop') ||
+          this.sim.remotePlayers.some((rp) => rp && rp.alive !== false && rp.playerRole === 'cop');
+        const sirenStars = aiCopsActive
+          ? (this.sim.wantedStars || 1)
+          : anyHumanCopAlive
+            ? Math.max(1, this.sim.wantedStars || 1)
+            : 0;
         this.sound.updateLoopSounds(
           lp.alive ? speedRatio : 0,
           Boolean(lp.alive && lp.drifting),
-          this.sim.wantedStars,
+          sirenStars,
           Boolean(lp.alive && lp.starActive),
           false
         );
@@ -2224,19 +4119,23 @@ class SmashyKartApp {
       case 'smash': {
         this.renderer.spawnDebris(ev.x, ev.y || 0.8, ev.z, ev.color || '#cbd5e1', 8, 15, 0.44);
         this.cameraShake = Math.max(this.cameraShake, Math.min(0.65, (ev.intensity || 0.5) * 0.45));
-        this.sound.playEvent((ev.intensity || 0.5) > 0.9 ? 'crash' : 'smash', ev.intensity || 0.7);
+        const bigSmash = (ev.intensity || 0.5) > 0.9;
+        this.sound.playEvent(bigSmash ? 'crash' : 'smash', ev.intensity || 0.7);
+        if (bigSmash) this._triggerHaptic(18);
         break;
       }
       case 'explosion': {
         this.renderer.spawnExplosionVisual(ev.x, ev.y || 0.8, ev.z, ev.radius || 9);
         this.cameraShake = Math.max(this.cameraShake, 1.0);
         this.sound.playEvent('explosion', ev.intensity || 1.1);
+        this._triggerHaptic([28, 30, 42]);
         break;
       }
       case 'pickup_box': {
         const boxCol = ev.sugar ? '#f472b6' : '#38bdf8';
         this.renderer.spawnDebris(ev.x, (ev.y || 1) + 0.8, ev.z, boxCol, 11, 13, 0.34);
         this.sound.playEvent('pickup_box', ev.sugar ? 1.15 : 1.0);
+        if (ev.sugar) this._triggerHaptic(16);
         break;
       }
       case 'roulette_tick': {
@@ -2254,17 +4153,28 @@ class SmashyKartApp {
         const sparkCol = (ev.tier || 1) >= 2 ? '#f97316' : '#38bdf8';
         this.renderer.spawnDebris(ev.x, (ev.y || 0.4) + 0.35, ev.z, sparkCol, 8, 12, 0.3);
         this.sound.playEvent('boost', 0.65);
+        this._triggerHaptic(14);
         break;
       }
       case 'item_used': {
         const id = ev.abilityId;
-        if (id === 'sugar_rush') {
+        if (id === 'cop_missile') {
+          this.cameraShake = Math.max(this.cameraShake, ev.sourceUnit === 'tank' ? 0.55 : 0.32);
+          this.sound.playEvent('item', 1.1);
+          this._triggerHaptic([18, 20, 26]);
+        } else if (id === 'cop_siren_surge' || id === 'cop_surge') {
+          this.sound.playEvent('boost', 1.0);
+          this._triggerHaptic(16);
+        } else if (id === 'sugar_rush') {
           this.cameraShake = Math.max(this.cameraShake, 0.42);
           this.sound.playEvent('boost', 1.25);
+          this._triggerHaptic([20, 25, 25]);
         } else if (id === 'triple_boost' || id === 'star_power' || id === 'mega_giant') {
           this.sound.playEvent('boost', 1.0);
+          this._triggerHaptic(18);
         } else {
           this.sound.playEvent('item', 1.0);
+          this._triggerHaptic(12);
         }
         if (this.net.roomCode && ev.netEvent && ev.playerId === (this.sim.localPlayer?.id || 'local')) {
           this.net.sendAbilityEvent(ev.netEvent);
@@ -2275,12 +4185,14 @@ class SmashyKartApp {
         this.renderer.spawnExplosionVisual(ev.x, ev.y || 0.9, ev.z, 5.5);
         this.cameraShake = Math.max(this.cameraShake, 0.55);
         this.sound.playEvent('crash', 0.95);
+        this._triggerHaptic([22, 24, 32]);
         break;
       }
       case 'pvp_slam': {
         this.renderer.spawnDebris(ev.x, ev.y || 0.8, ev.z, '#facc15', 10, 16, 0.42);
         this.cameraShake = Math.max(this.cameraShake, 0.65);
         this.sound.playEvent('crash', 0.85);
+        this._triggerHaptic([24, 28, 34]);
         if (this.net.roomCode && Array.isArray(ev.impulses)) {
           for (const imp of ev.impulses) {
             this.net.sendPvpBump(imp);
@@ -2289,26 +4201,34 @@ class SmashyKartApp {
         break;
       }
       case 'star_up': {
+        const aiCopsActive = (this.sim.settings?.aiCopsEnabled ?? this.settings.aiCopsEnabled) !== false;
+        if (!aiCopsActive || this.sim.localPlayer?.playerRole === 'cop') break;
         this._showChaosToast(`⭐ ${ev.stars}★ ${ev.label || 'Backup Inbound'}`);
         break;
       }
       case 'horn': {
         this.sound.playEvent(ev.superHorn ? 'super_horn' : 'horn', ev.intensity || 1.0);
+        if (ev.superHorn) this._triggerHaptic(24);
         break;
       }
       case 'water_splash': {
         this.renderer.spawnDebris(ev.x, 0.2, ev.z, '#38bdf8', 18, 16, 0.48);
         this.sound.playEvent('water_splash', 1.0);
-        if (ev.eliminated) this._onLocalPlayerEliminated('drowned', ev.killerName);
+        if (ev.eliminated) {
+          this._triggerHaptic([45, 40, 75]);
+          this._onLocalPlayerEliminated('drowned', ev.killerName);
+        }
         break;
       }
       case 'busted': {
         this.sound.playEvent('busted', 1.0);
+        this._triggerHaptic([45, 40, 75]);
         this._onLocalPlayerEliminated('busted', ev.killerName);
         break;
       }
       case 'wrecked': {
         this.sound.playEvent('busted', 1.0);
+        this._triggerHaptic([55, 40, 85]);
         this._onLocalPlayerEliminated('wrecked', ev.killerName);
         break;
       }
@@ -2357,7 +4277,7 @@ class SmashyKartApp {
     }, 650);
   }
 
-  _showGameOverModal({ isParty, winnerId, winnerName, standings, reason }) {
+  _showGameOverModal({ isParty, winnerId, winnerName, winnerTeam, standings, reason }) {
     this.mode = 'gameover';
     this.sound.updateLoopSounds(0, false, 1, false, true);
     document.getElementById('spectator-bar').classList.add('hidden');
@@ -2384,19 +4304,35 @@ class SmashyKartApp {
 
     if (isParty && Array.isArray(standings) && standings.length > 0) {
       const iWon = winnerId && winnerId === this.net.playerId;
-      badge.textContent = iWon ? '👑 CHAMPION!' : 'PARTY MATCH OVER';
-      title.textContent = winnerName ? `${winnerName} WINS!` : 'FINISH!';
-      reasonEl.textContent = iWon
-        ? 'You outlasted everyone in the lobby!'
-        : `${winnerName || 'Winner'} lasted the longest!`;
+      const myRole = lp?.playerRole || this.settings.playerRole || 'runner';
+      if (winnerTeam === 'cop') {
+        badge.textContent = myRole === 'cop' ? '🚔 PRECINCT VICTORY!' : '🚨 BUSTED BY POLICE!';
+        title.textContent = '🚔 POLICE TEAM WINS!';
+        reasonEl.textContent = winnerName
+          ? `Top Officer: ${winnerName} — All Getaway Runners eliminated!`
+          : 'All Getaway Runners were busted by the Police Team!';
+      } else if (winnerTeam === 'runner') {
+        badge.textContent = iWon ? '👑 GETAWAY CHAMPION!' : '🏎️ RUNNERS ESCAPED!';
+        title.textContent = winnerName ? `${winnerName} WINS!` : '🏎️ GETAWAY TEAM WINS!';
+        reasonEl.textContent = iWon
+          ? 'You outlasted the entire Police pursuit!'
+          : `${winnerName || 'Getaway Runner'} escaped the Police pursuit!`;
+      } else {
+        badge.textContent = iWon ? '👑 CHAMPION!' : 'PARTY MATCH OVER';
+        title.textContent = winnerName ? `${winnerName} WINS!` : 'FINISH!';
+        reasonEl.textContent = iWon
+          ? 'You outlasted everyone in the lobby!'
+          : `${winnerName || 'Winner'} lasted the longest!`;
+      }
 
       standingsWrap.classList.remove('hidden');
       standingsList.innerHTML = '';
       for (const row of standings) {
         const div = document.createElement('div');
         div.className = 'standing-row';
+        const roleIcon = row.playerRole === 'cop' ? '🚔 ' : '';
         div.innerHTML = `
-          <span>${row.rank === 1 ? '👑' : `#${row.rank}`} ${this._escapeHtml(row.name)}</span>
+          <span>${row.rank === 1 ? '👑' : `#${row.rank}`} ${roleIcon}${this._escapeHtml(row.name)}</span>
           <span>${Number(row.survivalTime || 0).toFixed(1)}s · ${row.score || 0} pts</span>
         `;
         standingsList.appendChild(div);
@@ -2420,11 +4356,26 @@ class SmashyKartApp {
     const lp = this.sim.localPlayer;
     if (!lp) return;
 
-    // Wanted stars
+    // Wanted stars (0 stars lit when AI Police Chase is turned OFF!)
+    const aiCopsActive = this.sim.settings?.aiCopsEnabled !== false;
+    const shownStars = aiCopsActive || lp.playerRole === 'cop' ? this.sim.wantedStars : 0;
     const stars = document.querySelectorAll('#wanted-stars .star');
-    stars.forEach((el, idx) => el.classList.toggle('active', idx < this.sim.wantedStars));
+    stars.forEach((el, idx) => el.classList.toggle('active', idx < shownStars));
 
-    // Health bar
+    // Health bar + dynamic vehicle role label (HELI, TANK, COP, or CAR)
+    const hpLbl = document.getElementById('hud-hp-label') || document.querySelector('.hp-label');
+    if (hpLbl) {
+      if (lp.playerRole === 'cop') {
+        hpLbl.textContent =
+          lp.copVehicleId === 'cop_heli'
+            ? 'HELI'
+            : lp.copVehicleId === 'cop_tank'
+              ? 'TANK'
+              : 'COP';
+      } else {
+        hpLbl.textContent = 'CAR';
+      }
+    }
     const hpPct = Math.max(0, Math.min(100, (lp.hp / Math.max(1, lp.maxHp)) * 100));
     const hpFill = document.getElementById('hp-fill');
     hpFill.style.width = `${hpPct}%`;
@@ -2434,47 +4385,83 @@ class SmashyKartApp {
     const bustedProg = lp.bustedProgress || 0;
     const bustedAlert = document.getElementById('busted-alert');
     const vignette = document.getElementById('danger-vignette');
+    const fxEnabled = this.settings.screenEffects !== false;
     if (lp.alive && bustedProg > 0.08) {
-      bustedAlert.classList.remove('hidden');
-      vignette.classList.remove('hidden');
-      document.getElementById('busted-fill').style.width = `${Math.round(bustedProg * 100)}%`;
+      bustedAlert?.classList.remove('hidden');
+      vignette?.classList.toggle('hidden', !fxEnabled);
+      const bFill = document.getElementById('busted-fill');
+      if (bFill) bFill.style.width = `${Math.round(bustedProg * 100)}%`;
     } else {
-      bustedAlert.classList.add('hidden');
-      vignette.classList.add('hidden');
+      bustedAlert?.classList.add('hidden');
+      vignette?.classList.add('hidden');
     }
 
-    // Side-Only Mario Kart Mystery Box Ability Button
+    // Side-Only Mario Kart Mystery Box / Police Weapon Button
     const items = lp.items || {};
     const useBtn = document.getElementById('btn-use-item');
     const useIcon = document.getElementById('btn-use-item-icon');
     const useLabel = document.getElementById('btn-use-item-label');
     const useCharges = document.getElementById('btn-use-item-charges');
+    const isCopMissileUnit =
+      lp.playerRole === 'cop' && (lp.copVehicleId === 'cop_heli' || lp.copVehicleId === 'cop_tank');
 
-    if (items.rouletteTimer > 0) {
-      const disp = ABILITIES.find((a) => a.id === items.rouletteDisplayId) || ABILITIES[0];
-      useBtn.classList.remove('disabled', 'sugar-glow');
-      useBtn.classList.add('spinning');
-      useIcon.textContent = disp.icon;
-      useLabel.textContent = 'SPIN...';
-      useCharges.classList.add('hidden');
-    } else if (items.heldItem) {
-      const held = ABILITIES.find((a) => a.id === items.heldItem) || ABILITIES[0];
-      useBtn.classList.remove('disabled', 'spinning');
-      useBtn.classList.toggle('sugar-glow', items.heldItem === 'sugar_rush');
-      useIcon.textContent = held.icon;
-      useLabel.textContent = held.shortName;
-      if (items.charges > 1) {
-        useCharges.textContent = `x${items.charges}`;
-        useCharges.classList.remove('hidden');
+    if (useBtn && useIcon && useLabel && useCharges) {
+      if (isCopMissileUnit) {
+        const cd = Math.max(0, Number(lp.copMissileCooldown) || 0);
+        useBtn.classList.remove('spinning', 'sugar-glow');
+        useCharges.classList.add('hidden');
+        if (cd <= 0) {
+          useBtn.classList.remove('disabled');
+          useBtn.classList.add('cop-weapon-ready');
+          useIcon.textContent = '🎯';
+          useLabel.textContent = 'MISSILE';
+        } else {
+          useBtn.classList.add('disabled');
+          useBtn.classList.remove('cop-weapon-ready', 'locked-pop');
+          useIcon.textContent = '⏳';
+          useLabel.textContent = `${cd.toFixed(1)}s`;
+        }
+      } else if (items.rouletteTimer > 0) {
+        const disp = ABILITIES.find((a) => a.id === items.rouletteDisplayId) || ABILITIES[0];
+        useBtn.classList.remove('disabled', 'sugar-glow', 'cop-weapon-ready');
+        useBtn.classList.add('spinning');
+        useIcon.textContent = disp.icon;
+        useLabel.textContent = 'SPIN...';
+        useCharges.classList.add('hidden');
+      } else if (items.heldItem) {
+        const held = ABILITIES.find((a) => a.id === items.heldItem) || ABILITIES[0];
+        useBtn.classList.remove('disabled', 'spinning', 'cop-weapon-ready');
+        useBtn.classList.toggle('sugar-glow', items.heldItem === 'sugar_rush');
+        useIcon.textContent = held.icon;
+        useLabel.textContent = held.shortName;
+        if (items.charges > 1) {
+          useCharges.textContent = `x${items.charges}`;
+          useCharges.classList.remove('hidden');
+        } else {
+          useCharges.classList.add('hidden');
+        }
+      } else if (lp.playerRole === 'cop') {
+        const cd = Math.max(0, Number(lp.copMissileCooldown) || 0);
+        useBtn.classList.remove('spinning', 'sugar-glow');
+        useCharges.classList.add('hidden');
+        if (cd <= 0) {
+          useBtn.classList.remove('disabled');
+          useBtn.classList.add('cop-weapon-ready');
+          useIcon.textContent = '🚨';
+          useLabel.textContent = 'SURGE';
+        } else {
+          useBtn.classList.add('disabled');
+          useBtn.classList.remove('cop-weapon-ready', 'locked-pop');
+          useIcon.textContent = '⏳';
+          useLabel.textContent = `${cd.toFixed(1)}s`;
+        }
       } else {
+        useBtn.classList.add('disabled');
+        useBtn.classList.remove('spinning', 'sugar-glow', 'locked-pop', 'cop-weapon-ready');
+        useIcon.textContent = '?';
+        useLabel.textContent = 'ITEM';
         useCharges.classList.add('hidden');
       }
-    } else {
-      useBtn.classList.add('disabled');
-      useBtn.classList.remove('spinning', 'sugar-glow', 'locked-pop');
-      useIcon.textContent = '?';
-      useLabel.textContent = 'ITEM';
-      useCharges.classList.add('hidden');
     }
 
     // Active buffs chips (under .hud-left-stack so top-center is 100% open!)
@@ -2495,29 +4482,43 @@ class SmashyKartApp {
     if (items.shrunkTimer > 0) {
       chips.push({ text: '⚡ TINY', cls: 'buff-chip' });
     }
-    buffsEl.innerHTML = chips.map((c) => `<span class="${c.cls}">${c.text}</span>`).join('');
+    if (buffsEl) {
+      buffsEl.innerHTML = chips.map((c) => `<span class="${c.cls}">${c.text}</span>`).join('');
+    }
 
-    // Speedometer + Drift Spark Gauge
+    // Speedometer + MPH / KM/H + Drift Spark Gauge
     const speedoEl = document.getElementById('hud-speedo');
     const showSpeedo = this.settings.showSpeedometer !== false;
-    speedoEl.classList.toggle('hidden', !showSpeedo);
-    if (showSpeedo) {
-      const mph = Math.round((lp.speed || 0) * 2.2);
-      document.getElementById('hud-speedo-val').textContent = String(mph);
-      const sugarOn = Boolean(lp.sugarActive || items.sugarTimer > 0);
-      speedoEl.classList.toggle('sugar-speed', sugarOn);
+    if (speedoEl) {
+      speedoEl.classList.toggle('hidden', !showSpeedo);
+      if (showSpeedo) {
+        const isKmh = this.settings.speedUnit === 'kmh';
+        const speedVal = Math.round((lp.speed || 0) * (isKmh ? 3.54 : 2.2));
+        const valEl = document.getElementById('hud-speedo-val');
+        if (valEl) valEl.textContent = String(speedVal);
+        const unitEl = speedoEl.querySelector('#hud-speedo-unit, .speedo-unit');
+        if (unitEl) unitEl.textContent = isKmh ? 'KM/H' : 'MPH';
+        const sugarOn = Boolean(lp.sugarActive || items.sugarTimer > 0);
+        speedoEl.classList.toggle('sugar-speed', sugarOn);
 
-      const sparkEl = document.getElementById('hud-drift-spark');
-      const sparkTier = lp.driftSparkTier || 0;
-      if (lp.alive && sparkTier > 0) {
-        sparkEl.classList.remove('hidden');
-        sparkEl.classList.toggle('tier-1', sparkTier === 1);
-        sparkEl.classList.toggle('tier-2', sparkTier >= 2);
-      } else {
-        sparkEl.classList.add('hidden');
-        sparkEl.classList.remove('tier-1', 'tier-2');
+        const sparkEl = document.getElementById('hud-drift-spark');
+        const sparkTier = lp.driftSparkTier || 0;
+        if (sparkEl) {
+          if (lp.alive && sparkTier > 0) {
+            sparkEl.classList.remove('hidden');
+            sparkEl.classList.toggle('tier-1', sparkTier === 1);
+            sparkEl.classList.toggle('tier-2', sparkTier >= 2);
+          } else {
+            sparkEl.classList.add('hidden');
+            sparkEl.classList.remove('tier-1', 'tier-2');
+          }
+        }
       }
     }
+
+    // Minimap & FPS badge visibility
+    document.getElementById('hud-minimap')?.classList.toggle('hidden', this.settings.showMinimap === false);
+    document.getElementById('hud-fps')?.classList.toggle('hidden', !this.settings.showFps);
 
     // Screen-Edge Speed Streaks (3x Sugar Rush OR POV Turbo/Star)
     const speedLinesEl = document.getElementById('speed-lines');
@@ -2525,13 +4526,17 @@ class SmashyKartApp {
     const povHyper =
       this.settings.cameraMode === 'pov' &&
       Boolean(lp.boostActive || items.boostTimer > 0 || lp.starActive || items.starTimer > 0);
-    const showStreaks = Boolean(lp.alive && this.mode !== 'spectating' && (sugarActive || povHyper));
-    speedLinesEl.classList.toggle('hidden', !showStreaks);
-    speedLinesEl.classList.toggle('sugar-mode', sugarActive);
+    const showStreaks = Boolean(
+      fxEnabled && lp.alive && this.mode !== 'spectating' && (sugarActive || povHyper)
+    );
+    speedLinesEl?.classList.toggle('hidden', !showStreaks);
+    speedLinesEl?.classList.toggle('sugar-mode', sugarActive);
 
     // Clock & Score
-    document.getElementById('hud-timer').textContent = formatClock(lp.survivalTime || 0);
-    document.getElementById('hud-score').textContent = String(Math.round(lp.score || 0));
+    const timerEl = document.getElementById('hud-timer');
+    if (timerEl) timerEl.textContent = formatClock(lp.survivalTime || 0);
+    const scoreEl = document.getElementById('hud-score');
+    if (scoreEl) scoreEl.textContent = String(Math.round(lp.score || 0));
   }
 
   _updateSurvivorStrip() {
@@ -2547,6 +4552,7 @@ class SmashyKartApp {
       combined.push({
         id: lp.id,
         name: lp.name || 'You',
+        playerRole: lp.playerRole || 'runner',
         alive: lp.alive !== false,
         survivalTime: lp.survivalTime || 0,
         avatarDataUrl: this._getSelectedPerson()?.dataUrl || '',
@@ -2556,6 +4562,7 @@ class SmashyKartApp {
       combined.push({
         id: rp.id,
         name: rp.name || 'Friend',
+        playerRole: rp.playerRole || 'runner',
         alive: rp.alive !== false,
         survivalTime: rp.survivalTime || 0,
         avatarDataUrl: this.remoteAvatarCache.get(rp.avatarId || `net_${rp.id}`) || '',
@@ -2575,10 +4582,11 @@ class SmashyKartApp {
       visiblePills
         .map((p) => {
           const safeUrl = this._safeImgSrc(p.avatarDataUrl);
+          const rolePrefix = p.playerRole === 'cop' ? '🚔 ' : '';
           return `
       <div class="survivor-pill ${p.alive ? '' : 'out'}">
         ${safeUrl ? `<img src="${safeUrl}" alt="" />` : ''}
-        <span>${this._escapeHtml(p.name)} · ${p.survivalTime.toFixed(0)}s</span>
+        <span>${rolePrefix}${this._escapeHtml(p.name)} · ${p.survivalTime.toFixed(0)}s</span>
       </div>`;
         })
         .join('');
@@ -2606,12 +4614,13 @@ class SmashyKartApp {
       }
     }
 
+    const shakeMult = clampNum(this.settings.cameraShakeMult, 0, 1.5, 1.0);
     this.renderer.setCamera(
       focusEntity,
-      this.mode === 'attract' ? 'smashy' : this.settings.cameraMode,
-      this.cameraShake,
+      this.mode === 'attract' ? 'attract' : this.settings.cameraMode,
+      this.cameraShake * shakeMult,
       dt,
-      { povFov: this.settings.povFov || 76 }
+      { povFov: this.settings.povFov || 78 }
     );
 
     const activeProjectiles = this.sim.getProjectiles();
@@ -2636,7 +4645,182 @@ class SmashyKartApp {
       this._elapsedTime
     );
 
+    this._renderMinimap(focusEntity);
     this._renderFloatingNametags(focusEntity);
+  }
+
+  _renderMinimap(focusEntity) {
+    if (this.settings.showMinimap === false) return;
+    if (this.mode === 'attract' && !this.editingHudLayout) return;
+    const canvas = document.getElementById('hud-minimap');
+    if (!canvas || canvas.classList.contains('hidden')) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || !focusEntity) return;
+
+    const w = canvas.width || 112;
+    const h = canvas.height || 112;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const radius = Math.min(cx, cy) - 3;
+    const radarRange = 175;
+    const scale = radius / radarRange;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 1. Circular clip + dark radar surface
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.fillStyle = 'rgba(11, 17, 29, 0.88)';
+    ctx.fillRect(0, 0, w, h);
+
+    const fx = focusEntity.x || 0;
+    const fz = focusEntity.z || 0;
+    const yaw = focusEntity.angle || 0;
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+
+    // 2. World-space rotated roads & rivers (ahead = UP on radar!)
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(yaw);
+    ctx.scale(-scale, -scale);
+    ctx.translate(-fx, -fz);
+
+    const chunkSize = WORLD_CONFIG.CHUNK_SIZE || 60;
+    const minGX = Math.floor((fx - radarRange) / chunkSize);
+    const maxGX = Math.ceil((fx + radarRange) / chunkSize);
+    const minGZ = Math.floor((fz - radarRange) / chunkSize);
+    const maxGZ = Math.ceil((fz + radarRange) / chunkSize);
+
+    // River water tint bands
+    ctx.fillStyle = 'rgba(34, 211, 238, 0.42)';
+    for (let cz = minGZ - 1; cz <= maxGZ + 1; cz++) {
+      if (this.world?.isRiverChunkZ?.(cz)) {
+        const rz = cz * chunkSize + chunkSize * 0.5;
+        ctx.fillRect(fx - radarRange * 1.4, rz - 13.5, radarRange * 2.8, 27);
+      }
+    }
+
+    // NS & EW street grid
+    ctx.strokeStyle = 'rgba(100, 116, 139, 0.48)';
+    for (let gx = minGX; gx <= maxGX; gx++) {
+      ctx.lineWidth = this.world?.isHighwayGrid?.(gx) ? 20 : 12;
+      ctx.beginPath();
+      ctx.moveTo(gx * chunkSize, fz - radarRange * 1.4);
+      ctx.lineTo(gx * chunkSize, fz + radarRange * 1.4);
+      ctx.stroke();
+    }
+    for (let gz = minGZ; gz <= maxGZ; gz++) {
+      ctx.lineWidth = this.world?.isHighwayGrid?.(gz) ? 20 : 12;
+      ctx.beginPath();
+      ctx.moveTo(fx - radarRange * 1.4, gz * chunkSize);
+      ctx.lineTo(fx + radarRange * 1.4, gz * chunkSize);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Inner range ring
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.55, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const projectDot = (wx, wz, clampToRim = false) => {
+      const dx = wx - fx;
+      const dz = wz - fz;
+      const fwd = dx * sinY + dz * cosY;
+      const right = -dx * cosY + dz * sinY;
+      let px = right * scale;
+      let py = -fwd * scale;
+      const d = Math.hypot(px, py);
+      const maxR = radius - 4.5;
+      if (d > maxR) {
+        if (!clampToRim) return null;
+        px = (px / d) * maxR;
+        py = (py / d) * maxR;
+      }
+      return { x: cx + px, y: cy + py };
+    };
+
+    // 3. Nearby Mystery Boxes & Pink Sugar Rush Boxes
+    const nearbyChunks = this.world?._getNearbyChunks?.(fx, fz, 2) || [];
+    for (let c = 0; c < nearbyChunks.length; c++) {
+      const boxes = nearbyChunks[c].itemBoxes || [];
+      for (let i = 0; i < boxes.length; i++) {
+        const box = boxes[i];
+        if (box.collected) continue;
+        const pt = projectDot(box.x, box.z, false);
+        if (!pt) continue;
+        const isSugar = box.boxType === 'sugar';
+        ctx.fillStyle = isSugar ? '#f472b6' : 'rgba(56, 189, 248, 0.72)';
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, isSugar ? 2.5 : 1.7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // 4. Pulsing Red/Blue Police Dots
+    const sirenPhase = Math.floor(this._elapsedTime * 9);
+    for (let i = 0; i < this.sim.cops.length; i++) {
+      const cop = this.sim.cops[i];
+      if (!cop || cop.wrecked) continue;
+      if (Math.hypot(cop.x - fx, cop.z - fz) > 250) continue;
+      const pt = projectDot(cop.x, cop.z, true);
+      if (!pt) continue;
+      const isRed = (sirenPhase + i) % 2 === 0;
+      ctx.fillStyle = isRed ? '#ef4444' : '#3b82f6';
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, cop.type === 'tank' || cop.type === 'heli' ? 3.5 : 2.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 5. Party Friends Dots (always shown on radar rim even far across the 4800x4800 map!)
+    for (let i = 0; i < this.sim.remotePlayers.length; i++) {
+      const rp = this.sim.remotePlayers[i];
+      if (!rp || rp.alive === false) continue;
+      const pt = projectDot(rp.x, rp.z, true);
+      if (!pt) continue;
+      const isRemoteCop = rp.playerRole === 'cop';
+      const isRedStrobe = (sirenPhase + i) % 2 === 0;
+      ctx.fillStyle = isRemoteCop
+        ? (isRedStrobe ? '#ef4444' : '#38bdf8')
+        : (/^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '') ? rp.primaryColor : '#facc15');
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = isRemoteCop ? 1.5 : 1.2;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, isRemoteCop ? 3.9 : 3.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // 6. Player Center Heading Chevron (pointing UP = straight ahead)
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.fillStyle = '#facc15';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(4.8, 5);
+    ctx.lineTo(0, 2.6);
+    ctx.lineTo(-4.8, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+
+    // Crisp outer bezel
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.72)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   _renderFloatingNametags(focusEntity) {
@@ -2670,15 +4854,19 @@ class SmashyKartApp {
         pad
       );
       const rosterPlayer = this.net.roomState?.players?.find((p) => p.id === rp.id);
-      const username = rp.name && rp.name !== 'Friend' ? rp.name : rosterPlayer?.name || rp.name || 'Player';
-      const borderCol = /^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '')
-        ? rp.primaryColor
-        : '#facc15';
+      const isRemoteCop = (rp.playerRole || rosterPlayer?.playerRole) === 'cop';
+      const rawName = rp.name && rp.name !== 'Friend' ? rp.name : rosterPlayer?.name || rp.name || 'Player';
+      const displayLabel = isRemoteCop ? `🚔 ${this._escapeHtml(rawName)}` : this._escapeHtml(rawName);
+      const borderCol = isRemoteCop
+        ? '#38bdf8'
+        : /^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '')
+          ? rp.primaryColor
+          : '#facc15';
 
       if (wp.onScreen) {
         html += `
           <div class="player-tag" style="left:${wp.x.toFixed(1)}px;top:${wp.y.toFixed(1)}px;border-color:${borderCol}">
-            <span>${this._escapeHtml(username)}</span>
+            <span>${displayLabel}</span>
           </div>
         `;
       } else {
@@ -2704,7 +4892,7 @@ class SmashyKartApp {
         html += `
           <div class="player-tag offscreen" style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;transform:translate(-${rxPct}%, -${ryPct}%);border-color:${borderCol}">
             <span class="tag-arrow" style="transform:rotate(${deg}deg)">➤</span>
-            <span>${this._escapeHtml(username)}</span>
+            <span>${displayLabel}</span>
           </div>
         `;
       }

@@ -22,13 +22,47 @@ const SHADOW_MAP_SIZE = 2048;
 const SHADOW_ORTHO_HALF = 96.0;
 const MAX_STATIC_CHUNK_CACHE = 260;
 
-// Vehicle-specific cockpit/roofline POV eye heights for tall trucks so windshields/roofs never obstruct POV!
-const POV_VEHICLE_EYE_Y = {
-  monster: 2.72,
-  van: 2.48,
-  pickup: 2.22,
-  dozer: 2.68,
+// Exported per-vehicle First-Person POV camera rigs ({ eyeY, fwdZ, basePitch }),
+// tuned with nearClip = 0.36 so every vehicle displays its sculpted 3D hood in the bottom ~18%
+// of the screen with ZERO roof or near-plane clipping lines!
+export const POV_CAMERA_RIGS = {
+  sedan: { eyeY: 2.06, fwdZ: 0.18, basePitch: -0.05 },
+  muscle: { eyeY: 2.18, fwdZ: 0.18, basePitch: -0.05 },
+  kart: { eyeY: 1.54, fwdZ: 0.16, basePitch: -0.055 },
+  supercar: { eyeY: 2.04, fwdZ: 0.18, basePitch: -0.05 },
+  monster: { eyeY: 3.04, fwdZ: 0.20, basePitch: -0.06 },
+  convertible: { eyeY: 2.02, fwdZ: 0.18, basePitch: -0.05 },
+  van: { eyeY: 2.38, fwdZ: 0.62, basePitch: -0.06 },
+  pickup: { eyeY: 2.38, fwdZ: 0.18, basePitch: -0.055 },
+  f1: { eyeY: 1.66, fwdZ: 0.16, basePitch: -0.05 },
+  mini: { eyeY: 1.92, fwdZ: 0.14, basePitch: -0.055 },
+  dozer: { eyeY: 2.74, fwdZ: 0.20, basePitch: -0.055 },
+  gold: { eyeY: 2.20, fwdZ: 0.18, basePitch: -0.05 },
+  cop_cruiser: { eyeY: 2.06, fwdZ: 0.18, basePitch: -0.05 },
+  cop_swat: { eyeY: 2.48, fwdZ: 0.38, basePitch: -0.06 },
+  cop_heli: { eyeY: 1.55, fwdZ: 0.32, basePitch: -0.20 },
+  cop_tank: { eyeY: 2.18, fwdZ: 0.35, basePitch: -0.06 },
+  photo_car: { eyeY: 2.12, fwdZ: 0.18, basePitch: -0.05 },
+  runner: { eyeY: 2.42, fwdZ: 0.28, basePitch: -0.07 },
 };
+
+function normalizeCopRigKey(copVehicleId) {
+  switch (copVehicleId) {
+    case 'cop_cruiser':
+    case 'cruiser':
+      return 'cop_cruiser';
+    case 'cop_swat':
+    case 'swat':
+      return 'cop_swat';
+    case 'cop_tank':
+    case 'tank':
+      return 'cop_tank';
+    case 'cop_heli':
+    case 'heli':
+    default:
+      return 'cop_heli';
+  }
+}
 
 function lerpAngle(a, b, t) {
   let diff = (b - a + Math.PI) % (Math.PI * 2);
@@ -949,10 +983,19 @@ export class Renderer3D {
     this.povYaw = 0;
     this.povPitch = 0;
     this.povBank = 0;
-    this.currentPovFovDeg = 76;
+    this.currentPovFovDeg = 78;
+    this.attractOrbitPhase = 0;
     this._lastCamMode = 'smashy';
     this.cameraInitialized = false;
     this.shakePhase = 0;
+
+    // Graphics quality & shadow cadence controls ('high' | 'balanced' | 'performance')
+    this.graphicsQuality = 'high';
+    this.maxDebris = 650;
+    this.maxSmoke = 420;
+    this.shadowCadence = 1;
+    this.maxDpr = 2.0;
+    this._frameCounter = 0;
 
     this.viewMatrix = mat4Identity();
     this.projMatrix = mat4Identity();
@@ -1454,10 +1497,45 @@ export class Renderer3D {
     return this.textures.has(avatarId);
   }
 
+  setGraphicsQuality(quality = 'high') {
+    const q = quality === 'performance' || quality === 'balanced' ? quality : 'high';
+    this.graphicsQuality = q;
+    if (q === 'performance') {
+      this.maxDebris = 160;
+      this.maxSmoke = 90;
+      this.shadowCadence = 0; // Skip shadow FBO pass & PCF shadow lookups for 60fps on older devices
+      this.maxDpr = 1.25;
+    } else if (q === 'balanced') {
+      this.maxDebris = 340;
+      this.maxSmoke = 220;
+      this.shadowCadence = 2; // Update shadow map every 2nd frame
+      this.maxDpr = 1.75;
+    } else {
+      this.maxDebris = 650;
+      this.maxSmoke = 420;
+      this.shadowCadence = 1; // Full-rate 2048x2048 PCF shadows
+      this.maxDpr = 2.0;
+    }
+
+    if (this.debris.length > this.maxDebris) {
+      this.debris.splice(0, this.debris.length - this.maxDebris);
+    }
+    if (this.smoke.length > this.maxSmoke) {
+      this.smoke.splice(0, this.smoke.length - this.maxSmoke);
+    }
+    if (this.canvas) {
+      this.resize(
+        this.cssWidth,
+        this.cssHeight,
+        (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1
+      );
+    }
+  }
+
   resize(width, height, dpr = (typeof window !== 'undefined' ? window.devicePixelRatio : 1) || 1) {
     this.cssWidth = Math.max(1, width || 1280);
     this.cssHeight = Math.max(1, height || 720);
-    this.dpr = clamp(dpr || 1, 1, 2);
+    this.dpr = clamp(dpr || 1, 1, this.maxDpr || 2);
 
     if (this.canvas) {
       const bw = Math.round(this.cssWidth * this.dpr);
@@ -1522,42 +1600,78 @@ export class Renderer3D {
     let desiredTargetY;
     let desiredTargetZ;
 
-    if (cameraMode === 'pov') {
-      // First-Person Point-of-View Cockpit / Runner Camera!
-      const enteringPov = !this.cameraInitialized || this._lastCamMode !== 'pov';
-      const yawBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 20.0);
-      const pitchBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 14.0);
-      const targetPitch = clamp(vy * 0.018, -0.28, 0.32);
+    const isCopPlayer = focusEntity?.playerRole === 'cop';
+    const copRigKey = isCopPlayer ? normalizeCopRigKey(focusEntity?.copVehicleId) : null;
+    const isFlyingHeli = Boolean(
+      focusEntity?.flying ||
+      (isCopPlayer && copRigKey === 'cop_heli') ||
+      focusEntity?.type === 'heli'
+    );
 
-      this.povYaw = enteringPov ? angle : lerpAngle(this.povYaw ?? angle, angle, yawBlend);
+    if (cameraMode === 'pov') {
+      // First-Person Point-of-View Cockpit / Hood / Gunship / Tank / Runner Camera!
+      const enteringPov = !this.cameraInitialized || this._lastCamMode !== 'pov';
+      const charMode = focusEntity?.characterMode || 'car_driver';
+      const rigKey = isCopPlayer
+        ? copRigKey
+        : charMode === 'runner'
+          ? 'runner'
+          : charMode === 'photo_car'
+            ? 'photo_car'
+            : focusEntity?.vehicleId || 'sedan';
+      const rig = POV_CAMERA_RIGS[rigKey] || POV_CAMERA_RIGS.sedan;
+
+      const spinExtra =
+        (focusEntity?.spinoutTimer || focusEntity?.spinOutTimer || 0) > 0
+          ? (focusEntity.spinoutTimer || focusEntity.spinOutTimer || 0) * 14.0
+          : 0;
+      const effAngle = angle + spinExtra;
+
+      const yawBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 30.0);
+      const pitchBlend = enteringPov ? 1.0 : 1.0 - Math.exp(-safeDt * 16.0);
+      const carAirPitch = isFlyingHeli
+        ? clamp(-vy * 0.012, -0.18, 0.18)
+        : fy > 0.25
+          ? clamp(-vy * 0.024, -0.38, 0.38)
+          : 0;
+      const targetPitch = -carAirPitch + clamp(vy * 0.003, -0.05, 0.05);
+
+      let nextYaw = enteringPov ? effAngle : lerpAngle(this.povYaw ?? effAngle, effAngle, yawBlend);
+      let yawLag = ((nextYaw - effAngle + Math.PI) % (Math.PI * 2));
+      if (yawLag < 0) yawLag += Math.PI * 2;
+      yawLag -= Math.PI;
+      if (Math.abs(yawLag) > 0.14) {
+        nextYaw = effAngle + Math.sign(yawLag) * 0.14;
+      }
+      this.povYaw = nextYaw;
       this.povPitch = enteringPov
         ? targetPitch
         : (this.povPitch || 0) + (targetPitch - (this.povPitch || 0)) * pitchBlend;
 
-      const charMode = focusEntity?.characterMode || 'car_driver';
-      const baseEyeY =
-        charMode === 'runner'
-          ? 2.45
-          : charMode === 'photo_car'
-            ? 2.22
-            : POV_VEHICLE_EYE_Y[focusEntity?.vehicleId] ?? 1.88;
-      const eyeH = baseEyeY * entityScale;
-      const fwdOffset = (focusEntity?.vehicleId === 'van' ? 0.55 : 0.32) * entityScale;
+      // Rotate cockpit eye offset with airborne pitch so jumping mega-ramps keeps driver bolted in seat!
+      const eyeLocalY = rig.eyeY * entityScale;
+      const eyeLocalZ = rig.fwdZ * entityScale;
+      const cp = Math.cos(carAirPitch);
+      const sp = Math.sin(carAirPitch);
+      const rotEyeY = eyeLocalY * cp - eyeLocalZ * sp;
+      const rotEyeZ = eyeLocalY * sp + eyeLocalZ * cp;
+
       const fwdX = Math.sin(this.povYaw);
       const fwdZ = Math.cos(this.povYaw);
 
-      desiredEyeX = fx + fwdX * fwdOffset;
-      desiredEyeY = fy + eyeH;
-      desiredEyeZ = fz + fwdZ * fwdOffset;
+      desiredEyeX = fx + fwdX * rotEyeZ;
+      desiredEyeY = fy + rotEyeY;
+      desiredEyeZ = fz + fwdZ * rotEyeZ;
 
       const lookDist = 28.0;
-      const lookPitch = -0.09 + this.povPitch;
-      desiredTargetX = desiredEyeX + fwdX * lookDist;
+      const lookPitch = rig.basePitch + this.povPitch;
+      const cosLook = Math.cos(lookPitch);
+      desiredTargetX = desiredEyeX + fwdX * cosLook * lookDist;
       desiredTargetY = desiredEyeY + Math.sin(lookPitch) * lookDist;
-      desiredTargetZ = desiredEyeZ + fwdZ * lookDist;
+      desiredTargetZ = desiredEyeZ + fwdZ * cosLook * lookDist;
 
-      // Dynamic POV FOV: base (extraOpts.povFov || 76)°, widening to 92° on Sugar Rush and 85° on Boost/Star!
-      const basePovFov = clamp(Number(extraOpts?.povFov) || 76, 58, 96);
+      // Dynamic POV FOV: base (extraOpts.povFov || 78)°, widening to 92° on Sugar Rush and 85° on Boost/Star!
+      const basePovFov = clamp(Number(extraOpts?.povFov) || 78, 58, 96);
       const targetFovDeg = isSugar
         ? Math.max(basePovFov, 92)
         : isBoost || isStar
@@ -1588,18 +1702,32 @@ export class Renderer3D {
       this.camTarget[2] = desiredTargetZ;
     } else {
       this.camUp = [0, 1, 0];
-      if (cameraMode === 'chase') {
-        // Dynamic Mario Kart 3D behind-the-car chase camera!
+      if (cameraMode === 'attract') {
+        // Low dramatic sweeping Home Screen showcase orbit around hero getaway car or hovering Police Helicopter/Tank!
+        this.attractOrbitPhase = (this.attractOrbitPhase || 0) + safeDt * 0.42;
+        const orbitYaw = angle + Math.PI + Math.sin(this.attractOrbitPhase) * 0.68;
+        const dist = (isFlyingHeli ? 14.8 : 13.2) * entityScale;
+        const height = (isFlyingHeli ? 4.2 : 4.9) * entityScale;
+        desiredEyeX = fx + Math.sin(orbitYaw) * dist;
+        desiredEyeY = Math.max(1.8, fy + height);
+        desiredEyeZ = fz + Math.cos(orbitYaw) * dist;
+
+        desiredTargetX = fx + Math.sin(angle) * 2.2;
+        desiredTargetY = fy + (isFlyingHeli ? 1.35 : 1.65) * entityScale;
+        desiredTargetZ = fz + Math.cos(angle) * 2.2;
+        this.camFov = (45 * Math.PI) / 180;
+      } else if (cameraMode === 'chase') {
+        // Dynamic Mario Kart 3D behind-the-vehicle/helicopter chase camera!
         const backX = -Math.sin(angle);
         const backZ = -Math.cos(angle);
-        const dist = 17.5 * zoom;
-        const height = 9.2 * zoom;
+        const dist = (isFlyingHeli ? 18.8 : 17.5) * zoom;
+        const height = (isFlyingHeli ? 8.6 : 9.2) * zoom;
         desiredEyeX = fx + backX * dist;
         desiredEyeY = Math.max(2.5, fy + height);
         desiredEyeZ = fz + backZ * dist;
 
         desiredTargetX = fx - backX * 8.5;
-        desiredTargetY = fy + 2.2;
+        desiredTargetY = isFlyingHeli ? Math.max(1.5, fy + 0.85) : fy + 2.2;
         desiredTargetZ = fz - backZ * 8.5;
         this.camFov = ((isSugar ? 64 : isBoost ? 56 : 50) * Math.PI) / 180;
       } else {
@@ -1610,7 +1738,7 @@ export class Renderer3D {
         this.smoothLeadX = (this.smoothLeadX || 0) + (rawLeadX - (this.smoothLeadX || 0)) * leadBlend;
         this.smoothLeadZ = (this.smoothLeadZ || 0) + (rawLeadZ - (this.smoothLeadZ || 0)) * leadBlend;
         desiredTargetX = fx + this.smoothLeadX;
-        desiredTargetY = fy * 0.45;
+        desiredTargetY = isFlyingHeli ? fy : fy * 0.45;
         desiredTargetZ = fz + this.smoothLeadZ;
 
         desiredEyeX = desiredTargetX - 21.0 * zoom;
@@ -1620,7 +1748,7 @@ export class Renderer3D {
       }
 
       const snap = !this.cameraInitialized || this._lastCamMode === 'pov';
-      const alpha = snap ? 1.0 : 1.0 - Math.exp(-safeDt * 8.5);
+      const alpha = snap ? 1.0 : 1.0 - Math.exp(-safeDt * (cameraMode === 'attract' ? 7.0 : 8.5));
       this.cameraInitialized = true;
 
       this.camEye[0] += (desiredEyeX - this.camEye[0]) * alpha;
@@ -1659,7 +1787,7 @@ export class Renderer3D {
     const eye = [this.camEye[0] + sx, this.camEye[1] + sy, this.camEye[2] + sz];
     const target = [this.camTarget[0] + sx, this.camTarget[1] + sy, this.camTarget[2] + sz];
     const isPov = this.currentCameraMode === 'pov';
-    const nearClip = isPov ? 0.42 : 1.5;
+    const nearClip = isPov ? 0.36 : 1.5;
     const farClip = 880.0;
 
     mat4LookAt(this.viewMatrix, eye, target, this.camUp || [0, 1, 0]);
@@ -1782,10 +1910,13 @@ export class Renderer3D {
   // ==================== Particle & Skid FX ====================
 
   spawnDebris(x, y, z, color = '#f8fafc', count = 8, speed = 14, scale = 0.45) {
+    const cap = this.maxDebris ?? 650;
+    if (cap <= 0) return;
     const rgb = parseColorRgb(color);
-    const n = clamp(Math.floor(count), 1, 40);
+    const mult = this.graphicsQuality === 'performance' ? 0.45 : this.graphicsQuality === 'balanced' ? 0.72 : 1.0;
+    const n = clamp(Math.max(1, Math.round(count * mult)), 1, 40);
     for (let i = 0; i < n; i++) {
-      if (this.debris.length >= 650) this.debris.shift();
+      if (this.debris.length >= cap) this.debris.shift();
       const theta = Math.random() * Math.PI * 2;
       const spd = speed * (0.45 + Math.random() * 0.75);
       this.debris.push({
@@ -1810,10 +1941,13 @@ export class Renderer3D {
   }
 
   spawnSmoke(x, y, z, color = '#e2e8f0', count = 2, size = 0.7) {
+    const cap = this.maxSmoke ?? 420;
+    if (cap <= 0) return;
     const rgb = parseColorRgb(color);
-    const n = clamp(Math.floor(count), 1, 18);
+    const mult = this.graphicsQuality === 'performance' ? 0.5 : this.graphicsQuality === 'balanced' ? 0.75 : 1.0;
+    const n = clamp(Math.max(1, Math.round(count * mult)), 1, 18);
     for (let i = 0; i < n; i++) {
-      if (this.smoke.length >= 420) this.smoke.shift();
+      if (this.smoke.length >= cap) this.smoke.shift();
       this.smoke.push({
         x: x + (Math.random() - 0.5) * 0.65,
         y: y + Math.random() * 0.4,
@@ -2232,9 +2366,14 @@ export class Renderer3D {
     }
 
     // ==================== GPU Pass 1: 2048x2048 Directional Sun Shadow Map ====================
-    this._updateLightMatrices(focusX, focusZ);
+    this._frameCounter = ((this._frameCounter || 0) + 1) | 0;
+    const shadowsActive = Boolean(this.isWebGL2 && this.shadowsReady && (this.shadowCadence ?? 1) > 0);
+    const shouldUpdateShadowMap =
+      shadowsActive &&
+      (this.shadowCadence === 1 || this._frameCounter <= 2 || this._frameCounter % this.shadowCadence === 0);
 
-    if (this.isWebGL2 && this.shadowsReady) {
+    if (shouldUpdateShadowMap) {
+      this._updateLightMatrices(focusX, focusZ);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFBO);
       gl.viewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
       gl.enable(gl.DEPTH_TEST);
@@ -2326,14 +2465,15 @@ export class Renderer3D {
     gl.uniform3fv(this.voxelUniforms.ambientColor, biome.ambientColor);
     gl.uniform3fv(this.voxelUniforms.fogColor, biome.fogColor);
     const isPovFog = this.currentCameraMode === 'pov';
+    const isAttractFog = this.currentCameraMode === 'attract';
     gl.uniform3fv(this.voxelUniforms.camPos, this.camEye);
-    gl.uniform1f(this.voxelUniforms.fogNear, isPovFog ? 235.0 : 165.0);
-    gl.uniform1f(this.voxelUniforms.fogFar, isPovFog ? 540.0 : 355.0);
+    gl.uniform1f(this.voxelUniforms.fogNear, isPovFog ? 235.0 : isAttractFog ? 205.0 : 165.0);
+    gl.uniform1f(this.voxelUniforms.fogFar, isPovFog ? 540.0 : isAttractFog ? 460.0 : 355.0);
     gl.uniform1i(this.voxelUniforms.translucentMode, 0);
     gl.uniform1i(this.voxelUniforms.texturedMode, 0);
 
     if (this.isWebGL2 && this.shadowsReady) {
-      gl.uniform1i(this.voxelUniforms.shadowsEnabled, 1);
+      gl.uniform1i(this.voxelUniforms.shadowsEnabled, shadowsActive ? 1 : 0);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.shadowDepthTex);
       gl.uniform1i(this.voxelUniforms.shadowMap, 1);

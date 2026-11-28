@@ -120,27 +120,589 @@ const VEHICLE_ROOF_Y = {
   mini: 1.85,
   dozer: 2.62,
   gold: 1.92,
+  cop_cruiser: 1.85,
+  cop_swat: 2.42,
+  cop_heli: 2.22,
+  cop_tank: 2.35,
 };
 
-const VEHICLE_HOOD_POS = {
-  sedan: { y: 1.22, z: 1.38 },
-  muscle: { y: 1.24, z: 1.55 },
-  kart: { y: 0.78, z: 1.22 },
-  supercar: { y: 1.02, z: 1.52 },
-  monster: { y: 1.92, z: 1.48 },
-  convertible: { y: 1.12, z: 1.42 },
-  van: { y: 1.55, z: 1.92 },
-  pickup: { y: 1.42, z: 1.55 },
-  f1: { y: 0.74, z: 1.55 },
-  mini: { y: 1.15, z: 1.05 },
-  dozer: { y: 1.68, z: 1.15 },
-  gold: { y: 1.24, z: 1.65 },
+// Flat horizontal hood decal coordinates (z >= 1.38; omitted on narrow f1/kart/dozer noses)
+export const VEHICLE_HOOD_POS = {
+  sedan: { y: 1.095, z: 1.46, size: 0.94 },
+  muscle: { y: 1.165, z: 1.78, size: 0.64 },
+  supercar: { y: 1.035, z: 1.52, size: 0.88 },
+  monster: { y: 2.035, z: 1.52, size: 1.02 },
+  convertible: { y: 1.045, z: 1.48, size: 0.94 },
+  van: { y: 1.69, povY: 1.535, z: 1.88, size: 0.64 },
+  pickup: { y: 1.295, povY: 1.395, z: 1.58, size: 0.76 },
+  mini: { y: 1.105, z: 1.38, size: 0.48 },
+  gold: { y: 1.165, z: 1.58, size: 0.88 },
 };
 
-export function buildVehicleParts(vehicleId = 'sedan', primaryColor = '#ef4444', accentColor = '#fef08a', wheelSpin = 0) {
+const POV_FENDER_RPG_MOUNT = {
+  sedan: { y: 1.26, z: 1.48 },
+  muscle: { y: 1.30, z: 1.52 },
+  kart: { y: 0.92, z: 1.46 },
+  supercar: { y: 1.24, z: 1.48 },
+  monster: { y: 2.16, z: 1.54 },
+  convertible: { y: 1.22, z: 1.48 },
+  van: { y: 1.66, z: 1.86 },
+  pickup: { y: 1.50, z: 1.52 },
+  f1: { y: 0.96, z: 1.56 },
+  mini: { y: 1.26, z: 1.44 },
+  dozer: { y: 1.64, z: 1.52 },
+  gold: { y: 1.30, z: 1.54 },
+  cop_cruiser: { y: 1.28, z: 1.50 },
+  cop_swat: { y: 1.78, z: 1.68 },
+  cop_heli: { y: 0.95, z: 1.48 },
+  cop_tank: { y: 1.52, z: 1.68 },
+  photo_car: { y: 1.28, z: 1.48 },
+};
+
+function normalizeCopVehicleId(copVehicleId) {
+  switch (copVehicleId) {
+    case 'cop_cruiser':
+    case 'cruiser':
+      return 'cop_cruiser';
+    case 'cop_swat':
+    case 'swat':
+      return 'cop_swat';
+    case 'cop_tank':
+    case 'tank':
+      return 'cop_tank';
+    case 'cop_heli':
+    case 'heli':
+    default:
+      return 'cop_heli';
+  }
+}
+
+function isCopVehicleKey(vehicleId) {
+  return (
+    vehicleId === 'cop_cruiser' ||
+    vehicleId === 'cop_swat' ||
+    vehicleId === 'cop_heli' ||
+    vehicleId === 'cop_tank'
+  );
+}
+
+function addPovFrontWheels(parts, wheelX, frontZ, tireRadius, tireWidth, wheelSpin, rimColor = '#e2e8f0', steerYaw = 0) {
+  const s = tireRadius * 2;
+  const hubS = s * 0.52;
+  // Guarantee rotated cube corners (tireRadius * sqrt(2)) stay strictly >= 0.73 in front of nearClip
+  const safeZ = Math.max(frontZ, 0.73 + tireRadius * 1.42);
+  for (const wx of [-wheelX, wheelX]) {
+    parts.push(part(wx, tireRadius, safeZ, tireWidth, s, s, '#18181b', 0, wheelSpin, steerYaw, 0));
+    const hubOffset = wx < 0 ? -tireWidth * 0.52 : tireWidth * 0.52;
+    parts.push(part(wx + hubOffset, tireRadius, safeZ, 0.08, hubS, hubS * 0.45, rimColor, 0.05, wheelSpin, steerYaw, 0));
+  }
+}
+
+function addPovSteeringRim(parts, hubY, hubZ, radius, steerVal = 0, rimCol = '#111827', accentCol = '#ef4444', isYoke = false) {
+  const safeZ = Math.max(0.78, hubZ);
+  const turn = clamp(-steerVal * 0.52, -0.55, 0.55);
+  const ct = Math.cos(turn);
+  const st = Math.sin(turn);
+  const place = (dx, dy, sx, sy, col, em = 0, localRz = 0) => {
+    const px = dx * ct - dy * st;
+    const py = hubY + dx * st + dy * ct;
+    parts.push(part(px, py, safeZ, sx, sy, 0.07, col, em, 0, 0, localRz + turn));
+  };
+
+  // Center steering boss
+  parts.push(part(0, hubY, safeZ, 0.14, 0.14, 0.09, '#27272a'));
+
+  if (isYoke) {
+    // Formula 1 rectangular carbon yoke + glowing green/yellow/red RPM shift LEDs!
+    place(0, radius * 0.72, radius * 1.85, 0.06, rimCol, 0);
+    place(-0.08, radius * 0.74, 0.045, 0.035, '#22c55e', 0.95);
+    place(0, radius * 0.74, 0.045, 0.035, '#facc15', 0.95);
+    place(0.08, radius * 0.74, 0.045, 0.035, '#ef4444', 0.95);
+    place(-radius * 0.92, radius * 0.28, 0.07, radius * 0.95, accentCol, 0.15);
+    place(radius * 0.92, radius * 0.28, 0.07, radius * 0.95, accentCol, 0.15);
+    place(-radius * 0.45, 0.02, radius * 0.85, 0.06, '#334155', 0);
+    place(radius * 0.45, 0.02, radius * 0.85, 0.06, '#334155', 0);
+  } else {
+    // Sporty arched steering wheel top rim + 12-o'clock racing marker + spokes
+    place(0, radius, radius * 1.02, 0.065, rimCol, 0);
+    place(0, radius + 0.005, 0.06, 0.072, accentCol, 0.35);
+    place(-radius * 0.76, radius * 0.64, radius * 0.72, 0.06, rimCol, 0, 0.66);
+    place(radius * 0.76, radius * 0.64, radius * 0.72, 0.06, rimCol, 0, -0.66);
+    place(-radius * 0.46, 0.06, radius * 0.88, 0.055, '#334155', 0, 0.14);
+    place(radius * 0.46, 0.06, radius * 0.88, 0.055, '#334155', 0, -0.14);
+  }
+}
+
+function buildPovVehicleParts(vehicleId, pCol, aCol, wheelSpin, opts = {}) {
   const parts = [];
+  const darkMetal = '#27272a';
+  const chrome = '#e2e8f0';
+  const steerVal = Number(opts.steer) || 0;
+  const steerYaw = clamp(-steerVal * 0.32, -0.34, 0.34);
+  const time = Number(opts.time) || 0;
+
+  switch (vehicleId) {
+    case 'muscle': {
+      addPovFrontWheels(parts, 1.08, 1.38, 0.44, 0.42, wheelSpin, chrome, steerYaw * 0.45);
+      // Cockpit bulkhead & dash cowl (strictly z >= 0.73)
+      parts.push(part(0, 0.64, 0.86, 2.08, 0.92, 0.24, '#111827'));
+      parts.push(part(0, 1.16, 0.80, 2.02, 0.09, 0.14, darkMetal));
+      // Brawny long hood + twin racing stripes + sculpted outer fenders
+      parts.push(part(0, 0.86, 1.46, 2.14, 0.52, 1.40, pCol));
+      parts.push(part(-0.36, 1.135, 1.48, 0.26, 0.03, 1.34, aCol));
+      parts.push(part(0.36, 1.135, 1.48, 0.26, 0.03, 1.34, aCol));
+      parts.push(part(-0.95, 1.04, 1.46, 0.28, 0.26, 1.34, pCol));
+      parts.push(part(0.95, 1.04, 1.46, 0.28, 0.26, 1.34, pCol));
+      // Gleaming chrome V8 supercharger blower & red butterfly scoop vibrating with V8 idle!
+      const v8VibX = Math.sin(time * 58) * 0.012;
+      const v8VibRoll = Math.sin(time * 64) * 0.024;
+      parts.push(part(v8VibX, 1.24, 1.16, 0.58, 0.28, 0.56, chrome, 0.1, 0, 0, v8VibRoll));
+      parts.push(part(v8VibX, 1.38, 1.36, 0.50, 0.14, 0.16, '#dc2626', 0.25, 0, 0, v8VibRoll));
+      parts.push(part(v8VibX, 1.25, 1.45, 0.34, 0.18, 0.06, '#94a3b8', 0.05, 0, 0, v8VibRoll));
+      // Front bumper & warm headlights
+      parts.push(part(0, 0.56, 2.20, 2.10, 0.28, 0.20, darkMetal));
+      parts.push(part(-0.78, 1.04, 2.15, 0.40, 0.18, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.78, 1.04, 2.15, 0.40, 0.18, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'kart': {
+      // Exposed spinning & turning front kart slicks!
+      addPovFrontWheels(parts, 1.02, 1.28, 0.38, 0.44, wheelSpin, aCol, steerYaw);
+      parts.push(part(0, 0.38, 1.28, 1.88, 0.10, 0.12, darkMetal));
+      parts.push(part(0, 0.44, 0.92, 1.22, 0.62, 0.32, '#111827'));
+      parts.push(part(-0.56, 0.46, 1.28, 0.14, 0.14, 0.96, pCol));
+      parts.push(part(0.56, 0.46, 1.28, 0.14, 0.14, 0.96, pCol));
+      // Sloped kart nosecone & accent number plate + front lights
+      parts.push(part(0, 0.56, 1.38, 1.12, 0.32, 0.92, pCol, 0, 0.08));
+      parts.push(part(0, 0.73, 1.40, 0.72, 0.05, 0.58, aCol, 0, 0.08));
+      parts.push(part(-0.44, 0.56, 1.82, 0.26, 0.18, 0.12, '#fef9c3', 0.92));
+      parts.push(part(0.44, 0.56, 1.82, 0.26, 0.18, 0.12, '#fef9c3', 0.92));
+      // Sporty turning steering wheel top arc at bottom of view (z >= 0.745)
+      addPovSteeringRim(parts, 0.82, 0.78, 0.23, steerVal, '#111827', aCol, false);
+      break;
+    }
+
+    case 'supercar': {
+      addPovFrontWheels(parts, 1.08, 1.32, 0.40, 0.44, wheelSpin, aCol, steerYaw * 0.45);
+      // Alcantara cockpit dash cowl & 12-o'clock marker
+      parts.push(part(0, 0.58, 0.86, 2.02, 0.84, 0.24, '#111827'));
+      parts.push(part(0, 1.02, 0.80, 1.94, 0.08, 0.12, darkMetal));
+      parts.push(part(0, 1.065, 0.80, 0.16, 0.03, 0.10, aCol));
+      // Low exotic V-shaped wedge nose + sharp sculpted left/right aero fender crests
+      parts.push(part(0, 0.85, 1.44, 1.86, 0.32, 1.36, pCol));
+      parts.push(part(-0.34, 1.02, 1.48, 0.10, 0.03, 1.16, aCol, 0, 0, -0.14));
+      parts.push(part(0.34, 1.02, 1.48, 0.10, 0.03, 1.16, aCol, 0, 0, 0.14));
+      parts.push(part(-0.92, 0.96, 1.42, 0.36, 0.34, 1.30, pCol));
+      parts.push(part(0.92, 0.96, 1.42, 0.36, 0.34, 1.30, pCol));
+      // Razor blade LED headlights & front aero splitter
+      parts.push(part(-0.90, 1.06, 2.05, 0.32, 0.10, 0.16, '#fef9c3', 0.95));
+      parts.push(part(0.90, 1.06, 2.05, 0.32, 0.10, 0.16, '#fef9c3', 0.95));
+      parts.push(part(0, 0.48, 2.16, 2.16, 0.14, 0.22, aCol));
+      break;
+    }
+
+    case 'monster': {
+      addPovFrontWheels(parts, 1.38, 1.70, 0.68, 0.64, wheelSpin, aCol, steerYaw * 0.55);
+      parts.push(part(0, 0.72, 1.70, 2.35, 0.24, 0.24, darkMetal));
+      // Towering lifted 4x4 hood & wide muscular off-road fenders (zero cab/rollbar clipping!)
+      parts.push(part(0, 1.32, 0.94, 2.08, 1.36, 0.32, '#18181b'));
+      parts.push(part(0, 2.02, 0.86, 2.02, 0.10, 0.14, darkMetal));
+      parts.push(part(0, 1.68, 1.48, 2.14, 0.64, 1.30, pCol));
+      parts.push(part(0, 2.01, 1.50, 0.54, 0.04, 1.22, aCol));
+      parts.push(part(-1.12, 1.88, 1.48, 0.36, 0.36, 1.26, pCol));
+      parts.push(part(1.12, 1.88, 1.48, 0.36, 0.36, 1.26, pCol));
+      parts.push(part(-1.20, 1.72, 1.48, 0.26, 0.14, 1.24, aCol));
+      parts.push(part(1.20, 1.72, 1.48, 0.26, 0.14, 1.24, aCol));
+      parts.push(part(0, 1.52, 2.18, 2.10, 0.28, 0.20, chrome));
+      parts.push(part(-0.82, 1.86, 2.14, 0.42, 0.22, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.82, 1.86, 2.14, 0.42, 0.22, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'convertible': {
+      addPovFrontWheels(parts, 1.02, 1.30, 0.40, 0.38, wheelSpin, chrome, steerYaw * 0.45);
+      // Clean open-top roadster stitched dash cowl & sporty wheel arc (ZERO floating chrome header!)
+      parts.push(part(0, 0.62, 0.86, 1.98, 0.88, 0.24, '#1f2937'));
+      parts.push(part(0, 1.08, 0.82, 1.90, 0.08, 0.14, '#111827'));
+      parts.push(part(0, 1.13, 0.82, 1.82, 0.04, 0.10, aCol));
+      addPovSteeringRim(parts, 1.29, 0.78, 0.23, steerVal, '#111827', aCol, false);
+      // Roadster hood + twin accent spears + fender crowns
+      parts.push(part(0, 0.80, 1.44, 2.02, 0.40, 1.32, pCol));
+      parts.push(part(-0.48, 1.015, 1.46, 0.14, 0.03, 1.24, aCol));
+      parts.push(part(0.48, 1.015, 1.46, 0.14, 0.03, 1.24, aCol));
+      parts.push(part(-0.90, 0.96, 1.44, 0.26, 0.22, 1.26, pCol));
+      parts.push(part(0.90, 0.96, 1.44, 0.26, 0.22, 1.26, pCol));
+      parts.push(part(0, 0.52, 2.14, 1.98, 0.26, 0.20, chrome));
+      parts.push(part(-0.76, 0.98, 2.08, 0.38, 0.18, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.76, 0.98, 2.08, 0.38, 0.18, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'van': {
+      // Cab-forward panoramic view (z >= 1.29, strictly ahead of van fwdZ + nearClip!)
+      addPovFrontWheels(parts, 1.08, 1.92, 0.44, 0.38, wheelSpin, '#ffffff', steerYaw * 0.35);
+      parts.push(part(0, 0.94, 1.77, 2.18, 1.12, 0.90, pCol));
+      parts.push(part(0, 1.48, 1.46, 2.10, 0.10, 0.34, '#ffffff'));
+      parts.push(part(0, 1.505, 1.88, 2.22, 0.05, 0.68, aCol));
+      // Mini retro ice-cream dash bobble tucked cleanly on right corner
+      parts.push(part(0.74, 1.58, 1.48, 0.14, 0.14, 0.14, '#d97706'));
+      parts.push(part(0.74, 1.70, 1.48, 0.18, 0.14, 0.18, aCol, 0.2));
+      parts.push(part(0.74, 1.80, 1.48, 0.08, 0.08, 0.08, '#ef4444', 0.5));
+      parts.push(part(0, 0.62, 2.26, 2.16, 0.26, 0.20, chrome));
+      parts.push(part(-0.78, 1.34, 2.22, 0.36, 0.24, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.78, 1.34, 2.22, 0.36, 0.24, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'pickup': {
+      addPovFrontWheels(parts, 1.14, 1.44, 0.48, 0.44, wheelSpin, aCol, steerYaw * 0.45);
+      // Muscular Baja power-dome hood + wide flared fenders (NO overhead lightbar!)
+      parts.push(part(0, 0.82, 0.90, 2.12, 1.08, 0.28, '#18181b'));
+      parts.push(part(0, 1.36, 0.84, 2.04, 0.10, 0.14, darkMetal));
+      parts.push(part(0, 0.98, 1.44, 2.16, 0.58, 1.28, pCol));
+      parts.push(part(0, 1.32, 1.44, 0.96, 0.10, 1.12, aCol));
+      parts.push(part(-1.10, 1.20, 1.44, 0.34, 0.32, 1.24, pCol));
+      parts.push(part(1.10, 1.20, 1.44, 0.34, 0.32, 1.24, pCol));
+      parts.push(part(0, 0.68, 2.14, 2.12, 0.30, 0.22, darkMetal));
+      parts.push(part(-0.82, 1.20, 2.08, 0.42, 0.22, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.82, 1.20, 2.08, 0.42, 0.22, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'f1': {
+      // True Formula 1 cockpit view: exposed wide front slicks, wishbones, pointed nosecone, multi-element wing & shift-LED yoke!
+      addPovFrontWheels(parts, 1.16, 1.52, 0.42, 0.48, wheelSpin, aCol, steerYaw);
+      parts.push(part(-0.68, 0.52, 1.52, 0.86, 0.06, 0.10, darkMetal));
+      parts.push(part(0.68, 0.52, 1.52, 0.86, 0.06, 0.10, darkMetal));
+      parts.push(part(0, 0.54, 0.90, 0.92, 0.72, 0.28, '#111827'));
+      addPovSteeringRim(parts, 0.96, 0.78, 0.20, steerVal, '#111827', aCol, true);
+      parts.push(part(0, 0.62, 1.42, 0.74, 0.34, 0.84, pCol));
+      parts.push(part(0, 0.50, 2.04, 0.50, 0.26, 0.62, pCol));
+      parts.push(part(0, 0.80, 1.42, 0.22, 0.03, 0.80, aCol));
+      parts.push(part(0, 0.34, 2.32, 2.32, 0.10, 0.52, aCol));
+      parts.push(part(-1.16, 0.48, 2.32, 0.08, 0.34, 0.56, pCol));
+      parts.push(part(1.16, 0.48, 2.32, 0.08, 0.34, 0.56, pCol));
+      break;
+    }
+
+    case 'mini': {
+      addPovFrontWheels(parts, 0.94, 1.30, 0.40, 0.38, wheelSpin, aCol, steerYaw * 0.55);
+      // Rounded compact hood + iconic bug-eye round headlight pods peeking up on fenders!
+      parts.push(part(0, 0.58, 0.86, 1.74, 0.86, 0.24, '#18181b'));
+      parts.push(part(0, 1.04, 0.80, 1.66, 0.08, 0.12, aCol));
+      parts.push(part(0, 0.82, 1.24, 1.76, 0.52, 0.96, pCol));
+      parts.push(part(0, 1.09, 1.26, 0.40, 0.03, 0.88, aCol));
+      parts.push(part(-0.66, 1.12, 1.54, 0.34, 0.28, 0.34, pCol));
+      parts.push(part(0.66, 1.12, 1.54, 0.34, 0.28, 0.34, pCol));
+      parts.push(part(-0.66, 1.14, 1.70, 0.28, 0.24, 0.10, '#fef9c3', 0.95));
+      parts.push(part(0.66, 1.14, 1.70, 0.28, 0.24, 0.10, '#fef9c3', 0.95));
+      parts.push(part(0, 0.52, 1.76, 1.72, 0.22, 0.18, chrome));
+      break;
+    }
+
+    case 'dozer': {
+      // Heavy industrial armored nose + twin hydraulic arms + massive steel bulldozer plow blade (NO tall stack!)
+      parts.push(part(-1.18, 0.64, 1.38, 0.56, 0.92, 1.16, '#27272a'));
+      parts.push(part(1.18, 0.64, 1.38, 0.56, 0.92, 1.16, '#27272a'));
+      addPovFrontWheels(parts, 1.22, 1.40, 0.46, 0.56, wheelSpin, '#f59e0b', 0);
+      parts.push(part(0, 0.94, 0.94, 1.92, 1.16, 0.28, '#18181b'));
+      parts.push(part(0, 1.14, 1.35, 1.94, 0.68, 1.02, pCol));
+      parts.push(part(0, 1.495, 1.38, 0.88, 0.04, 0.72, '#18181b'));
+      parts.push(part(-0.74, 1.36, 1.84, 0.32, 0.20, 0.12, '#fef08a', 0.9));
+      parts.push(part(0.74, 1.36, 1.84, 0.32, 0.20, 0.12, '#fef08a', 0.9));
+      parts.push(part(-0.78, 0.82, 1.96, 0.24, 0.26, 0.92, aCol));
+      parts.push(part(0.78, 0.82, 1.96, 0.24, 0.26, 0.92, aCol));
+      parts.push(part(-0.78, 0.92, 2.16, 0.14, 0.14, 0.52, chrome));
+      parts.push(part(0.78, 0.92, 2.16, 0.14, 0.14, 0.52, chrome));
+      parts.push(part(0, 0.90, 2.38, 2.86, 1.24, 0.32, '#94a3b8'));
+      parts.push(part(0, 1.54, 2.40, 2.88, 0.10, 0.24, aCol));
+      parts.push(part(0, 0.30, 2.50, 2.90, 0.24, 0.36, aCol));
+      break;
+    }
+
+    case 'gold': {
+      addPovFrontWheels(parts, 1.06, 1.38, 0.42, 0.38, wheelSpin, '#fef3c7', steerYaw * 0.45);
+      // Long gleaming 24K hood + center gold spine + glowing golden crown hood ornament at z = 2.12!
+      parts.push(part(0, 0.66, 0.88, 2.04, 0.92, 0.24, '#1c1917'));
+      parts.push(part(0, 1.14, 0.82, 1.96, 0.08, 0.12, aCol, 0.45));
+      parts.push(part(0, 0.82, 1.51, 2.12, 0.56, 1.46, pCol, 0.24));
+      parts.push(part(0, 1.12, 1.52, 0.18, 0.05, 1.40, aCol, 0.48));
+      parts.push(part(-0.94, 1.02, 1.50, 0.28, 0.26, 1.38, pCol, 0.26));
+      parts.push(part(0.94, 1.02, 1.50, 0.28, 0.26, 1.38, pCol, 0.26));
+      // Crown ornament
+      parts.push(part(0, 1.23, 2.12, 0.22, 0.20, 0.20, '#fde047', 0.82));
+      parts.push(part(-0.08, 1.37, 2.12, 0.06, 0.12, 0.06, '#fef08a', 0.95));
+      parts.push(part(0, 1.40, 2.12, 0.07, 0.15, 0.07, '#fef08a', 0.98));
+      parts.push(part(0.08, 1.37, 2.12, 0.06, 0.12, 0.06, '#fef08a', 0.95));
+      parts.push(part(0, 0.82, 2.28, 1.18, 0.54, 0.12, aCol, 0.45));
+      parts.push(part(0, 0.54, 2.30, 2.08, 0.24, 0.18, aCol, 0.35));
+      parts.push(part(-0.78, 1.02, 2.22, 0.38, 0.20, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.78, 1.02, 2.22, 0.38, 0.20, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'sedan':
+    default: {
+      addPovFrontWheels(parts, 1.02, 1.32, 0.40, 0.38, wheelSpin, chrome, steerYaw * 0.45);
+      // Sleek sculpted hood + center accent racing spear + raised fender ridges + dark dash cowl
+      parts.push(part(0, 0.62, 0.86, 1.98, 0.88, 0.24, '#111827'));
+      parts.push(part(0, 1.10, 0.80, 1.92, 0.09, 0.14, darkMetal));
+      parts.push(part(0, 0.84, 1.40, 1.98, 0.44, 1.28, pCol));
+      parts.push(part(0, 1.07, 1.44, 0.36, 0.03, 1.18, aCol));
+      parts.push(part(-0.88, 1.02, 1.40, 0.30, 0.24, 1.24, pCol));
+      parts.push(part(0.88, 1.02, 1.40, 0.30, 0.24, 1.24, pCol));
+      parts.push(part(0, 0.54, 2.08, 1.96, 0.26, 0.20, chrome));
+      parts.push(part(-0.76, 1.02, 2.02, 0.38, 0.18, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.76, 1.02, 2.02, 0.38, 0.18, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+  }
+
+  return parts;
+}
+
+export function buildCopPovParts(copVehicleId = 'cop_heli', wheelSpin = 0, opts = {}) {
+  const unitId = normalizeCopVehicleId(copVehicleId);
+  const parts = [];
+  const steerVal = Number(opts.steer) || 0;
+  const steerYaw = clamp(-steerVal * 0.32, -0.34, 0.34);
+  const time = Number(opts.time) || 0;
+  const redActive = Math.floor(time * 9.5) % 2 === 0;
+
+  switch (unitId) {
+    case 'cop_cruiser': {
+      // Zero-clipping Police Interceptor POV (partBackZ >= 0.79 >= 0.78):
+      // Black-and-white pursuit hood + heavy PIT push-bar + alternating red/blue strobe glow tips!
+      addPovFrontWheels(parts, 1.02, 1.38, 0.40, 0.38, wheelSpin, '#cbd5e1', steerYaw * 0.45);
+      parts.push(part(0, 0.62, 0.92, 1.98, 0.88, 0.24, '#0f172a'));
+      parts.push(part(0, 1.10, 0.86, 1.92, 0.09, 0.14, '#1e293b'));
+      // Black hood + crisp white pursuit center shield + gold precinct crest
+      parts.push(part(0, 0.84, 1.46, 1.98, 0.44, 1.32, '#0f172a'));
+      parts.push(part(0, 1.07, 1.48, 0.92, 0.035, 1.24, '#ffffff'));
+      parts.push(part(0, 1.09, 1.72, 0.26, 0.03, 0.26, '#facc15', 0.55));
+      parts.push(part(-0.88, 1.02, 1.46, 0.30, 0.24, 1.28, '#0f172a'));
+      parts.push(part(0.88, 1.02, 1.46, 0.30, 0.24, 1.28, '#0f172a'));
+      // Red & blue strobe glow pods on hood edge
+      parts.push(part(-0.56, 1.11, 2.02, 0.34, 0.11, 0.18, redActive ? '#ef4444' : '#7f1d1d', redActive ? 1.0 : 0.25));
+      parts.push(part(0.56, 1.11, 2.02, 0.34, 0.11, 0.18, !redActive ? '#3b82f6' : '#1e3a8a', !redActive ? 1.0 : 0.25));
+      // Heavy steel PIT push-bar + headlights
+      parts.push(part(0, 0.56, 2.14, 1.98, 0.26, 0.20, '#334155'));
+      parts.push(part(-0.44, 0.92, 2.24, 0.14, 0.76, 0.18, '#18181b'));
+      parts.push(part(0.44, 0.92, 2.24, 0.14, 0.76, 0.18, '#18181b'));
+      parts.push(part(0, 1.18, 2.24, 1.12, 0.12, 0.16, '#27272a'));
+      parts.push(part(0, 0.86, 2.26, 1.18, 0.14, 0.18, '#18181b'));
+      parts.push(part(-0.78, 1.02, 2.10, 0.36, 0.18, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.78, 1.02, 2.10, 0.36, 0.18, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'cop_swat': {
+      // Zero-clipping Armored SWAT Truck POV (partBackZ >= 0.87 >= 0.86):
+      // Heavy armored navy hood + tactical white stripes + massive steel battering-ram bullbar!
+      addPovFrontWheels(parts, 1.14, 1.62, 0.48, 0.44, wheelSpin, '#475569', steerYaw * 0.38);
+      parts.push(part(0, 1.08, 1.02, 2.22, 1.16, 0.28, '#0f172a'));
+      parts.push(part(0, 1.68, 0.96, 2.14, 0.10, 0.18, '#334155'));
+      parts.push(part(0, 1.28, 1.62, 2.28, 0.68, 1.44, '#1e293b'));
+      parts.push(part(0, 1.64, 1.64, 1.18, 0.10, 1.32, '#0f172a'));
+      parts.push(part(-1.04, 1.52, 1.62, 0.28, 0.30, 1.38, '#1e293b'));
+      parts.push(part(1.04, 1.52, 1.62, 0.28, 0.30, 1.38, '#1e293b'));
+      parts.push(part(-0.72, 1.63, 1.64, 0.12, 0.03, 1.28, '#f8fafc'));
+      parts.push(part(0.72, 1.63, 1.64, 0.12, 0.03, 1.28, '#f8fafc'));
+      // Red/blue tactical strobe beacons on armored nose
+      parts.push(part(-0.64, 1.68, 2.24, 0.38, 0.12, 0.18, redActive ? '#ef4444' : '#7f1d1d', redActive ? 1.0 : 0.25));
+      parts.push(part(0.64, 1.68, 2.24, 0.38, 0.12, 0.18, !redActive ? '#3b82f6' : '#1e3a8a', !redActive ? 1.0 : 0.25));
+      // Heavy steel battering-ram bullbar + ribs + floodlights
+      parts.push(part(0, 1.04, 2.48, 2.36, 0.82, 0.32, '#09090b'));
+      parts.push(part(0, 1.66, 2.48, 2.24, 0.16, 0.22, '#334155'));
+      parts.push(part(-0.82, 1.36, 2.50, 0.16, 0.68, 0.24, '#27272a'));
+      parts.push(part(0, 1.36, 2.52, 0.20, 0.68, 0.26, '#27272a'));
+      parts.push(part(0.82, 1.36, 2.50, 0.16, 0.68, 0.24, '#27272a'));
+      parts.push(part(-0.88, 1.48, 2.36, 0.38, 0.22, 0.14, '#fef9c3', 0.92));
+      parts.push(part(0.88, 1.48, 2.36, 0.38, 0.22, 0.14, '#fef9c3', 0.92));
+      break;
+    }
+
+    case 'cop_tank': {
+      // Zero-clipping Tank Gunner / Turret POV (partBackZ >= 0.92 >= 0.90):
+      // Sloped olive/navy armored glacis + long high-velocity tank cannon barrel straight down center-bottom!
+      parts.push(part(-1.34, 0.68, 1.69, 0.66, 0.96, 1.54, '#1c1917'));
+      parts.push(part(1.34, 0.68, 1.69, 0.66, 0.96, 1.54, '#1c1917'));
+      parts.push(part(0, 1.06, 1.62, 2.36, 0.72, 1.40, '#4d5d3b'));
+      parts.push(part(0, 1.24, 1.98, 2.24, 0.36, 0.84, '#5c6f47', 0, 0.18));
+      parts.push(part(-1.02, 1.32, 1.66, 0.28, 0.16, 1.36, '#0f172a'));
+      parts.push(part(1.02, 1.32, 1.66, 0.28, 0.16, 1.36, '#0f172a'));
+      parts.push(part(-1.02, 1.44, 2.22, 0.26, 0.12, 0.18, redActive ? '#ef4444' : '#7f1d1d', redActive ? 1.0 : 0.25));
+      parts.push(part(1.02, 1.44, 2.22, 0.26, 0.12, 0.18, !redActive ? '#3b82f6' : '#1e3a8a', !redActive ? 1.0 : 0.25));
+      parts.push(part(-0.82, 1.24, 2.34, 0.36, 0.20, 0.14, '#fef9c3', 0.9));
+      parts.push(part(0.82, 1.24, 2.34, 0.36, 0.20, 0.14, '#fef9c3', 0.9));
+      // Gun mantlet collar + long high-velocity cannon barrel (z = 0.92..3.75+, y = 1.62) + bore evacuator + muzzle brake!
+      parts.push(part(0, 1.62, 1.20, 0.58, 0.44, 0.56, '#3f4f30'));
+      parts.push(part(0, 1.62, 2.27, 0.32, 0.32, 2.70, '#27272a'));
+      parts.push(part(0, 1.62, 2.35, 0.42, 0.42, 0.56, '#3f4f30'));
+      parts.push(part(0, 1.62, 3.12, 0.35, 0.35, 0.14, '#facc15', 0.35));
+      parts.push(part(0, 1.62, 3.59, 0.48, 0.46, 0.32, '#18181b'));
+      break;
+    }
+
+    case 'cop_heli':
+    default: {
+      // Zero-clipping Attack Helicopter Nose Cockpit POV (partBackZ >= 0.88):
+      // Lower avionics console lip + twin side-mounted missile pod tips at x = ±1.05, z = 0.88..1.65, y = 0.62
+      // ZERO overhead rotor, mast, or bubble-glass clipping!
+      parts.push(part(0, 0.56, 1.18, 1.62, 0.34, 0.56, '#0f172a'));
+      parts.push(part(0, 0.76, 1.04, 1.36, 0.10, 0.30, '#1e293b'));
+      parts.push(part(0, 0.82, 1.06, 0.38, 0.08, 0.18, '#22d3ee', 0.88));
+      parts.push(part(-0.34, 0.82, 1.06, 0.14, 0.06, 0.12, redActive ? '#ef4444' : '#facc15', 0.92));
+      parts.push(part(0.34, 0.82, 1.06, 0.14, 0.06, 0.12, !redActive ? '#3b82f6' : '#22c55e', 0.92));
+      // Landing skid forward toe tips
+      parts.push(part(-0.82, 0.26, 1.48, 0.12, 0.12, 0.68, '#334155'));
+      parts.push(part(0.82, 0.26, 1.48, 0.12, 0.12, 0.68, '#334155'));
+      // Left & right stub weapon pylons + twin missile launcher pods (x = ±1.05, z = 0.88..1.65, y = 0.62)
+      parts.push(part(-0.82, 0.64, 1.12, 0.52, 0.10, 0.44, '#1e293b'));
+      parts.push(part(0.82, 0.64, 1.12, 0.52, 0.10, 0.44, '#1e293b'));
+      parts.push(part(-1.05, 0.62, 1.18, 0.38, 0.32, 0.60, '#334155'));
+      parts.push(part(1.05, 0.62, 1.18, 0.38, 0.32, 0.60, '#334155'));
+      parts.push(part(-1.05, 0.62, 1.38, 0.40, 0.34, 0.12, '#facc15', 0.3));
+      parts.push(part(1.05, 0.62, 1.38, 0.40, 0.34, 0.12, '#facc15', 0.3));
+      // Twin red/white tactical missile tips peeking out of each side pod!
+      for (const mx of [-1.13, -0.97, 0.97, 1.13]) {
+        parts.push(part(mx, 0.62, 1.48, 0.13, 0.13, 0.20, '#f8fafc', 0.22));
+        parts.push(part(mx, 0.62, 1.59, 0.11, 0.11, 0.12, '#ef4444', 0.9));
+      }
+      break;
+    }
+  }
+
+  return parts;
+}
+
+function buildCopTankHullParts(wheelSpin = 0) {
+  return [
+    // Left & right armored treads + 6 spinning road wheels
+    part(-1.34, 0.56, 0, 0.66, 1.04, 4.95, '#1c1917'),
+    part(1.34, 0.56, 0, 0.66, 1.04, 4.95, '#1c1917'),
+    part(-1.38, 0.52, 1.5, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    part(-1.38, 0.52, 0, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    part(-1.38, 0.52, -1.5, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    part(1.38, 0.52, 1.5, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    part(1.38, 0.52, 0, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    part(1.38, 0.52, -1.5, 0.72, 0.62, 0.62, '#44403c', 0, wheelSpin),
+    // Sloped olive-drab & navy tactical police armored hull
+    part(0, 1.02, 0, 2.38, 0.92, 4.65, '#4d5d3b'),
+    part(0, 1.08, -0.05, 2.44, 0.26, 3.85, '#0f172a'),
+    part(0, 1.10, -0.05, 2.46, 0.09, 2.25, '#f8fafc'),
+    part(0, 1.18, 1.95, 2.26, 0.52, 0.95, '#5c6f47', 0, 0.25),
+    part(-0.82, 1.24, 2.28, 0.36, 0.22, 0.16, '#fef9c3', 0.88),
+    part(0.82, 1.24, 2.28, 0.36, 0.22, 0.16, '#fef9c3', 0.88),
+    part(-0.82, 1.18, -2.34, 0.36, 0.20, 0.14, '#ef4444', 0.82),
+    part(0.82, 1.18, -2.34, 0.36, 0.20, 0.14, '#ef4444', 0.82),
+  ];
+}
+
+function buildCopTankTurretParts() {
+  return [
+    part(0, 1.82, -0.15, 1.88, 0.78, 2.18, '#3f4f30'),
+    part(0, 1.84, -0.15, 1.94, 0.22, 1.42, '#0f172a'),
+    part(0, 2.28, -0.45, 0.78, 0.26, 0.78, '#29351f'),
+    part(0, 1.86, 2.15, 0.34, 0.34, 3.15, '#27272a'),
+    part(0, 1.86, 2.28, 0.44, 0.44, 0.58, '#3f4f30'),
+    part(0, 1.86, 3.72, 0.48, 0.48, 0.46, '#18181b'),
+  ];
+}
+
+export function buildCopVehicleParts(copVehicleId = 'cop_heli', wheelSpin = 0, opts = {}) {
+  if (opts && opts.povSelf === true) {
+    return buildCopPovParts(copVehicleId, wheelSpin, opts);
+  }
+  const unitId = normalizeCopVehicleId(copVehicleId);
+  const parts = [];
+
+  switch (unitId) {
+    case 'cop_cruiser': {
+      addWheels(parts, 1.02, 1.24, -1.24, 0.4, 0.38, wheelSpin, '#cbd5e1');
+      parts.push(part(0, 0.72, 0, 2.04, 0.68, 4.12, '#0f172a'));
+      parts.push(part(0, 0.74, -0.05, 2.08, 0.64, 1.78, '#ffffff'));
+      parts.push(part(0, 1.4, -0.1, 1.76, 0.68, 1.98, '#ffffff'));
+      parts.push(part(0, 1.38, -0.08, 1.8, 0.48, 1.58, '#1e293b'));
+      // Heavy front PIT push-bar + uprights
+      parts.push(part(0, 0.68, 2.18, 1.38, 0.54, 0.22, '#18181b'));
+      parts.push(part(-0.44, 0.84, 2.24, 0.14, 0.68, 0.18, '#27272a'));
+      parts.push(part(0.44, 0.84, 2.24, 0.14, 0.68, 0.18, '#27272a'));
+      addLightsAndBumpers(parts, 1.0, 0.68, 2.06, '#334155');
+      break;
+    }
+
+    case 'cop_swat': {
+      addWheels(parts, 1.14, 1.48, -1.48, 0.48, 0.44, wheelSpin, '#475569');
+      parts.push(part(0, 1.18, 0, 2.32, 1.46, 4.75, '#1e293b'));
+      parts.push(part(0, 1.38, 0, 2.36, 0.18, 4.55, '#f8fafc'));
+      parts.push(part(0, 1.98, -0.15, 2.22, 0.78, 4.25, '#0f172a'));
+      parts.push(part(0, 1.92, 1.98, 1.92, 0.48, 0.16, '#38bdf8', 0.25));
+      // Heavy steel battering-ram bullbar
+      parts.push(part(0, 0.76, 2.50, 2.32, 0.74, 0.34, '#09090b'));
+      parts.push(part(0, 1.22, 2.50, 2.18, 0.16, 0.24, '#334155'));
+      addLightsAndBumpers(parts, 1.12, 0.76, 2.38, '#334155');
+      break;
+    }
+
+    case 'cop_tank': {
+      parts.push(...buildCopTankHullParts(wheelSpin), ...buildCopTankTurretParts());
+      break;
+    }
+
+    case 'cop_heli':
+    default: {
+      // Landing skids & struts
+      parts.push(
+        part(-0.95, 0.15, 0, 0.14, 0.14, 3.6, '#334155'),
+        part(0.95, 0.15, 0, 0.14, 0.14, 3.6, '#334155'),
+        part(-0.72, 0.5, 0.8, 0.12, 0.65, 0.14, '#475569'),
+        part(0.72, 0.5, 0.8, 0.12, 0.65, 0.14, '#475569'),
+        part(-0.72, 0.5, -0.8, 0.12, 0.65, 0.14, '#475569'),
+        part(0.72, 0.5, -0.8, 0.12, 0.65, 0.14, '#475569'),
+        // Fuselage + white police stripe + cyan bubble glass cockpit nose
+        part(0, 1.35, 0.15, 2.05, 1.55, 3.55, '#0f172a'),
+        part(0, 1.35, -0.1, 2.12, 0.48, 1.85, '#f8fafc'),
+        part(0, 1.38, 1.42, 1.88, 1.25, 1.25, '#38bdf8', 0.28),
+        // Stub weapon wings + twin side-mounted missile launcher pods with red/white missile tips!
+        part(-1.32, 0.96, 0.28, 0.86, 0.14, 0.68, '#1e293b'),
+        part(1.32, 0.96, 0.28, 0.86, 0.14, 0.68, '#1e293b'),
+        part(-1.58, 0.80, 0.34, 0.46, 0.38, 1.38, '#334155'),
+        part(1.58, 0.80, 0.34, 0.46, 0.38, 1.38, '#334155'),
+        part(-1.58, 0.80, 0.66, 0.48, 0.40, 0.14, '#facc15', 0.3),
+        part(1.58, 0.80, 0.66, 0.48, 0.40, 0.14, '#facc15', 0.3),
+        part(-1.48, 0.80, 1.08, 0.15, 0.15, 0.26, '#f8fafc', 0.25),
+        part(-1.68, 0.80, 1.08, 0.15, 0.15, 0.26, '#f8fafc', 0.25),
+        part(1.48, 0.80, 1.08, 0.15, 0.15, 0.26, '#f8fafc', 0.25),
+        part(1.68, 0.80, 1.08, 0.15, 0.15, 0.26, '#f8fafc', 0.25),
+        part(-1.48, 0.80, 1.24, 0.13, 0.13, 0.16, '#ef4444', 0.88),
+        part(-1.68, 0.80, 1.24, 0.13, 0.13, 0.16, '#ef4444', 0.88),
+        part(1.48, 0.80, 1.24, 0.13, 0.13, 0.16, '#ef4444', 0.88),
+        part(1.68, 0.80, 1.24, 0.13, 0.13, 0.16, '#ef4444', 0.88),
+        // Tail boom + vertical stabilizer fin + belly searchlight pod + rotor mast
+        part(0, 1.48, -2.95, 0.58, 0.58, 3.2, '#0f172a'),
+        part(0, 2.05, -4.35, 0.18, 1.15, 0.78, '#f8fafc'),
+        part(0, 0.48, 1.15, 0.48, 0.36, 0.48, '#fef08a', 0.98),
+        part(0, 2.35, 0.1, 0.28, 0.56, 0.28, '#94a3b8')
+      );
+      break;
+    }
+  }
+
+  return parts;
+}
+
+export function buildVehicleParts(vehicleId = 'sedan', primaryColor = '#ef4444', accentColor = '#fef08a', wheelSpin = 0, opts = {}) {
+  if (isCopVehicleKey(vehicleId)) {
+    return buildCopVehicleParts(vehicleId, wheelSpin, opts);
+  }
   const pCol = primaryColor || '#ef4444';
   const aCol = accentColor || '#fef08a';
+  if (opts && opts.povSelf === true) {
+    return buildPovVehicleParts(vehicleId, pCol, aCol, wheelSpin, opts);
+  }
+  const parts = [];
   const glass = '#1e293b';
   const darkMetal = '#27272a';
   const chrome = '#e2e8f0';
@@ -305,14 +867,14 @@ export function buildVehicleParts(vehicleId = 'sedan', primaryColor = '#ef4444',
     }
 
     case 'mini': {
-      addWheels(parts, 0.94, 0.95, -0.95, 0.42, 0.38, wheelSpin, aCol);
+      addWheels(parts, 0.94, 0.98, -0.95, 0.42, 0.38, wheelSpin, aCol);
       // Cute compact pocket buggy body
-      parts.push(part(0, 0.74, 0, 1.82, 0.68, 2.95, pCol));
+      parts.push(part(0, 0.74, 0.08, 1.82, 0.68, 3.12, pCol));
       parts.push(part(0, 1.38, -0.08, 1.56, 0.66, 1.82, aCol));
       parts.push(part(0, 1.36, -0.06, 1.6, 0.46, 1.46, glass));
       // Bug-eye round headlights & RC spring antenna!
-      parts.push(part(-0.58, 0.92, 1.48, 0.38, 0.38, 0.2, '#fef9c3', 0.92));
-      parts.push(part(0.58, 0.92, 1.48, 0.38, 0.38, 0.2, '#fef9c3', 0.92));
+      parts.push(part(-0.58, 0.92, 1.64, 0.38, 0.38, 0.2, '#fef9c3', 0.92));
+      parts.push(part(0.58, 0.92, 1.64, 0.38, 0.38, 0.2, '#fef9c3', 0.92));
       parts.push(part(-0.55, 1.65, -1.25, 0.08, 0.95, 0.08, chrome));
       parts.push(part(-0.55, 2.16, -1.25, 0.22, 0.22, 0.22, '#ef4444', 0.85));
       parts.push(part(-0.58, 0.78, -1.5, 0.34, 0.24, 0.14, '#ef4444', 0.8));
@@ -532,12 +1094,32 @@ function emitDriftSparks(batcher, x, y, z, yaw, pitch, roll, scale, tier, time) 
   }
 }
 
-function emitTwinRpgLauncher(batcher, x, y, z, yaw, pitch, roll, scale, mountY, isRunner, isPovSelf) {
+function emitTwinRpgLauncher(batcher, x, y, z, yaw, pitch, roll, scale, mountY, isRunner, isPovSelf, vehicleKey = 'sedan') {
   // Chunky 3D Voxel Olive-Green Twin-Barrel RPG Launcher with Dual Red-Gold Warhead Tips!
-  // In POV self-view, mounted cleanly on the right fender/shoulder edge so POV center stays 100% unobstructed!
-  const baseX = isPovSelf ? 1.06 : isRunner ? 0.92 : 0.84;
-  const baseY = isPovSelf ? (isRunner ? 1.92 : 1.24) : mountY;
-  const baseZ = isPovSelf ? 1.18 : 0.18;
+  // In POV self-view, mounted cleanly on the right front fender/shoulder (strictly z >= 0.74) so center stays 100% unobstructed!
+  if (isPovSelf) {
+    const fenderMount = POV_FENDER_RPG_MOUNT[vehicleKey] || POV_FENDER_RPG_MOUNT.sedan;
+    const baseX = isRunner ? 0.94 : 1.06;
+    const baseY = isRunner ? 1.92 : fenderMount.y;
+    const baseZ = isRunner ? 1.38 : fenderMount.z;
+    const povRpgParts = [
+      part(baseX, baseY - 0.14, baseZ, 0.54, 0.18, 0.64, '#27272a'),
+      part(baseX, baseY + 0.05, baseZ - 0.58, 0.72, 0.32, 0.12, '#18181b'),
+      part(baseX - 0.18, baseY + 0.06, baseZ, 0.30, 0.30, 1.24, '#4d5d3b'),
+      part(baseX + 0.18, baseY + 0.06, baseZ, 0.30, 0.30, 1.24, '#3f4f30'),
+      part(baseX, baseY + 0.06, baseZ + 0.32, 0.68, 0.33, 0.16, '#facc15', 0.25),
+      part(baseX - 0.18, baseY + 0.06, baseZ + 0.76, 0.36, 0.36, 0.42, '#ef4444', 0.72),
+      part(baseX + 0.18, baseY + 0.06, baseZ + 0.76, 0.36, 0.36, 0.42, '#ef4444', 0.72),
+      part(baseX - 0.18, baseY + 0.06, baseZ + 1.02, 0.17, 0.17, 0.20, '#fef08a', 0.95),
+      part(baseX + 0.18, baseY + 0.06, baseZ + 1.02, 0.17, 0.17, 0.20, '#fef08a', 0.95),
+    ];
+    emitPartList(batcher, povRpgParts, x, y, z, yaw, pitch, roll, scale);
+    return;
+  }
+
+  const baseX = isRunner ? 0.92 : 0.84;
+  const baseY = mountY;
+  const baseZ = 0.18;
 
   const rpgParts = [
     // Steel side/roof mounting bracket & blast collar
@@ -603,7 +1185,9 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
   }
 
   const steerVal = player.steer ?? player.steerInput ?? 0;
-  const driftRoll = clamp(-steerVal * (player.drifting ? 0.2 : 0.11), -0.24, 0.24);
+  const driftRoll = isPovSelf
+    ? clamp(-steerVal * (player.drifting ? 0.11 : 0.065), -0.13, 0.13)
+    : clamp(-steerVal * (player.drifting ? 0.2 : 0.11), -0.24, 0.24);
   const airPitch = y > 0.25 ? clamp(-vy * 0.024, -0.38, 0.38) : 0;
 
   const isStar = starTimer > 0;
@@ -617,6 +1201,137 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
   const avatarId = player.avatarId || 'default_hero';
   const wheelSpin = player.wheelSpin ?? time * speed * 0.65;
   const mode = player.characterMode || 'car_driver';
+  const seedOff = (player.id ? String(player.id).charCodeAt(0) : 0) * 0.37;
+
+  if (player.playerRole === 'cop') {
+    // PLAYABLE POLICE TEAM: Police Interceptor, Armored SWAT, Flying Attack Helicopter, or Heavy Police Tank!
+    const copUnitId = normalizeCopVehicleId(player.copVehicleId);
+
+    if (isPovSelf) {
+      const povPitch = copUnitId === 'cop_heli' ? clamp(-vy * 0.012, -0.18, 0.18) : airPitch;
+      const povParts = buildCopPovParts(copUnitId, wheelSpin, {
+        steer: steerVal,
+        time,
+      });
+      emitPartList(batcher, povParts, x, y, z, yaw, povPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+
+      if (copUnitId === 'cop_heli') {
+        const groundSpotY = player.groundY ?? 0.08;
+        const spotRadius = 5.4 * scale;
+        if (typeof batcher.addTranslucentBox === 'function') {
+          batcher.addTranslucentBox(x, groundSpotY, z, spotRadius * 1.55, 0.06, spotRadius * 1.55, '#fef9c3', 0.22, time * 0.6);
+          emitTranslucentRing(batcher, x, groundSpotY + 0.03, z, spotRadius, 12, '#fde047', 0.44);
+        } else {
+          emitRingSegments(batcher, x, groundSpotY + 0.04, z, spotRadius, 12, '#fef08a', 0.82);
+        }
+      } else if ((copUnitId === 'cop_cruiser' || copUnitId === 'cop_swat') && heldItemId === 'homing_rocket') {
+        emitTwinRpgLauncher(batcher, x, y, z, yaw, povPitch, driftRoll, scale, 2.0, false, true, copUnitId);
+      }
+    } else if (copUnitId === 'cop_heli') {
+      const bobY = y + Math.sin(time * 3.8 + seedOff) * 0.28 * scale;
+      const heliPitch = clamp(speed * 0.0035, 0.04, 0.16) + clamp(-vy * 0.01, -0.16, 0.16);
+      const hParts = buildCopVehicleParts('cop_heli', wheelSpin, { time });
+      emitPartList(batcher, hParts, x, bobY, z, yaw, heliPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+
+      // Fast-spinning 4-blade main rotor + spinning tail rotor!
+      const rotorYaw = time * 24.0 + seedOff;
+      const mastW = transformLocalOffset(0, 2.62 * scale, 0.1 * scale, yaw, heliPitch, driftRoll);
+      batcher.addBox(x + mastW.x, bobY + mastW.y, z + mastW.z, 7.8 * scale, 0.08 * scale, 0.42 * scale, '#cbd5e1', rotorYaw, 0, 0, 0.18 + starEmissive);
+      batcher.addBox(x + mastW.x, bobY + mastW.y, z + mastW.z, 0.42 * scale, 0.08 * scale, 7.8 * scale, '#cbd5e1', rotorYaw, 0, 0, 0.18 + starEmissive);
+
+      const tailSpin = time * 28.0 + seedOff;
+      const tailW = transformLocalOffset(0.16 * scale, 2.05 * scale, -4.35 * scale, yaw, heliPitch, driftRoll);
+      batcher.addBox(x + tailW.x, bobY + tailW.y, z + tailW.z, 0.08 * scale, 1.48 * scale, 0.20 * scale, '#e2e8f0', yaw, tailSpin, 0, 0.22 + starEmissive);
+      batcher.addBox(x + tailW.x, bobY + tailW.y, z + tailW.z, 0.08 * scale, 0.20 * scale, 1.48 * scale, '#ef4444', yaw, tailSpin, 0, 0.45 + starEmissive);
+
+      // Upper cowling & belly flashing police siren bars + custom face cutout with 3D Police Cap & Gold Badge!
+      emitPoliceSirenBar(batcher, x, bobY, z, yaw, heliPitch, driftRoll, scale, 2.16, 0.92, 1.32, time, seedOff);
+      emitPoliceSirenBar(batcher, x, bobY, z, yaw, heliPitch, driftRoll, scale, 0.52, -0.4, 1.4, time, seedOff);
+      emitCopFriendCutout(batcher, { avatarId }, x, bobY, z, yaw, heliPitch, driftRoll, scale, 2.22, {
+        width: 2.28,
+        tint: isStar ? rainbowAccent : '#ffffff',
+        extraEmissive: starEmissive,
+      });
+
+      // Translucent ground searchlight disc + ring projected onto street/rooftop below!
+      const groundSpotY = player.groundY ?? 0.08;
+      const spotRadius = 5.4 * scale;
+      if (typeof batcher.addTranslucentBox === 'function') {
+        batcher.addTranslucentBox(x, groundSpotY, z, spotRadius * 1.55, 0.06, spotRadius * 1.55, '#fef9c3', 0.24, time * 0.6);
+        emitTranslucentRing(batcher, x, groundSpotY + 0.03, z, spotRadius, 12, '#fde047', 0.48);
+      } else {
+        emitRingSegments(batcher, x, groundSpotY + 0.04, z, spotRadius, 12, '#fef08a', 0.85);
+      }
+
+      if (isSugar) {
+        emitSugarHyperFlames(batcher, x, bobY, z, yaw, heliPitch, driftRoll, scale, -1.85, time);
+      } else if (boostTimer > 0) {
+        emitNitroFlames(batcher, x, bobY, z, yaw, heliPitch, driftRoll, scale, -1.85, time);
+      }
+    } else if (copUnitId === 'cop_tank') {
+      const hullParts = buildCopTankHullParts(wheelSpin);
+      emitPartList(batcher, hullParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+
+      const turretYaw = player.turretAngle ?? yaw;
+      const turretParts = buildCopTankTurretParts();
+      emitPartList(batcher, turretParts, x, y, z, turretYaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+
+      emitPoliceSirenBar(batcher, x, y, z, turretYaw, airPitch, driftRoll, scale, 2.32, 0.42, 1.12, time, seedOff);
+      emitCopFriendCutout(batcher, { avatarId }, x, y, z, turretYaw, airPitch, driftRoll, scale, 2.35, {
+        width: 2.32,
+        tint: isStar ? rainbowAccent : '#ffffff',
+        extraEmissive: starEmissive,
+      });
+
+      if (isSugar) {
+        emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.45, time);
+      } else if (boostTimer > 0) {
+        emitNitroFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.45, time);
+      }
+      if (driftSparkTier >= 1) {
+        emitDriftSparks(batcher, x, y, z, yaw, airPitch, driftRoll, scale, driftSparkTier, time);
+      }
+    } else {
+      // 'cop_cruiser' or 'cop_swat'
+      const isSwat = copUnitId === 'cop_swat';
+      const cParts = buildCopVehicleParts(copUnitId, wheelSpin, { time });
+      emitPartList(batcher, cParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+
+      const sirenY = isSwat ? 2.45 : 1.80;
+      const sirenZ = isSwat ? 1.25 : -0.05;
+      const sirenW = isSwat ? 1.72 : 1.48;
+      const mountY = isSwat ? 2.42 : 1.85;
+      emitPoliceSirenBar(batcher, x, y, z, yaw, airPitch, driftRoll, scale, sirenY, sirenZ, sirenW, time, seedOff);
+      emitCopFriendCutout(batcher, { avatarId }, x, y, z, yaw, airPitch, driftRoll, scale, mountY, {
+        width: 2.34,
+        tint: isStar ? rainbowAccent : '#ffffff',
+        extraEmissive: starEmissive,
+      });
+
+      if (heldItemId === 'homing_rocket') {
+        emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, mountY + 0.34, false, false, copUnitId);
+      }
+      const backZ = isSwat ? -2.42 : -2.12;
+      if (isSugar) {
+        emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, backZ, time);
+      } else if (boostTimer > 0) {
+        emitNitroFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, backZ, time);
+      }
+      if (driftSparkTier >= 1) {
+        emitDriftSparks(batcher, x, y, z, yaw, airPitch, driftRoll, scale, driftSparkTier, time);
+      }
+    }
+
+    if (isStar) {
+      emitStarAura(batcher, x, y, z, scale, time);
+    }
+    if (shockwaveTimer > 0) {
+      const prog = 1 - clamp(shockwaveTimer / 0.55, 0, 1);
+      const ringR = (3.0 + prog * 14.0) * scale;
+      emitRingSegments(batcher, x, y + 0.6, z, ringR, 16, '#a855f7', 0.9);
+    }
+    return;
+  }
 
   if (mode === 'runner') {
     // MODE 3: "Just Myself (On Foot)" — sprinting 3D blocky character with custom photo head & torso!
@@ -624,151 +1339,100 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
     const stride = moving ? time * Math.max(9.0, speed * 0.42) : time * 2.0;
     const swing = moving ? Math.sin(stride) * 0.85 : Math.sin(stride) * 0.06;
     const bounce = moving ? Math.abs(Math.sin(stride)) * 0.24 * scale : 0;
-    const leanPitch = clamp(speed * 0.0065, 0, 0.28) + airPitch;
+    const leanPitch = (isPovSelf ? 0 : clamp(speed * 0.0065, 0, 0.28)) + airPitch;
 
-    const baseY = y + bounce;
+    const baseY = y + (isPovSelf ? bounce * 0.35 : bounce);
 
-    // Left & Right pumping legs + oversized chunky sneakers!
-    for (const side of [-1, 1]) {
-      const legSwing = side * swing;
-      const hipX = side * 0.34;
-      const legPos = transformLocalOffset(hipX * scale, 0.62 * scale, Math.sin(legSwing) * 0.25 * scale, yaw, leanPitch, driftRoll);
-      batcher.addBox(
-        x + legPos.x,
-        baseY + legPos.y,
-        z + legPos.z,
-        0.42 * scale,
-        0.78 * scale,
-        0.44 * scale,
-        '#1e3a8a',
+    if (!isPovSelf) {
+      // Left & Right pumping legs + oversized chunky sneakers!
+      for (const side of [-1, 1]) {
+        const legSwing = side * swing;
+        const hipX = side * 0.34;
+        const legPos = transformLocalOffset(hipX * scale, 0.62 * scale, Math.sin(legSwing) * 0.25 * scale, yaw, leanPitch, driftRoll);
+        batcher.addBox(
+          x + legPos.x,
+          baseY + legPos.y,
+          z + legPos.z,
+          0.42 * scale,
+          0.78 * scale,
+          0.44 * scale,
+          '#1e3a8a',
+          yaw,
+          leanPitch + legSwing * 0.75,
+          driftRoll,
+          starEmissive
+        );
+        const shoePos = transformLocalOffset(
+          hipX * scale,
+          0.22 * scale,
+          (0.14 + Math.sin(legSwing) * 0.42) * scale,
+          yaw,
+          0,
+          driftRoll
+        );
+        batcher.addBox(
+          x + shoePos.x,
+          baseY + shoePos.y,
+          z + shoePos.z,
+          0.5 * scale,
+          0.32 * scale,
+          0.74 * scale,
+          pColor,
+          yaw,
+          legSwing * 0.45,
+          driftRoll,
+          starEmissive
+        );
+        batcher.addBox(
+          x + shoePos.x,
+          baseY + shoePos.y - 0.13 * scale,
+          z + shoePos.z,
+          0.52 * scale,
+          0.1 * scale,
+          0.78 * scale,
+          '#ffffff',
+          yaw,
+          legSwing * 0.45,
+          driftRoll,
+          starEmissive
+        );
+      }
+
+      // Custom photo 3D torso box!
+      const torsoPos = transformLocalOffset(0, 1.46 * scale, 0, yaw, leanPitch, driftRoll);
+      batcher.addTexturedBox({
+        avatarId,
+        x: x + torsoPos.x,
+        y: baseY + torsoPos.y,
+        z: z + torsoPos.z,
+        sx: 1.16 * scale,
+        sy: 1.18 * scale,
+        sz: 0.66 * scale,
         yaw,
-        leanPitch + legSwing * 0.75,
-        driftRoll,
-        starEmissive
-      );
-      const shoePos = transformLocalOffset(
-        hipX * scale,
-        0.22 * scale,
-        (0.14 + Math.sin(legSwing) * 0.42) * scale,
-        yaw,
-        0,
-        driftRoll
-      );
+        pitch: leanPitch,
+        roll: driftRoll,
+        tint: isStar ? rainbowPrimary : '#ffffff',
+        emissive: 0.14 + starEmissive,
+      });
+
+      // Fluttering hero cape behind runner!
+      const capeWave = Math.sin(time * 16) * 0.12;
+      const capePos = transformLocalOffset(0, 1.42 * scale, -0.52 * scale, yaw, leanPitch, driftRoll);
       batcher.addBox(
-        x + shoePos.x,
-        baseY + shoePos.y,
-        z + shoePos.z,
-        0.5 * scale,
-        0.32 * scale,
-        0.74 * scale,
-        pColor,
-        yaw,
-        legSwing * 0.45,
-        driftRoll,
-        starEmissive
-      );
-      batcher.addBox(
-        x + shoePos.x,
-        baseY + shoePos.y - 0.13 * scale,
-        z + shoePos.z,
-        0.52 * scale,
+        x + capePos.x,
+        baseY + capePos.y,
+        z + capePos.z,
+        1.08 * scale,
+        1.05 * scale,
         0.1 * scale,
-        0.78 * scale,
-        '#ffffff',
-        yaw,
-        legSwing * 0.45,
-        driftRoll,
-        starEmissive
-      );
-    }
-
-    // Custom photo 3D torso box!
-    const torsoPos = transformLocalOffset(0, 1.46 * scale, 0, yaw, leanPitch, driftRoll);
-    batcher.addTexturedBox({
-      avatarId,
-      x: x + torsoPos.x,
-      y: baseY + torsoPos.y,
-      z: z + torsoPos.z,
-      sx: 1.16 * scale,
-      sy: 1.18 * scale,
-      sz: 0.66 * scale,
-      yaw,
-      pitch: leanPitch,
-      roll: driftRoll,
-      tint: isStar ? rainbowPrimary : '#ffffff',
-      emissive: 0.14 + starEmissive,
-    });
-
-    // Pumping arms (pushed slightly forward in POV so you see your own blocky hands pumping!)
-    for (const side of [-1, 1]) {
-      const armSwing = -side * swing;
-      const armFwdBase = isPovSelf ? 0.96 : 0.0;
-      const armYBase = isPovSelf ? 1.76 : 1.44;
-      const armXBase = isPovSelf ? side * 0.66 : side * 0.8;
-      const armPos = transformLocalOffset(
-        armXBase * scale,
-        (armYBase + (isPovSelf ? Math.max(0, Math.sin(armSwing)) * 0.16 : 0)) * scale,
-        (armFwdBase + Math.sin(armSwing) * (isPovSelf ? 0.36 : 0.28)) * scale,
-        yaw,
-        leanPitch,
-        driftRoll
-      );
-      batcher.addBox(
-        x + armPos.x,
-        baseY + armPos.y,
-        z + armPos.z,
-        0.34 * scale,
-        0.82 * scale,
-        0.34 * scale,
-        pColor,
-        yaw,
-        (isPovSelf ? -0.85 : leanPitch) + armSwing * 0.75,
-        driftRoll,
-        starEmissive
-      );
-      // Blocky hand/fist cuff
-      const handPos = transformLocalOffset(
-        armXBase * scale,
-        (armYBase + (isPovSelf ? 0.12 + Math.sin(armSwing) * 0.22 : -0.44)) * scale,
-        (armFwdBase + (isPovSelf ? 0.42 : 0.08) + Math.sin(armSwing) * 0.38) * scale,
-        yaw,
-        leanPitch,
-        driftRoll
-      );
-      batcher.addBox(
-        x + handPos.x,
-        baseY + handPos.y,
-        z + handPos.z,
-        0.36 * scale,
-        0.32 * scale,
-        0.36 * scale,
         aColor,
         yaw,
-        armSwing * 0.6,
+        0.48 + clamp(speed * 0.012, 0, 0.45) + capeWave,
         driftRoll,
-        starEmissive + 0.1
+        starEmissive
       );
-    }
 
-    // Fluttering hero cape behind runner!
-    const capeWave = Math.sin(time * 16) * 0.12;
-    const capePos = transformLocalOffset(0, 1.42 * scale, -0.52 * scale, yaw, leanPitch, driftRoll);
-    batcher.addBox(
-      x + capePos.x,
-      baseY + capePos.y,
-      z + capePos.z,
-      1.08 * scale,
-      1.05 * scale,
-      0.1 * scale,
-      aColor,
-      yaw,
-      0.48 + clamp(speed * 0.012, 0, 0.45) + capeWave,
-      driftRoll,
-      starEmissive
-    );
-
-    // Large prominent custom photo cutout head (suppressed ONLY for POV self so it never blocks the camera!)
-    if (!isPovSelf) {
+      // Large prominent custom photo cutout head
       const headPos = transformLocalOffset(0, 2.86 * scale, 0.08 * scale, yaw, leanPitch, driftRoll);
       batcher.addTexturedCard({
         avatarId,
@@ -786,8 +1450,101 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       });
     }
 
+    // Pumping arms (strictly z >= 0.82 in POV self so blocky fists pump cleanly at bottom corners with zero elbow clipping!)
+    for (const side of [-1, 1]) {
+      const armSwing = -side * swing;
+      if (isPovSelf) {
+        const sVal = Math.sin(armSwing);
+        const armPos = transformLocalOffset(
+          side * 0.68 * scale,
+          (1.66 + Math.max(0, sVal) * 0.16) * scale,
+          (1.12 + sVal * 0.18) * scale,
+          yaw,
+          leanPitch,
+          driftRoll
+        );
+        batcher.addBox(
+          x + armPos.x,
+          baseY + armPos.y,
+          z + armPos.z,
+          0.32 * scale,
+          0.32 * scale,
+          0.56 * scale,
+          pColor,
+          yaw,
+          -0.25 + sVal * 0.28,
+          driftRoll,
+          starEmissive
+        );
+        const handPos = transformLocalOffset(
+          side * 0.66 * scale,
+          (1.76 + sVal * 0.20) * scale,
+          (1.44 + sVal * 0.22) * scale,
+          yaw,
+          leanPitch,
+          driftRoll
+        );
+        batcher.addBox(
+          x + handPos.x,
+          baseY + handPos.y,
+          z + handPos.z,
+          0.36 * scale,
+          0.34 * scale,
+          0.36 * scale,
+          aColor,
+          yaw,
+          sVal * 0.35,
+          driftRoll,
+          starEmissive + 0.1
+        );
+      } else {
+        const armPos = transformLocalOffset(
+          side * 0.8 * scale,
+          1.44 * scale,
+          Math.sin(armSwing) * 0.28 * scale,
+          yaw,
+          leanPitch,
+          driftRoll
+        );
+        batcher.addBox(
+          x + armPos.x,
+          baseY + armPos.y,
+          z + armPos.z,
+          0.34 * scale,
+          0.82 * scale,
+          0.34 * scale,
+          pColor,
+          yaw,
+          leanPitch + armSwing * 0.75,
+          driftRoll,
+          starEmissive
+        );
+        const handPos = transformLocalOffset(
+          side * 0.8 * scale,
+          (1.44 - 0.44) * scale,
+          (0.08 + Math.sin(armSwing) * 0.38) * scale,
+          yaw,
+          leanPitch,
+          driftRoll
+        );
+        batcher.addBox(
+          x + handPos.x,
+          baseY + handPos.y,
+          z + handPos.z,
+          0.36 * scale,
+          0.32 * scale,
+          0.36 * scale,
+          aColor,
+          yaw,
+          armSwing * 0.6,
+          driftRoll,
+          starEmissive + 0.1
+        );
+      }
+    }
+
     if (heldItemId === 'homing_rocket') {
-      emitTwinRpgLauncher(batcher, x, baseY, z, yaw, leanPitch, driftRoll, scale, 2.05, true, isPovSelf);
+      emitTwinRpgLauncher(batcher, x, baseY, z, yaw, leanPitch, driftRoll, scale, 2.05, true, isPovSelf, 'runner');
     }
     if (isSugar) {
       emitSugarHyperFlames(batcher, x, baseY, z, yaw, 0, driftRoll, scale, -0.52, time);
@@ -796,56 +1553,84 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
     }
   } else if (mode === 'photo_car') {
     // MODE 2: "Look Like a Car" — rolling 3D photo-car chassis where player's photo IS the sculpted body!
-    const chassisParts = [];
-    addWheels(chassisParts, 1.12, 1.28, -1.28, 0.45, 0.44, wheelSpin, aColor);
-    // Undercarriage frame, bumpers, lights, twin exhausts & rear wing
-    chassisParts.push(part(0, 0.44, 0, 2.14, 0.26, 4.15, '#18181b'));
-    addLightsAndBumpers(chassisParts, 1.08, 0.64, 2.08, aColor);
-    chassisParts.push(part(-0.56, 0.42, -2.16, 0.22, 0.2, 0.32, '#e2e8f0'));
-    chassisParts.push(part(0.56, 0.42, -2.16, 0.22, 0.2, 0.32, '#e2e8f0'));
-    // Sporty rear spoiler wing
-    chassisParts.push(part(-0.72, 1.38, -1.86, 0.14, 0.52, 0.28, pColor));
-    chassisParts.push(part(0.72, 1.38, -1.86, 0.14, 0.52, 0.28, pColor));
-    chassisParts.push(part(0, 1.66, -1.94, 2.22, 0.14, 0.48, aColor));
+    if (isPovSelf) {
+      // POV Self: suppress upper cabPos box (y = 1.72), crest card, and rear geometry; emit clean custom-photo front hood (z = 0.74..2.08)!
+      const povChassis = [];
+      addPovFrontWheels(povChassis, 1.12, 1.38, 0.45, 0.44, wheelSpin, aColor, clamp(-steerVal * 0.18, -0.2, 0.2));
+      povChassis.push(part(0, 0.62, 0.86, 2.06, 0.88, 0.24, '#18181b'));
+      povChassis.push(part(0, 1.12, 0.80, 1.98, 0.08, 0.12, aColor));
+      povChassis.push(part(-1.02, 1.02, 1.42, 0.24, 0.24, 1.30, aColor));
+      povChassis.push(part(1.02, 1.02, 1.42, 0.24, 0.24, 1.30, aColor));
+      povChassis.push(part(0, 0.54, 2.12, 2.08, 0.26, 0.20, aColor));
+      povChassis.push(part(-0.78, 1.02, 2.08, 0.40, 0.20, 0.14, '#fef9c3', 0.92));
+      povChassis.push(part(0.78, 1.02, 2.08, 0.40, 0.20, 0.14, '#fef9c3', 0.92));
+      emitPartList(batcher, povChassis, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
 
-    emitPartList(batcher, chassisParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
+      const povHoodPos = transformLocalOffset(0, 0.84 * scale, 1.41 * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedBox({
+        avatarId,
+        x: x + povHoodPos.x,
+        y: y + povHoodPos.y,
+        z: z + povHoodPos.z,
+        sx: 2.04 * scale,
+        sy: 0.52 * scale,
+        sz: 1.34 * scale,
+        yaw,
+        pitch: airPitch,
+        roll: driftRoll,
+        tint: isStar ? rainbowPrimary : '#ffffff',
+        emissive: 0.18 + starEmissive,
+      });
+    } else {
+      const chassisParts = [];
+      addWheels(chassisParts, 1.12, 1.28, -1.28, 0.45, 0.44, wheelSpin, aColor);
+      // Undercarriage frame, bumpers, lights, twin exhausts & rear wing
+      chassisParts.push(part(0, 0.44, 0, 2.14, 0.26, 4.15, '#18181b'));
+      addLightsAndBumpers(chassisParts, 1.08, 0.64, 2.08, aColor);
+      chassisParts.push(part(-0.56, 0.42, -2.16, 0.22, 0.2, 0.32, '#e2e8f0'));
+      chassisParts.push(part(0.56, 0.42, -2.16, 0.22, 0.2, 0.32, '#e2e8f0'));
+      // Sporty rear spoiler wing
+      chassisParts.push(part(-0.72, 1.38, -1.86, 0.14, 0.52, 0.28, pColor));
+      chassisParts.push(part(0.72, 1.38, -1.86, 0.14, 0.52, 0.28, pColor));
+      chassisParts.push(part(0, 1.66, -1.94, 2.22, 0.14, 0.48, aColor));
 
-    // Sculpted lower 3D photo-car body!
-    const lowerPos = transformLocalOffset(0, 0.96 * scale, 0.04 * scale, yaw, airPitch, driftRoll);
-    batcher.addTexturedBox({
-      avatarId,
-      x: x + lowerPos.x,
-      y: y + lowerPos.y,
-      z: z + lowerPos.z,
-      sx: 2.18 * scale,
-      sy: 0.86 * scale,
-      sz: 4.02 * scale,
-      yaw,
-      pitch: airPitch,
-      roll: driftRoll,
-      tint: isStar ? rainbowPrimary : '#ffffff',
-      emissive: 0.16 + starEmissive,
-    });
+      emitPartList(batcher, chassisParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
 
-    // Sculpted upper 3D photo-car cab!
-    const cabPos = transformLocalOffset(0, 1.72 * scale, -0.15 * scale, yaw, airPitch, driftRoll);
-    batcher.addTexturedBox({
-      avatarId,
-      x: x + cabPos.x,
-      y: y + cabPos.y,
-      z: z + cabPos.z,
-      sx: 1.82 * scale,
-      sy: 0.82 * scale,
-      sz: 2.15 * scale,
-      yaw,
-      pitch: airPitch,
-      roll: driftRoll,
-      tint: isStar ? rainbowAccent : '#ffffff',
-      emissive: 0.18 + starEmissive,
-    });
+      // Sculpted lower 3D photo-car body!
+      const lowerPos = transformLocalOffset(0, 0.96 * scale, 0.04 * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedBox({
+        avatarId,
+        x: x + lowerPos.x,
+        y: y + lowerPos.y,
+        z: z + lowerPos.z,
+        sx: 2.18 * scale,
+        sy: 0.86 * scale,
+        sz: 4.02 * scale,
+        yaw,
+        pitch: airPitch,
+        roll: driftRoll,
+        tint: isStar ? rainbowPrimary : '#ffffff',
+        emissive: 0.16 + starEmissive,
+      });
 
-    // Roof photo crest topper (suppressed ONLY for POV self so view stays wide open!)
-    if (!isPovSelf) {
+      // Sculpted upper 3D photo-car cab!
+      const cabPos = transformLocalOffset(0, 1.72 * scale, -0.15 * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedBox({
+        avatarId,
+        x: x + cabPos.x,
+        y: y + cabPos.y,
+        z: z + cabPos.z,
+        sx: 1.82 * scale,
+        sy: 0.82 * scale,
+        sz: 2.15 * scale,
+        yaw,
+        pitch: airPitch,
+        roll: driftRoll,
+        tint: isStar ? rainbowAccent : '#ffffff',
+        emissive: 0.18 + starEmissive,
+      });
+
+      // Roof photo crest topper
       const crestPos = transformLocalOffset(0, 2.55 * scale, -0.1 * scale, yaw, airPitch, driftRoll);
       batcher.addTexturedCard({
         avatarId,
@@ -864,7 +1649,7 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
     }
 
     if (heldItemId === 'homing_rocket') {
-      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, 2.25, false, isPovSelf);
+      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, 2.25, false, isPovSelf, 'photo_car');
     }
     if (isSugar) {
       emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.18, time);
@@ -875,9 +1660,13 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       emitDriftSparks(batcher, x, y, z, yaw, airPitch, driftRoll, scale, driftSparkTier, time);
     }
   } else {
-    // MODE 1: "car_driver" ("People on Car") — 3D voxel vehicle + big roof cutout + hood photo decal!
+    // MODE 1: "car_driver" ("People on Car") — 3D voxel vehicle + big roof cutout + flat hood photo decal!
     const vehicleId = player.vehicleId || 'sedan';
-    const vParts = buildVehicleParts(vehicleId, pColor, aColor, wheelSpin);
+    const vParts = buildVehicleParts(vehicleId, pColor, aColor, wheelSpin, {
+      povSelf: isPovSelf,
+      steer: steerVal,
+      time,
+    });
     emitPartList(batcher, vParts, x, y, z, yaw, airPitch, driftRoll, scale, rainbowPrimary, starEmissive);
 
     const roofY = VEHICLE_ROOF_Y[vehicleId] ?? 1.92;
@@ -915,26 +1704,30 @@ export function emitPlayerVisuals(batcher, player, time = 0) {
       });
     }
 
-    // Custom photo hood badge on the front hood (visible in ALL camera modes including POV!)
-    const hoodMeta = VEHICLE_HOOD_POS[vehicleId] || VEHICLE_HOOD_POS.sedan;
-    const hoodPos = transformLocalOffset(0, hoodMeta.y * scale, hoodMeta.z * scale, yaw, airPitch, driftRoll);
-    batcher.addTexturedCard({
-      avatarId,
-      x: x + hoodPos.x,
-      y: y + hoodPos.y,
-      z: z + hoodPos.z,
-      width: 1.05 * scale,
-      height: 1.05 * scale,
-      yaw,
-      pitch: -Math.PI * 0.46 + airPitch,
-      roll: driftRoll,
-      billboard: 'none',
-      tint: '#ffffff',
-      emissive: 0.16 + starEmissive,
-    });
+    // Flat horizontal custom photo hood badge (z >= 1.38; omitted on narrow f1/kart/dozer noses so no card edge clips!)
+    const hoodMeta = VEHICLE_HOOD_POS[vehicleId] || null;
+    if (hoodMeta) {
+      const decalY = isPovSelf && hoodMeta.povY !== undefined ? hoodMeta.povY : hoodMeta.y;
+      const decalSize = hoodMeta.size ?? 0.94;
+      const hoodPos = transformLocalOffset(0, decalY * scale, hoodMeta.z * scale, yaw, airPitch, driftRoll);
+      batcher.addTexturedCard({
+        avatarId,
+        x: x + hoodPos.x,
+        y: y + hoodPos.y,
+        z: z + hoodPos.z,
+        width: decalSize * scale,
+        height: decalSize * scale,
+        yaw,
+        pitch: -Math.PI * 0.5 + airPitch,
+        roll: driftRoll,
+        billboard: 'none',
+        tint: '#ffffff',
+        emissive: 0.16 + starEmissive,
+      });
+    }
 
     if (heldItemId === 'homing_rocket') {
-      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, roofY + 0.34, false, isPovSelf);
+      emitTwinRpgLauncher(batcher, x, y, z, yaw, airPitch, driftRoll, scale, roofY + 0.34, false, isPovSelf, vehicleId);
     }
     if (isSugar) {
       emitSugarHyperFlames(batcher, x, y, z, yaw, airPitch, driftRoll, scale, -2.15, time);
@@ -993,28 +1786,34 @@ function emitPoliceSirenBar(batcher, x, y, z, yaw, pitch, roll, scale, barY, bar
   );
 }
 
-function emitCopFriendCutout(batcher, cop, x, y, z, yaw, pitch, roll, scale, mountY) {
+function emitCopFriendCutout(batcher, cop, x, y, z, yaw, pitch, roll, scale, mountY, styleOpts = null) {
   if (!cop.avatarId) return;
+  const cardSize = (styleOpts?.width ?? 2.1) * scale;
+  const extraEm = styleOpts?.extraEmissive ?? 0;
+  const tint = styleOpts?.tint || '#ffffff';
   const cutPos = transformLocalOffset(0, (mountY + 0.98) * scale, -0.05 * scale, yaw, pitch, roll);
   batcher.addTexturedCard({
     avatarId: cop.avatarId,
     x: x + cutPos.x,
     y: y + cutPos.y,
     z: z + cutPos.z,
-    width: 2.1 * scale,
-    height: 2.1 * scale,
+    width: cardSize,
+    height: cardSize,
     yaw,
     pitch: pitch * 0.4,
-    roll: roll * 1.2,
+    roll: roll * 1.25,
     billboard: 'y_blend',
-    tint: '#ffffff',
-    emissive: 0.2,
+    tint,
+    emissive: 0.2 + extraEm,
   });
-  // Cute 3D voxel police cap + gold badge perched on top of friend's cutout!
-  const capPos = transformLocalOffset(0, (mountY + 2.08) * scale, -0.05 * scale, yaw, pitch, roll);
-  batcher.addBox(x + capPos.x, y + capPos.y, z + capPos.z, 0.95 * scale, 0.26 * scale, 0.85 * scale, '#1e3a8a', yaw, pitch, roll, 0.1);
-  const badgePos = transformLocalOffset(0, (mountY + 2.12) * scale, 0.36 * scale, yaw, pitch, roll);
-  batcher.addBox(x + badgePos.x, y + badgePos.y, z + badgePos.z, 0.26 * scale, 0.24 * scale, 0.12 * scale, '#facc15', yaw, pitch, roll, 0.65);
+  // Cute 3D voxel police cap + visor peak + gleaming gold badge perched on top of officer's cutout!
+  const capLift = (cardSize / scale - 2.1) * 0.46;
+  const capPos = transformLocalOffset(0, (mountY + 2.08 + capLift) * scale, -0.05 * scale, yaw, pitch, roll);
+  batcher.addBox(x + capPos.x, y + capPos.y, z + capPos.z, 1.02 * scale, 0.28 * scale, 0.92 * scale, '#1e3a8a', yaw, pitch, roll, 0.12 + extraEm);
+  const brimPos = transformLocalOffset(0, (mountY + 1.96 + capLift) * scale, 0.34 * scale, yaw, pitch, roll);
+  batcher.addBox(x + brimPos.x, y + brimPos.y, z + brimPos.z, 0.94 * scale, 0.10 * scale, 0.34 * scale, '#0f172a', yaw, pitch, roll, 0.08 + extraEm);
+  const badgePos = transformLocalOffset(0, (mountY + 2.14 + capLift) * scale, 0.42 * scale, yaw, pitch, roll);
+  batcher.addBox(x + badgePos.x, y + badgePos.y, z + badgePos.z, 0.28 * scale, 0.26 * scale, 0.12 * scale, '#facc15', yaw, pitch, roll, 0.72 + extraEm);
 }
 
 export function emitCopVisuals(batcher, cop, time = 0) {
@@ -1209,6 +2008,21 @@ export function emitTrafficVisuals(batcher, car, time = 0) {
     const parts = buildVehicleParts('sedan', '#facc15', '#18181b', wheelSpin);
     parts.push(part(0, 1.86, -0.05, 0.72, 0.26, 0.34, '#fef9c3', 0.85));
     emitPartList(batcher, parts, x, y, z, yaw, pitch, roll, scale);
+    return;
+  }
+
+  const isOutlaw = Boolean(car.isOutlaw || car.isStreetRacer || car.outlaw || type === 'outlaw' || type === 'street_racer');
+  if (isOutlaw || type === 'supercar' || type === 'muscle') {
+    const baseVeh = type === 'muscle' ? 'muscle' : 'supercar';
+    const accent = isOutlaw ? '#fde047' : (car.accentColor || '#f8fafc');
+    const parts = buildVehicleParts(baseVeh, col, accent, wheelSpin);
+    emitPartList(batcher, parts, x, y, z, yaw, pitch, roll, scale);
+    if (isOutlaw) {
+      // Pulsing crimson-gold outlaw target diamond above street racer so Solo Police Helis/Tanks spot them easily!
+      const bob = Math.sin(time * 7.0 + x * 0.2) * 0.22;
+      batcher.addBox(x, y + (2.75 + bob) * scale, z, 0.46 * scale, 0.46 * scale, 0.46 * scale, '#ef4444', time * 3.8, 0.65, 0.65, 0.95);
+      emitNitroFlames(batcher, x, y, z, yaw, pitch, roll, scale, -2.12, time);
+    }
     return;
   }
 
@@ -1482,6 +2296,34 @@ export function emitProjectileVisuals(batcher, proj, time = 0) {
   const type = proj.type || 'homing_rocket';
 
   switch (type) {
+    case 'cop_missile': {
+      // Sleek Tactical White/Crimson Finned Police Missile (Heli Air-to-Ground & Tank Cannon) + Glowing Cyan/Amber Exhaust!
+      const rollSpin = time * 18.0;
+      const flicker = 0.85 + Math.sin(time * 70) * 0.32;
+      const horizSpd = Math.hypot(proj.vx || 0, proj.vz || 0) || proj.speed || 64;
+      const mPitch = proj.pitch ?? (proj.vy ? clamp(-Math.atan2(proj.vy, horizSpd), -0.65, 0.65) : 0);
+      const my = Math.max(0.45, y);
+      const missileParts = [
+        // Crisp white tactical missile fuselage + crimson & navy police markings
+        part(0, 0, 0, 0.34, 0.34, 1.86, '#f8fafc', 0.28, 0, 0, rollSpin),
+        part(0, 0, 0.52, 0.37, 0.37, 0.24, '#dc2626', 0.55, 0, 0, rollSpin),
+        part(0, 0, -0.18, 0.36, 0.36, 0.22, '#1e3a8a', 0.32, 0, 0, rollSpin),
+        // Forward guidance canards + 4 cruciform crimson tail stabilizer fins
+        part(0, 0, 0.38, 0.72, 0.08, 0.26, '#ef4444', 0.48, 0, 0, rollSpin),
+        part(0, 0, 0.38, 0.08, 0.72, 0.26, '#ef4444', 0.48, 0, 0, rollSpin),
+        part(0, 0, -0.78, 1.12, 0.09, 0.46, '#dc2626', 0.42, 0, 0, rollSpin),
+        part(0, 0, -0.78, 0.09, 1.12, 0.46, '#dc2626', 0.42, 0, 0, rollSpin),
+        // Crimson warhead nosecone + glowing cyan optical seeker tip
+        part(0, 0, 1.08, 0.42, 0.42, 0.54, '#ef4444', 0.84, 0, 0, rollSpin),
+        part(0, 0, 1.42, 0.22, 0.22, 0.30, '#22d3ee', 1.0, 0, 0, rollSpin),
+        // Glowing electric-cyan inner Mach core + blazing golden-amber rocket exhaust plume!
+        part(0, 0, -1.16, 0.30, 0.30, 0.72 * flicker, '#22d3ee', 1.0),
+        part(0, 0, -1.68 * flicker, 0.46, 0.46, 1.32 * flicker, '#f59e0b', 0.98),
+      ];
+      emitPartList(batcher, missileParts, x, my, z, yaw, mPitch, 0, 1.0);
+      break;
+    }
+
     case 'rpg_rocket':
     case 'homing_rocket': {
       // Sleek 3D Olive/Steel RPG Rocket Tube, Stabilizer Fins, Glowing Red-Gold Warhead & Twin-Stage Thruster Plume!

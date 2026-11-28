@@ -1,5 +1,5 @@
-// Smashy Road Arcade Physics, Locked Character Modes, 5-Star Police AI, Traffic & Multiplayer PvP
-import { WORLD_CONFIG, VEHICLES, WANTED_LEVELS, createDefaultSettings } from './config.js';
+// Smashy Road Arcade Physics, Locked Character Modes, Playable Police Team, 5-Star Police AI, Traffic & Multiplayer PvP
+import { WORLD_CONFIG, VEHICLES, COP_VEHICLES, WANTED_LEVELS, createDefaultSettings } from './config.js';
 
 const COP_SPECS = {
   cruiser: { speed: 47, accel: 36, handling: 3.5, radius: 2.0, mass: 1.05, maxHp: 45 },
@@ -59,8 +59,9 @@ export class Simulation {
 
     this.nextEntityId = 1;
     this.runTime = 0;
-    this.wantedStars = this.settings.startStars || 1;
-    this.wantedLabel = WANTED_LEVELS[0].label;
+    const initAiCopsOn = this.settings.aiCopsEnabled !== false;
+    this.wantedStars = initAiCopsOn ? this.settings.startStars || 1 : 0;
+    this.wantedLabel = initAiCopsOn ? WANTED_LEVELS[0].label : 'AI Cops Off';
     this.comboCount = 0;
     this.comboTimer = 0;
     this.events = [];
@@ -79,6 +80,15 @@ export class Simulation {
     this.settings = { ...this.settings, ...(settings || {}) };
     if (Array.isArray(settings.copAvatarPool)) {
       this.setCopAvatarPool(settings.copAvatarPool);
+    }
+    if (this.settings.aiCopsEnabled === false) {
+      this.cops.length = 0;
+      this.wantedStars = 0;
+      this.wantedLabel = 'AI Cops Off';
+      if (this.localPlayer) {
+        this.localPlayer.bustedProgress = 0;
+        this.localPlayer.stars = 0;
+      }
     }
     this.abilitySystem?.updateSettings?.(this.settings);
   }
@@ -119,9 +129,10 @@ export class Simulation {
     this._prevUseItem = false;
     this._prevHorn = false;
 
-    const startStars = Math.max(1, Math.min(5, Math.round(this.settings.startStars || 1)));
+    const aiCopsOn = this.settings.aiCopsEnabled !== false;
+    const startStars = aiCopsOn ? Math.max(1, Math.min(5, Math.round(this.settings.startStars || 1))) : 0;
     this.wantedStars = startStars;
-    this.wantedLabel = (WANTED_LEVELS[startStars - 1] || WANTED_LEVELS[0]).label;
+    this.wantedLabel = aiCopsOn ? (WANTED_LEVELS[startStars - 1] || WANTED_LEVELS[0]).label : 'AI Cops Off';
 
     const localId = this.settings.playerId || 'local';
     let localSpawnIndex = Number(this.settings.spawnIndex) || 0;
@@ -136,7 +147,7 @@ export class Simulation {
       ? this.world.findSpawnPoint(localSpawnIndex)
       : { x: 0, z: 0, angle: 0 };
     this.localPlayer = this.createLocalPlayer(spawn, this.settings);
-    this.localPlayer.stars = startStars;
+    this.localPlayer.stars = this.localPlayer.playerRole === 'cop' ? 0 : startStars;
 
     // Seed initial remote players on starting grid if multiplayer match
     if (Array.isArray(rosterPlayers) && rosterPlayers.length > 0) {
@@ -161,21 +172,35 @@ export class Simulation {
       }
     }
 
-    // Warm up world chunks around spawn & seed initial ambient traffic + patrol cop
+    // Warm up world chunks around spawn & seed initial ambient traffic / street racers + optional AI patrol cops
     this.world?.update?.(0.016, this.localPlayer.x, this.localPlayer.z);
-    const initialTraffic = Math.round(6 * (this.settings.trafficDensity ?? 1.0));
-    for (let i = 0; i < initialTraffic; i++) {
+    const soloCopMode = this.localPlayer.playerRole === 'cop' && this.remotePlayers.length === 0;
+    const baseTraffic = soloCopMode
+      ? Math.max(7, Math.round(8 * Math.max(0.8, this.settings.trafficDensity ?? 1.0)))
+      : Math.round(6 * (this.settings.trafficDensity ?? 1.0));
+    for (let i = 0; i < baseTraffic; i++) {
       this._spawnTrafficCar(this.localPlayer);
     }
-    const initialCops = Math.min(3, Math.max(1, Math.round(2 * (this.settings.copIntensity ?? 1.0))));
-    for (let i = 0; i < initialCops; i++) {
-      this._spawnCop(this.localPlayer);
+
+    const hasRunnerTarget =
+      this.localPlayer.playerRole !== 'cop' ||
+      this.remotePlayers.some((rp) => rp && rp.playerRole !== 'cop');
+    if (this.settings.aiCopsEnabled !== false && hasRunnerTarget) {
+      const initialCops = Math.min(3, Math.max(1, Math.round(2 * (this.settings.copIntensity ?? 1.0))));
+      for (let i = 0; i < initialCops; i++) {
+        this._spawnCop(this.localPlayer);
+      }
     }
 
     return this.localPlayer;
   }
 
   createLocalPlayer(spawn = { x: 0, z: 0, angle: 0 }, settings = this.settings) {
+    const playerRole = settings.playerRole === 'cop' ? 'cop' : 'runner';
+    const copVeh =
+      COP_VEHICLES.find((v) => v.id === settings.copVehicleId) ||
+      COP_VEHICLES.find((v) => v.id === 'cop_heli') ||
+      COP_VEHICLES[0];
     const mode =
       settings.characterMode === 'photo_car' || settings.characterMode === 'runner'
         ? settings.characterMode
@@ -196,7 +221,15 @@ export class Simulation {
     let maxHp;
     let radius;
 
-    if (mode === 'runner') {
+    if (playerRole === 'cop') {
+      baseSpeed = copVeh.speed * speedMult;
+      accel = copVeh.accel * accelMult;
+      handling = copVeh.handling;
+      drift = Math.max(0.55, Math.min(0.96, copVeh.drift * driftMult));
+      mass = copVeh.mass * massMult;
+      maxHp = Math.round(copVeh.maxHp * Math.max(0.85, massMult));
+      radius = copVeh.radius * scaleMult;
+    } else if (mode === 'runner') {
       // "Just Myself" — ultra-nimble sprinting on foot!
       baseSpeed = 42 * speedMult;
       accel = 78 * accelMult;
@@ -227,7 +260,12 @@ export class Simulation {
 
     const sx = Number(spawn.x) || 0;
     const sz = Number(spawn.z) || 0;
-    const g = this.world?.getGroundHeight ? this.world.getGroundHeight(sx, sz) : { y: 0 };
+    const g = this.world?.getGroundHeight ? this.world.getGroundHeight(sx, sz) : { y: 0, surface: 'road' };
+    const groundY = g.surface === 'water' ? WORLD_CONFIG.WATER_Y : g.y || 0;
+    const isFlying = playerRole === 'cop' && Boolean(copVeh.flying);
+    const hoverY = isFlying ? copVeh.hoverY || 11.5 : 0;
+    const startY = isFlying ? Math.max(Math.max(0, groundY) + 10.5, hoverY) : Math.max(0, g.y || 0);
+    const startAngle = Number(spawn.angle) || 0;
     const items = this.abilitySystem
       ? this.abilitySystem.createPlayerItemState()
       : {
@@ -242,19 +280,30 @@ export class Simulation {
           sugarTimer: 0,
           shrunkTimer: 0,
           shockwaveVisualTimer: 0,
+          copMissileCooldown: 0,
         };
 
     return {
       id: settings.playerId || 'local',
       name: settings.playerName || 'Player 1',
       isLocal: true,
-      characterMode: mode,
+      playerRole,
+      copVehicleId: copVeh.id,
+      flying: isFlying,
+      hoverY,
+      groundY,
+      hasCopMissile: playerRole === 'cop' && Boolean(copVeh.hasMissile),
+      copMissileCooldown: 0,
+      rotorAngle: 0,
+      sirenPhase: 0,
+      turretAngle: startAngle,
+      characterMode: playerRole === 'cop' ? 'car_driver' : mode,
       vehicleId: veh.id,
-      primaryColor: settings.primaryColor || veh.color,
-      accentColor: settings.accentColor || veh.accent,
+      primaryColor: settings.primaryColor || (playerRole === 'cop' ? copVeh.color : veh.color),
+      accentColor: settings.accentColor || (playerRole === 'cop' ? copVeh.accent : veh.accent),
       avatarId: settings.avatarId || 'default_hero',
       x: sx,
-      y: Math.max(0, g.y || 0),
+      y: startY,
       z: sz,
       prevX: sx,
       prevZ: sz,
@@ -262,7 +311,7 @@ export class Simulation {
       vy: 0,
       vz: 0,
       speed: 0,
-      angle: Number(spawn.angle) || 0,
+      angle: startAngle,
       steerInput: 0,
       pitch: 0,
       roll: 0,
@@ -336,9 +385,24 @@ export class Simulation {
       if (!id || id === localId) continue;
 
       let rp = this._remoteById.get(id);
+      const role = snap.playerRole === 'cop' ? 'cop' : snap.playerRole === 'runner' ? 'runner' : rp?.playerRole || 'runner';
+      const copVehId = snap.copVehicleId || rp?.copVehicleId || 'cop_heli';
+      const copSpec = COP_VEHICLES.find((c) => c.id === copVehId) || COP_VEHICLES[0];
       const veh = VEHICLES.find((v) => v.id === snap.vehicleId) || VEHICLES[0];
-      const mode = snap.characterMode || 'car_driver';
-      const defaultRadius = mode === 'runner' ? 1.25 : veh.radius;
+      const mode = role === 'cop' ? 'car_driver' : snap.characterMode || 'car_driver';
+      const defaultRadius = role === 'cop' ? copSpec.radius : mode === 'runner' ? 1.25 : veh.radius;
+      const defaultMass = role === 'cop' ? copSpec.mass : mode === 'runner' ? 0.65 : veh.mass;
+      const defaultMaxHp = role === 'cop' ? copSpec.maxHp : veh.maxHp;
+      const isFlying = role === 'cop' && Boolean(snap.flying ?? copSpec.flying);
+      const snapX = Number(snap.x) || 0;
+      const snapZ = Number(snap.z) || 0;
+      const gSnap = this.world?.getGroundHeight ? this.world.getGroundHeight(snapX, snapZ) : { y: 0, surface: 'road' };
+      const snapGroundY = Number.isFinite(snap.groundY)
+        ? snap.groundY
+        : gSnap.surface === 'water'
+          ? WORLD_CONFIG.WATER_Y
+          : gSnap.y || 0;
+      const defaultY = isFlying ? Math.max(Math.max(0, snapGroundY) + 10.5, copSpec.hoverY || 11.5) : Number(snap.y) || 0;
 
       if (!rp) {
         const sugarOn = Boolean(snap.activeBuffs?.sugar || snap.sugarActive || (snap.sugarTimer || 0) > 0);
@@ -350,17 +414,26 @@ export class Simulation {
           name: snap.name || 'Player',
           isLocal: false,
           isRemote: true,
+          playerRole: role,
+          copVehicleId: copSpec.id,
+          flying: isFlying,
+          groundY: snapGroundY,
+          hasCopMissile: role === 'cop' && Boolean(copSpec.hasMissile),
+          copMissileCooldown: Number(snap.copMissileCooldown) || 0,
+          rotorAngle: 0,
+          sirenPhase: 0,
+          turretAngle: Number.isFinite(snap.turretAngle) ? snap.turretAngle : Number(snap.angle) || 0,
           characterMode: mode,
           vehicleId: veh.id,
-          primaryColor: snap.primaryColor || veh.color,
-          accentColor: snap.accentColor || veh.accent,
+          primaryColor: snap.primaryColor || (role === 'cop' ? copSpec.color : veh.color),
+          accentColor: snap.accentColor || (role === 'cop' ? copSpec.accent : veh.accent),
           avatarId: snap.avatarId || id,
-          x: Number(snap.x) || 0,
-          y: Number(snap.y) || 0,
-          z: Number(snap.z) || 0,
-          targetX: Number(snap.x) || 0,
-          targetY: Number(snap.y) || 0,
-          targetZ: Number(snap.z) || 0,
+          x: snapX,
+          y: Number.isFinite(snap.y) && (snap.y !== 0 || !isFlying) ? snap.y : defaultY,
+          z: snapZ,
+          targetX: snapX,
+          targetY: Number.isFinite(snap.y) && (snap.y !== 0 || !isFlying) ? snap.y : defaultY,
+          targetZ: snapZ,
           vx: Number(snap.vx) || 0,
           vy: Number(snap.vy) || 0,
           vz: Number(snap.vz) || 0,
@@ -375,11 +448,11 @@ export class Simulation {
           driftSparkTier: Number(snap.driftSparkTier) || 0,
           heldItemId: snap.heldItemId || snap.heldItem || null,
           radius: defaultRadius,
-          mass: mode === 'runner' ? 0.65 : veh.mass,
+          mass: defaultMass,
           scaleMult: 1.0,
           scale: Number(snap.scale) || 1.0,
-          hp: Number.isFinite(snap.hp) ? snap.hp : veh.maxHp,
-          maxHp: Number.isFinite(snap.maxHp) ? snap.maxHp : veh.maxHp,
+          hp: Number.isFinite(snap.hp) ? snap.hp : defaultMaxHp,
+          maxHp: Number.isFinite(snap.maxHp) ? snap.maxHp : defaultMaxHp,
           alive: snap.alive !== false,
           survivalTime: Number(snap.survivalTime) || 0,
           stars: Number(snap.stars) || 1,
@@ -402,13 +475,26 @@ export class Simulation {
         this._remoteById.set(id, rp);
       } else {
         if (snap.name) rp.name = snap.name;
-        if (snap.characterMode) rp.characterMode = snap.characterMode;
+        rp.playerRole = role;
+        rp.copVehicleId = copSpec.id;
+        rp.flying = isFlying;
+        rp.hasCopMissile = role === 'cop' && Boolean(copSpec.hasMissile);
+        rp.radius = defaultRadius;
+        rp.mass = defaultMass;
+        if (Number.isFinite(snap.groundY)) rp.groundY = snap.groundY;
+        if (Number.isFinite(snap.copMissileCooldown)) rp.copMissileCooldown = snap.copMissileCooldown;
+        if (Number.isFinite(snap.turretAngle)) rp.turretAngle = snap.turretAngle;
+        if (snap.characterMode && role !== 'cop') rp.characterMode = snap.characterMode;
         if (snap.vehicleId) rp.vehicleId = snap.vehicleId;
         if (snap.primaryColor) rp.primaryColor = snap.primaryColor;
         if (snap.accentColor) rp.accentColor = snap.accentColor;
         if (snap.avatarId) rp.avatarId = snap.avatarId;
         if (Number.isFinite(snap.x)) rp.targetX = snap.x;
-        if (Number.isFinite(snap.y)) rp.targetY = snap.y;
+        if (Number.isFinite(snap.y)) {
+          rp.targetY = isFlying && snap.y <= 0.1 ? defaultY : snap.y;
+        } else if (isFlying) {
+          rp.targetY = defaultY;
+        }
         if (Number.isFinite(snap.z)) rp.targetZ = snap.z;
         if (Number.isFinite(snap.vx)) rp.vx = snap.vx;
         if (Number.isFinite(snap.vy)) rp.vy = snap.vy;
@@ -492,6 +578,15 @@ export class Simulation {
       }
       rp.wheelSpin = (rp.wheelSpin || 0) + rp.speed * dt * 0.6;
       rp.stridePhase = (rp.stridePhase || 0) + rp.speed * dt * 0.55;
+      rp.sirenPhase = (rp.sirenPhase || 0) + dt * 11;
+      rp.turretAngle = lerpAngle(rp.turretAngle ?? rp.angle, rp.targetAngle, angBlend);
+      if (rp.flying) {
+        rp.rotorAngle = (rp.rotorAngle || 0) + dt * 28;
+        if (this.world?.getGroundHeight) {
+          const gRp = this.world.getGroundHeight(rp.x, rp.z);
+          rp.groundY = gRp.surface === 'water' ? WORLD_CONFIG.WATER_Y : gRp.y || 0;
+        }
+      }
       rp.smoking = rp.hp < rp.maxHp * 0.5;
       rp.onFire = rp.hp < rp.maxHp * 0.25;
     }
@@ -510,6 +605,7 @@ export class Simulation {
     for (let i = 0; i < list.length; i++) {
       const rp = list[i];
       if (!rp || rp.alive === false || rp.id === localPlayer.id) continue;
+      if (Math.abs((localPlayer.y || 0) - (rp.y || 0)) > 4.2) continue;
       const rRadius = (rp.radius || 2.1) * (rp.scale || 1.0);
       const minDist = lRadius + rRadius;
       const dx = localPlayer.x - rp.x;
@@ -818,17 +914,26 @@ export class Simulation {
     lp.prevX = lp.x;
     lp.prevZ = lp.z;
 
-    // Parse Smashy left/right/both/joystick steering
+    // Parse Smashy left/right/both/joystick steering + deadzone + invertSteer + auto/manual gas!
     const bothButtons = Boolean(input?.left && input?.right);
     const braking = Boolean(input?.brake || bothButtons);
+    const autoGas = this.settings.autoAccelerate !== false;
+    const gasHeld = autoGas ? !braking : Boolean(input?.gas);
+    const deadzone = Math.max(0, Math.min(0.3, Number(this.settings.steerDeadzone ?? 0.05)));
     let steerCmd = 0; // +1 = left (CCW: angle +=), -1 = right (CW: angle -=)
-    if (typeof input?.steerAxis === 'number' && Math.abs(input.steerAxis) > 0.04) {
-      steerCmd = -Math.max(-1, Math.min(1, input.steerAxis));
+    if (typeof input?.steerAxis === 'number' && Math.abs(input.steerAxis) > deadzone) {
+      const sign = input.steerAxis > 0 ? 1 : -1;
+      const norm = (Math.abs(input.steerAxis) - deadzone) / Math.max(0.01, 1 - deadzone);
+      steerCmd = -sign * Math.min(1, norm);
     } else if (!bothButtons) {
       if (input?.left) steerCmd += 1;
       if (input?.right) steerCmd -= 1;
     }
+    if (this.settings.invertSteer) {
+      steerCmd = -steerCmd;
+    }
     lp.steerInput = steerCmd;
+    lp.braking = braking;
 
     const gBefore = this.world?.getGroundHeight
       ? this.world.getGroundHeight(lp.x, lp.z)
@@ -848,9 +953,22 @@ export class Simulation {
     if (lp.shrunkActive && !sugarOn) topSpeed *= 0.52;
 
     const ignoreOffroadSlow =
-      sugarOn || lp.starActive || lp.boostActive || lp.megaActive || lp.characterMode === 'runner';
+      sugarOn ||
+      lp.starActive ||
+      lp.boostActive ||
+      lp.megaActive ||
+      lp.flying ||
+      (lp.playerRole === 'cop' && lp.copVehicleId === 'cop_tank') ||
+      lp.characterMode === 'runner';
     const surfaceFactor = ignoreOffroadSlow ? 1.0 : gBefore.speedFactor ?? 1.0;
     lp.maxSpeed = topSpeed * surfaceFactor;
+    lp.sirenPhase = (lp.sirenPhase || 0) + dt * 11;
+    if (lp.flying) {
+      lp.rotorAngle = (lp.rotorAngle || 0) + dt * 28;
+      lp.spinOutTimer = 0;
+    } else if (lp.playerRole === 'cop' && lp.copVehicleId === 'cop_tank') {
+      lp.spinOutTimer = 0;
+    }
 
     // Spin-out override (from banana peel or homing shell)
     if (lp.spinOutTimer > 0 && !sugarOn) {
@@ -866,15 +984,16 @@ export class Simulation {
       // Steering rotation (with personal steerSensitivity preference, never overwritten by lobbyRules)
       const preSpeed = Math.hypot(lp.vx, lp.vz);
       const fwdPre = lp.vx * Math.sin(lp.angle) + lp.vz * Math.cos(lp.angle);
-      const reverseSign = fwdPre < -2.0 ? -1 : 1;
+      const reverseSign = lp.flying ? 1 : fwdPre < -2.0 ? -1 : 1;
       const steerMobility =
-        lp.characterMode === 'runner'
+        lp.flying || lp.characterMode === 'runner'
           ? 1.0
           : 0.42 + 0.58 * Math.min(1, preSpeed / 13);
-      const airControl = lp.airborne ? 0.45 : 1.0;
+      const airControl = lp.flying ? 1.0 : lp.airborne ? 0.45 : 1.0;
       const steerSens = Math.max(0.65, Math.min(1.5, Number(this.settings.steerSensitivity) || 1.0));
       const turnRate = lp.handling * steerMobility * airControl * steerSens;
       lp.angle = wrapAngle(lp.angle + steerCmd * reverseSign * turnRate * dt);
+      lp.turretAngle = lp.angle;
 
       const fx = Math.sin(lp.angle);
       const fz = Math.cos(lp.angle);
@@ -884,9 +1003,29 @@ export class Simulation {
       let vFwd = lp.vx * fx + lp.vz * fz;
       let vLat = lp.vx * lx + lp.vz * lz;
 
-      if (lp.grounded || !lp.airborne) {
-        if (!braking) {
-          // Smashy Road auto-acceleration forward!
+      if (lp.flying) {
+        if (!braking && (gasHeld || sugarOn || lp.boostActive || lp.starActive)) {
+          const accelBoost = sugarOn ? 3.2 : lp.boostActive ? 2.0 : lp.starActive ? 1.45 : 1.0;
+          const driveAccel = lp.accel * accelBoost;
+          if (vFwd < lp.maxSpeed) {
+            vFwd = Math.min(lp.maxSpeed, vFwd + driveAccel * dt);
+          } else {
+            vFwd += (lp.maxSpeed - vFwd) * Math.min(1, dt * 4.5);
+          }
+        } else if (braking) {
+          // Helicopter air-brake: hover smoothly in place to pivot-aim missiles!
+          vFwd *= Math.exp(-5.5 * dt);
+          if (Math.abs(vFwd) < 0.35) vFwd = 0;
+        } else {
+          vFwd *= Math.exp(-1.5 * dt);
+          if (Math.abs(vFwd) < 0.25) vFwd = 0;
+        }
+        vLat *= Math.exp(-5.8 * dt);
+        lp.vx = fx * vFwd + lx * vLat;
+        lp.vz = fz * vFwd + lz * vLat;
+      } else if (lp.grounded || !lp.airborne) {
+        if (!braking && (gasHeld || sugarOn || lp.boostActive || lp.starActive)) {
+          // Smashy Road auto-acceleration (or Manual Gas pedal when autoAccelerate === false)!
           const accelBoost = sugarOn ? 3.6 : lp.boostActive ? 2.25 : lp.starActive ? 1.55 : 1.0;
           const driveAccel = lp.accel * accelBoost;
           if (vFwd < lp.maxSpeed) {
@@ -894,14 +1033,22 @@ export class Simulation {
           } else {
             vFwd += (lp.maxSpeed - vFwd) * Math.min(1, dt * 4.5);
           }
-        } else {
-          // Holding BOTH Left+Right or Brake brakes & reverses smoothly!
-          if (vFwd > 1.5) {
-            vFwd = Math.max(0, vFwd - lp.accel * 1.85 * dt);
-          } else {
-            const maxRev = -lp.maxSpeed * 0.44;
-            vFwd = Math.max(maxRev, vFwd - lp.accel * 0.95 * dt);
+        } else if (braking) {
+          // Handbrake drift kick when tapping Brake while turning at speed, plus smooth brake & reverse!
+          if (vFwd > 15 && Math.abs(steerCmd) > 0.2 && lp.characterMode !== 'runner') {
+            vLat += -steerCmd * lp.accel * 0.42 * dt;
+            lp.drifting = true;
           }
+          if (vFwd > 1.5) {
+            vFwd = Math.max(0, vFwd - lp.accel * 2.15 * dt);
+          } else {
+            const maxRev = -lp.maxSpeed * 0.46;
+            vFwd = Math.max(maxRev, vFwd - lp.accel * 1.05 * dt);
+          }
+        } else {
+          // Coasting when Manual Gas is enabled and neither Gas nor Brake is pressed
+          vFwd *= Math.exp(-1.35 * dt);
+          if (Math.abs(vFwd) < 0.25) vFwd = 0;
         }
 
         // Arcade tail-kick drift blending!
@@ -932,13 +1079,15 @@ export class Simulation {
 
       lp.driftAngle = Math.atan2(vLat, Math.abs(vFwd) + 0.1);
       lp.drifting =
+        !lp.flying &&
         lp.grounded &&
         lp.characterMode !== 'runner' &&
         (Math.abs(vLat) > 5.2 || (braking && vFwd > 10)) &&
         Math.hypot(lp.vx, lp.vz) > 15;
 
-      const targetRoll =
-        lp.characterMode === 'runner'
+      const targetRoll = lp.flying
+        ? Math.max(-0.28, Math.min(0.28, -steerCmd * 0.24))
+        : lp.characterMode === 'runner'
           ? -steerCmd * 0.14
           : Math.max(-0.24, Math.min(0.24, -vLat * 0.014));
       lp.roll += (targetRoll - lp.roll) * Math.min(1, dt * 12);
@@ -962,13 +1111,24 @@ export class Simulation {
       lp.bounceOffset = Math.abs(Math.sin(this.runTime * 11)) * Math.min(0.16, lp.speed * 0.003);
     }
 
-    // Vertical ramp & gravity physics
+    // Vertical ramp, helicopter flight & gravity physics
     const gAfter = this.world?.getGroundHeight
       ? this.world.getGroundHeight(lp.x, lp.z)
       : { y: 0, surface: 'road', speedFactor: 1.0, rampSlopeX: 0, rampSlopeZ: 0 };
+    lp.groundY = gAfter.surface === 'water' ? WORLD_CONFIG.WATER_Y : gAfter.y || 0;
     const gravity = 38 * (this.settings.gravityMult ?? 1.0);
 
-    if (gAfter.surface === 'ramp' && lp.y <= gAfter.y + 0.35) {
+    if (lp.flying) {
+      const surfaceFloorY = gAfter.surface === 'water' ? 0 : Math.max(0, gAfter.y || 0);
+      const targetAlt = Math.max(surfaceFloorY + 10.5, lp.hoverY || 11.5);
+      lp.y += (targetAlt - lp.y) * Math.min(1, dt * 6.0);
+      lp.vy = 0;
+      lp.airborne = true;
+      lp.grounded = false;
+      lp.airTime = 0;
+      const targetHeliPitch = Math.max(-0.22, Math.min(0.14, -fwdSigned * 0.004));
+      lp.pitch += (targetHeliPitch - lp.pitch) * Math.min(1, dt * 8.0);
+    } else if (gAfter.surface === 'ramp' && lp.y <= gAfter.y + 0.35) {
       const climbVel = (gAfter.y - lp.y) / Math.max(0.008, dt);
       lp.y = gAfter.y;
       if (climbVel > 1.5) {
@@ -1030,15 +1190,15 @@ export class Simulation {
       lp.pitch *= Math.exp(-12 * dt);
     }
 
-    // Water hazard check
-    if (gAfter.surface === 'water' && lp.y <= -1.1) {
+    // Water hazard check (flying Police Attack Helicopter flies cleanly over rivers!)
+    if (!lp.flying && gAfter.surface === 'water' && lp.y <= -1.1) {
       lp.y = WORLD_CONFIG.WATER_Y;
       this._eliminateLocalPlayer('drowned');
       return;
     }
 
-    // Solid building collisions (+ 3x Sugar Rush Wall-Ricochet Cushion!)
-    if (this.world?.resolveBuildingCollision) {
+    // Solid building collisions (+ 3x Sugar Rush Wall-Ricochet Cushion! Flying helicopter sails cleanly over buildings!)
+    if (!lp.flying && this.world?.resolveBuildingCollision) {
       const preHitX = lp.x;
       const preHitZ = lp.z;
       const preHitVx = lp.vx;
@@ -1175,8 +1335,8 @@ export class Simulation {
       }
     }
 
-    // Destructible props & gas station chain-reaction explosions!
-    if (this.world?.collideProps) {
+    // Destructible props & gas station chain-reaction explosions! (Skipped while flying high overhead)
+    if (!lp.flying && this.world?.collideProps) {
       this.world.collideProps(lp, (prop) => {
         this.comboCount = Math.min(25, this.comboCount + 1);
         this.comboTimer = 2.8;
@@ -1222,8 +1382,8 @@ export class Simulation {
       });
     }
 
-    // Mario Kart '?' Item Box & Dedicated Sugar Mystery Box pickups
-    if (this.world?.collectSugarBoxes) {
+    // Mario Kart '?' Item Box & Dedicated Sugar Mystery Box pickups (ground units only)
+    if (!lp.flying && this.world?.collectSugarBoxes) {
       const pickedSugar = this.world.collectSugarBoxes(lp);
       if (pickedSugar > 0) {
         lp.score += 75 * pickedSugar;
@@ -1239,7 +1399,7 @@ export class Simulation {
       }
     }
 
-    if (this.world?.collectItemBoxes) {
+    if (!lp.flying && !(lp.playerRole === 'cop' && lp.copVehicleId === 'cop_tank') && this.world?.collectItemBoxes) {
       const picked = this.world.collectItemBoxes(lp);
       if (picked > 0) {
         lp.score += 50 * picked;
@@ -1270,6 +1430,14 @@ export class Simulation {
   }
 
   _updateWantedStars() {
+    if (this.settings.aiCopsEnabled === false) {
+      this.wantedStars = 0;
+      this.wantedLabel = 'AI Cops Off';
+      if (this.localPlayer) {
+        this.localPlayer.stars = 0;
+      }
+      return;
+    }
     const intensity = Math.max(0.4, Number(this.settings.copIntensity) || 1.0);
     const heatTime = this.runTime * Math.sqrt(intensity) + (this.localPlayer?.copsWrecked || 0) * 3.5;
     const minStars = Math.max(1, Math.min(5, Math.round(this.settings.startStars || 1)));
@@ -1283,30 +1451,35 @@ export class Simulation {
       this.wantedStars = computed;
       const lvl = WANTED_LEVELS[computed - 1] || WANTED_LEVELS[0];
       this.wantedLabel = lvl.label;
-      this._emit({
-        type: 'star_up',
-        stars: this.wantedStars,
-        label: this.wantedLabel,
-      });
+      if (this.localPlayer?.playerRole !== 'cop') {
+        this._emit({
+          type: 'star_up',
+          stars: this.wantedStars,
+          label: this.wantedLabel,
+        });
+      }
     }
     if (this.localPlayer) {
-      this.localPlayer.stars = this.wantedStars;
+      this.localPlayer.stars = this.localPlayer.playerRole === 'cop' ? 0 : this.wantedStars;
     }
   }
 
   _pickNearestTargetPlayer(x, z) {
-    let best = this.localPlayer && this.localPlayer.alive ? this.localPlayer : null;
+    let best =
+      this.localPlayer && this.localPlayer.alive && this.localPlayer.playerRole !== 'cop'
+        ? this.localPlayer
+        : null;
     let bestDist = best ? Math.hypot(best.x - x, best.z - z) : Infinity;
     for (let i = 0; i < this.remotePlayers.length; i++) {
       const rp = this.remotePlayers[i];
-      if (!rp || rp.alive === false) continue;
+      if (!rp || rp.alive === false || rp.playerRole === 'cop') continue;
       const d = Math.hypot(rp.x - x, rp.z - z);
       if (d < bestDist) {
         bestDist = d;
         best = rp;
       }
     }
-    return best || this.localPlayer;
+    return best;
   }
 
   _findSpawnAround(focus, minDist = 55, maxDist = 92, biasAhead = false) {
@@ -1396,13 +1569,20 @@ export class Simulation {
   }
 
   _updateCops(dt, lp, context) {
+    if (this.settings.aiCopsEnabled === false) {
+      if (this.cops.length > 0) this.cops.length = 0;
+      if (lp) lp.bustedProgress = 0;
+      return;
+    }
+
+    const anyRunnerAlive = Boolean(this._pickNearestTargetPlayer(lp?.x || 0, lp?.z || 0));
     const lvl = WANTED_LEVELS[this.wantedStars - 1] || WANTED_LEVELS[0];
     const intensity = Math.max(0.4, Number(this.settings.copIntensity) || 1.0);
-    const maxCops = Math.min(22, Math.max(1, Math.round(lvl.maxCops * intensity)));
+    const maxCops = anyRunnerAlive ? Math.min(22, Math.max(1, Math.round(lvl.maxCops * intensity))) : 0;
     const activeCount = this.cops.filter((c) => !c.wrecked).length;
 
     this._copSpawnCooldown -= dt;
-    if (activeCount < maxCops && this._copSpawnCooldown <= 0 && lp) {
+    if (anyRunnerAlive && activeCount < maxCops && this._copSpawnCooldown <= 0 && lp) {
       this._spawnCop(lp);
       this._copSpawnCooldown = Math.max(0.35, 1.35 / intensity);
     }
@@ -1434,6 +1614,10 @@ export class Simulation {
       }
 
       const target = this._pickNearestTargetPlayer(cop.x, cop.z);
+      if (!target) {
+        this.cops.splice(i, 1);
+        continue;
+      }
       const distToFocus = lp ? Math.hypot(cop.x - lp.x, cop.z - lp.z) : 0;
       if (distToFocus > 148) {
         this.cops.splice(i, 1);
@@ -1628,8 +1812,8 @@ export class Simulation {
         this.world.collideProps(cop, () => {});
       }
 
-      // Cop vs Local Player collision
-      if (lp && lp.alive) {
+      // Cop vs Local Player collision (AI police never attack/damage fellow Police team players!)
+      if (lp && lp.alive && lp.playerRole !== 'cop' && !lp.flying) {
         const pRadius = (lp.radius || 2.1) * (lp.scale || 1.0);
         const minDist = pRadius + cop.radius;
         const dx = lp.x - cop.x;
@@ -1729,8 +1913,10 @@ export class Simulation {
   }
 
   _spawnTrafficCar(focusPlayer) {
+    const soloCopOutlaw =
+      this.localPlayer?.playerRole === 'cop' && this.remotePlayers.length === 0;
     const spec = TRAFFIC_TYPES[Math.floor(this._rng() * TRAFFIC_TYPES.length)];
-    const spawn = this._findSpawnAround(focusPlayer, 52, 102, false);
+    const spawn = this._findSpawnAround(focusPlayer, soloCopOutlaw ? 38 : 52, soloCopOutlaw ? 88 : 102, soloCopOutlaw);
     const g = this.world?.getGroundHeight ? this.world.getGroundHeight(spawn.x, spawn.z) : { y: 0, surface: 'road' };
     if (g.surface === 'water') return null;
 
@@ -1739,29 +1925,33 @@ export class Simulation {
     const angle = cardinals[Math.floor(this._rng() * cardinals.length)];
     const laneX = spawn.x - Math.cos(angle) * 3.2;
     const laneZ = spawn.z + Math.sin(angle) * 3.2;
+    const outlawColors = ['#ef4444', '#facc15', '#ec4899', '#a855f7'];
+    const cruiseSpeed = soloCopOutlaw ? 36 + this._rng() * 8 : spec.speed;
 
     const car = {
       id: `traffic_${this.nextEntityId++}`,
-      type: spec.type,
-      kind: spec.type,
-      color: spec.color,
-      accentColor: spec.accentColor,
+      type: soloCopOutlaw ? 'sedan' : spec.type,
+      kind: soloCopOutlaw ? 'sedan' : spec.type,
+      isOutlaw: soloCopOutlaw,
+      color: soloCopOutlaw ? outlawColors[Math.floor(this._rng() * outlawColors.length)] : spec.color,
+      accentColor: soloCopOutlaw ? '#fef08a' : spec.accentColor,
       x: laneX,
       y: Math.max(0, g.y || 0),
       z: laneZ,
-      vx: Math.sin(angle) * spec.speed,
+      vx: Math.sin(angle) * cruiseSpeed,
       vy: 0,
-      vz: Math.cos(angle) * spec.speed,
-      speed: spec.speed,
-      cruiseSpeed: spec.speed,
+      vz: Math.cos(angle) * cruiseSpeed,
+      speed: cruiseSpeed,
+      cruiseSpeed,
       angle,
       wheelSpin: 0,
       radius: spec.radius,
       mass: spec.mass,
-      panic: false,
+      panic: soloCopOutlaw,
       spinTimer: 0,
       wrecked: false,
       _flungCooldown: 0,
+      _copTakedownAwarded: false,
     };
     this.traffic.push(car);
     return car;
@@ -1769,16 +1959,28 @@ export class Simulation {
 
   _updateTraffic(dt, lp) {
     const density = Math.max(0, Number(this.settings.trafficDensity) ?? 1.0);
-    const maxTraffic = Math.round(12 * density);
+    const soloCopOutlaw =
+      this.localPlayer?.playerRole === 'cop' && this.remotePlayers.length === 0;
+    const maxTraffic = soloCopOutlaw ? Math.max(8, Math.round(10 * Math.max(0.8, density))) : Math.round(12 * density);
     this._trafficSpawnCooldown -= dt;
     if (this.traffic.length < maxTraffic && this._trafficSpawnCooldown <= 0 && lp) {
       this._spawnTrafficCar(lp);
-      this._trafficSpawnCooldown = 0.55;
+      this._trafficSpawnCooldown = soloCopOutlaw ? 0.4 : 0.55;
     }
 
     const gravity = 38 * (this.settings.gravityMult ?? 1.0);
     for (let i = this.traffic.length - 1; i >= 0; i--) {
       const car = this.traffic[i];
+      if (car.wrecked) {
+        car.wreckTimer = (car.wreckTimer ?? 1.1) - dt;
+        car.vy -= gravity * dt;
+        car.x += car.vx * dt;
+        car.y = Math.max(0, (car.y || 0) + car.vy * dt);
+        car.z += car.vz * dt;
+        car.angle = wrapAngle(car.angle + 12 * dt);
+        if (car.wreckTimer <= 0) this.traffic.splice(i, 1);
+        continue;
+      }
       if (car._flungCooldown > 0) car._flungCooldown = Math.max(0, car._flungCooldown - dt);
 
       const distToFocus = lp ? Math.hypot(car.x - lp.x, car.z - lp.z) : 0;
@@ -1793,7 +1995,7 @@ export class Simulation {
         car.vx *= Math.pow(0.3, dt);
         car.vz *= Math.pow(0.3, dt);
       } else {
-        const targetSpd = car.panic ? car.cruiseSpeed * 1.45 : car.cruiseSpeed;
+        const targetSpd = car.isOutlaw ? car.cruiseSpeed : car.panic ? car.cruiseSpeed * 1.45 : car.cruiseSpeed;
         const fx = Math.sin(car.angle);
         const fz = Math.cos(car.angle);
         car.vx += (fx * targetSpd - car.vx) * Math.min(1, dt * 4);
@@ -1829,8 +2031,8 @@ export class Simulation {
         }
       }
 
-      // Civilian traffic vs Local Player collision
-      if (lp && lp.alive && !lp.starActive && !lp.megaActive) {
+      // Civilian traffic / Outlaw street racer vs Local Player collision (skipped when flying overhead!)
+      if (lp && lp.alive && !lp.flying && Math.abs((lp.y || 0) - (car.y || 0)) <= 3.8 && !lp.starActive && !lp.megaActive) {
         const minD = (lp.radius || 2.1) * (lp.scale || 1.0) + car.radius;
         const dx = lp.x - car.x;
         const dz = lp.z - car.z;
@@ -1838,21 +2040,39 @@ export class Simulation {
         if (dist < minD) {
           const nx = dist > 0.001 ? dx / dist : 1;
           const nz = dist > 0.001 ? dz / dist : 0;
-          if (lp.sugarActive) {
-            // Sugar Cop-Bowling flings civilian traffic sky-high without slowing player!
+          const isTank = lp.playerRole === 'cop' && lp.copVehicleId === 'cop_tank';
+          if (lp.sugarActive || isTank) {
+            // Sugar Cop-Bowling & Heavy Police Tank flatten/fling street cars without slowing down!
             car.vx = -nx * 44;
             car.vz = -nz * 44;
             car.vy = 18;
             car.spinTimer = 1.6;
             car.panic = true;
             car._flungCooldown = 0.8;
-            lp.score += 45;
+            if (lp.playerRole === 'cop' && !car._copTakedownAwarded) {
+              car._copTakedownAwarded = true;
+              if (car.isOutlaw) car.wrecked = true;
+              lp.score += 150;
+              lp.copsWrecked = (lp.copsWrecked || 0) + 1;
+              this._emit({
+                type: 'cop_wrecked',
+                copType: 'outlaw',
+                cause: 'tank_crush',
+                ownerId: lp.id,
+                x: car.x,
+                y: (car.y || 0) + 0.9,
+                z: car.z,
+                points: 150,
+              });
+            } else {
+              lp.score += 45;
+            }
             this._emit({
               type: 'smash',
               x: car.x,
               y: (car.y || 0) + 0.8,
               z: car.z,
-              color: '#f472b6',
+              color: lp.sugarActive ? '#f472b6' : '#facc15',
               intensity: 0.95,
             });
             continue;
@@ -1865,9 +2085,25 @@ export class Simulation {
 
           car.panic = true;
           car.spinTimer = 1.1;
-          car.vx -= nx * (lp.boostActive ? 34 : 20);
-          car.vz -= nz * (lp.boostActive ? 34 : 20);
-          if (lp.boostActive) {
+          car.vx -= nx * (lp.boostActive || lp.playerRole === 'cop' ? 34 : 20);
+          car.vz -= nz * (lp.boostActive || lp.playerRole === 'cop' ? 34 : 20);
+          if (lp.playerRole === 'cop' && (car.isOutlaw || lp.boostActive || lp.speed > 20) && !car._copTakedownAwarded) {
+            car._copTakedownAwarded = true;
+            car.vy = 13;
+            if (car.isOutlaw) car.wrecked = true;
+            lp.score += 150;
+            lp.copsWrecked = (lp.copsWrecked || 0) + 1;
+            this._emit({
+              type: 'cop_wrecked',
+              copType: 'outlaw',
+              cause: 'pit_maneuver',
+              ownerId: lp.id,
+              x: car.x,
+              y: (car.y || 0) + 0.9,
+              z: car.z,
+              points: 150,
+            });
+          } else if (lp.boostActive) {
             car.vy = 11;
             lp.score += 35;
           } else {
@@ -1903,6 +2139,11 @@ export class Simulation {
     if (lp.hp <= 0) {
       lp.hp = 0;
       this._eliminateLocalPlayer('wrecked');
+      return;
+    }
+
+    if (this.settings.aiCopsEnabled === false || lp.playerRole === 'cop' || lp.flying) {
+      lp.bustedProgress = 0;
       return;
     }
 

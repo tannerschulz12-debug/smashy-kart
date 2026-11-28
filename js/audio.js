@@ -100,9 +100,14 @@ function downsampleAndNormalize(audioBuffer, targetRate = 22050, maxDuration = M
 
 export class SoundManager {
   constructor(initialVolume = 0.85) {
-    this.volume = Math.max(0, Math.min(1, Number(initialVolume) ?? 0.85));
+    const initVol = Number(initialVolume);
+    this.volume = Number.isFinite(initVol) ? Math.max(0, Math.min(1, initVol)) : 0.85;
+    this.engineVolume = 0.85;
+    this.actionVolume = 1.0;
     this.ctx = null;
     this.masterGain = null;
+    this.engineBus = null;
+    this.actionBus = null;
     this.noiseBuffer = null;
     this.loops = null;
 
@@ -205,6 +210,14 @@ export class SoundManager {
     this.masterGain.gain.value = this.volume;
     this.masterGain.connect(ctx.destination);
 
+    this.engineBus = ctx.createGain();
+    this.engineBus.gain.value = this.engineVolume;
+    this.engineBus.connect(this.masterGain);
+
+    this.actionBus = ctx.createGain();
+    this.actionBus.gain.value = this.actionVolume;
+    this.actionBus.connect(this.masterGain);
+
     // Build shared 1.5s white noise buffer for screeches, crashes, explosions & splashes
     const noiseLen = Math.floor(ctx.sampleRate * 1.5);
     const nb = ctx.createBuffer(1, noiseLen, ctx.sampleRate);
@@ -239,7 +252,7 @@ export class SoundManager {
     engOsc1.connect(engFilter);
     engOsc2.connect(engFilter);
     engFilter.connect(engGain);
-    engGain.connect(this.masterGain);
+    engGain.connect(this.engineBus || this.masterGain);
     engOsc1.start();
     engOsc2.start();
 
@@ -258,7 +271,7 @@ export class SoundManager {
 
     screechSrc.connect(screechFilter);
     screechFilter.connect(screechGain);
-    screechGain.connect(this.masterGain);
+    screechGain.connect(this.engineBus || this.masterGain);
     screechSrc.start();
 
     // 3. Dual-tone police siren wail
@@ -277,7 +290,7 @@ export class SoundManager {
     const sirenGain = ctx.createGain();
     sirenGain.gain.value = 0.0;
     sirenOsc.connect(sirenGain);
-    sirenGain.connect(this.masterGain);
+    sirenGain.connect(this.actionBus || this.masterGain);
     sirenOsc.start();
     sirenLfo.start();
 
@@ -305,9 +318,26 @@ export class SoundManager {
   }
 
   setVolume(v) {
-    this.volume = Math.max(0, Math.min(1, Number(v) ?? 0.85));
+    const n = Number(v);
+    this.volume = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.85;
     if (this.ctx && this.masterGain) {
       this.masterGain.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.03);
+    }
+  }
+
+  setChannelVolumes({ engine = 0.85, action = 1.0 } = {}) {
+    const engNum = Number(engine);
+    const actNum = Number(action);
+    this.engineVolume = Number.isFinite(engNum) ? Math.max(0, Math.min(1.5, engNum)) : 0.85;
+    this.actionVolume = Number.isFinite(actNum) ? Math.max(0, Math.min(1.5, actNum)) : 1.0;
+    if (this.ctx) {
+      const now = this.ctx.currentTime;
+      if (this.engineBus) {
+        this.engineBus.gain.setTargetAtTime(this.engineVolume, now, 0.03);
+      }
+      if (this.actionBus) {
+        this.actionBus.gain.setTargetAtTime(this.actionVolume, now, 0.03);
+      }
     }
   }
 
@@ -353,7 +383,7 @@ export class SoundManager {
     }
   }
 
-  _playCustomSlotBuffer(slot, gainScale = 1.0) {
+  _playCustomSlotBuffer(slot, gainScale = 1.0, bypassActionBus = false) {
     const rec = this.customRecords.get(slot);
     if (!rec || !rec.buffer) return false;
     const ctx = this._ensureContext();
@@ -365,7 +395,7 @@ export class SoundManager {
     const g = ctx.createGain();
     g.gain.value = Math.min(1.35, 0.95 * gainScale);
     src.connect(g);
-    g.connect(this.masterGain);
+    g.connect(bypassActionBus ? this.masterGain : (this.actionBus || this.masterGain));
     src.start();
     return true;
   }
@@ -386,7 +416,7 @@ export class SoundManager {
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
 
     osc.connect(g);
-    g.connect(this.masterGain);
+    g.connect(this.actionBus || this.masterGain);
     osc.start(t0);
     osc.stop(t0 + duration + 0.02);
   }
@@ -412,7 +442,7 @@ export class SoundManager {
 
     src.connect(filter);
     filter.connect(g);
-    g.connect(this.masterGain);
+    g.connect(this.actionBus || this.masterGain);
     src.start(t0);
     src.stop(t0 + duration + 0.02);
   }
@@ -727,7 +757,14 @@ export class SoundManager {
   previewSlot(slot) {
     this.unlock();
     if (!SOUND_SLOTS.includes(slot)) return;
-    if (this._playCustomSlotBuffer(slot, 1.0)) return;
+    if (this._playCustomSlotBuffer(slot, 1.0, this.actionVolume <= 0.02)) return;
+    const prevAction = this.actionVolume;
+    if (prevAction <= 0.02) {
+      this.setChannelVolumes({ engine: this.engineVolume, action: 0.85 });
+      this.playEvent(slot, 1.0);
+      setTimeout(() => this.setChannelVolumes({ engine: this.engineVolume, action: prevAction }), 400);
+      return;
+    }
     this.playEvent(slot, 1.0);
   }
 

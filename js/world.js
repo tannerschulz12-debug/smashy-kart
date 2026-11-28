@@ -86,7 +86,7 @@ const SNOW_PALETTE = [
 ];
 
 export class World {
-  constructor(seed = 777123, biomeId = 'city', options = { itemBoxDensity: 1.2 }) {
+  constructor(seed = 777123, biomeId = 'city', options = { itemBoxDensity: 1.2, sugarBoxRate: 1.0 }) {
     this.chunks = new Map();
     this.collectedBoxes = new Set();
     this.geysers = [];
@@ -94,13 +94,16 @@ export class World {
     this.reset(seed, biomeId, options);
   }
 
-  reset(seed = 777123, biomeId = 'city', options = { itemBoxDensity: 1.2 }) {
+  reset(seed = 777123, biomeId = 'city', options = { itemBoxDensity: 1.2, sugarBoxRate: 1.0 }) {
     this.seed = (Number(seed) || 777123) >>> 0;
     this.biomeId = BIOMES[biomeId] ? biomeId : 'city';
     this.biome = BIOMES[this.biomeId];
+    const rawDensity = Number(options?.itemBoxDensity);
+    const rawSugar = Number(options?.sugarBoxRate);
     this.options = {
-      itemBoxDensity: 1.2,
       ...(options || {}),
+      itemBoxDensity: clamp(Number.isFinite(rawDensity) ? rawDensity : 1.2, 0.1, 5.0),
+      sugarBoxRate: clamp(Number.isFinite(rawSugar) ? rawSugar : 1.0, 0.0, 5.0),
     };
     this.chunks = new Map();
     this.collectedBoxes = new Set();
@@ -117,6 +120,29 @@ export class World {
         this._getOrCreateChunk(cx, cz);
       }
     }
+  }
+
+  _computeSugarProb(baseProb = 0.24) {
+    const rate = clamp(this.options.sugarBoxRate ?? 1.0, 0.0, 5.0);
+    if (rate <= 0) return 0;
+    if (rate <= 1.0) return clamp(baseProb * rate, 0, 1);
+    const u = (rate - 1.0) / 4.0;
+    return clamp(1 - (1 - baseProb) * Math.pow(0.08, u), 0, 0.98);
+  }
+
+  _resolveFixedBoxType(requestedType, sugarRng) {
+    const rate = clamp(this.options.sugarBoxRate ?? 1.0, 0.0, 5.0);
+    if (rate <= 0) return 'normal';
+    if (rate === 1.0) return requestedType === 'sugar' ? 'sugar' : 'normal';
+    if (rate < 1.0) {
+      if (requestedType === 'sugar') {
+        return sugarRng() < rate ? 'sugar' : 'normal';
+      }
+      return 'normal';
+    }
+    if (requestedType === 'sugar') return 'sugar';
+    const upgradeProb = 1 - Math.pow(0.08, (rate - 1.0) / 4.0);
+    return sugarRng() < upgradeProb ? 'sugar' : 'normal';
   }
 
   // Grid road helpers: grid lines sit at multiples of CHUNK_SIZE (x = gx * 60, z = gz * 60)
@@ -409,14 +435,41 @@ export class World {
       return ramp;
     };
 
+    const sugarRng = mulberry32(hashChunkSeed(this.seed, cx, cz, 909));
+    const extraRng = mulberry32(hashChunkSeed(this.seed, cx, cz, 707));
     let boxSeq = 0;
-    const addItemBox = (bx, by, bz, boxType = 'normal') => {
+    const addItemBox = (bx, by, bz, boxType = 'normal', opts = {}) => {
+      const minSpacing = opts.minSpacing ?? 2.2;
+      const minSq = minSpacing * minSpacing;
+      for (let i = 0; i < chunk.itemBoxes.length; i++) {
+        const existing = chunk.itemBoxes[i];
+        const dx = existing.x - bx;
+        const dz = existing.z - bz;
+        if (dx * dx + dz * dz < minSq) return null;
+      }
+      for (let i = 0; i < chunk.buildings.length; i++) {
+        const b = chunk.buildings[i];
+        if (
+          by < b.height &&
+          bx >= b.minX - 1.4 &&
+          bx <= b.maxX + 1.4 &&
+          bz >= b.minZ - 1.4 &&
+          bz <= b.maxZ + 1.4
+        ) {
+          return null;
+        }
+      }
+      const resolvedType = opts.alreadyResolved
+        ? boxType === 'sugar'
+          ? 'sugar'
+          : 'normal'
+        : this._resolveFixedBoxType(boxType, sugarRng);
       const box = {
         id: `${key}:ib${boxSeq++}`,
         x: bx,
         y: by,
         z: bz,
-        boxType: boxType === 'sugar' ? 'sugar' : 'normal',
+        boxType: resolvedType,
         collected: false,
         respawnTimer: 0,
         phase: rng() * Math.PI * 2,
@@ -435,11 +488,11 @@ export class World {
 
     // District generation
     if (district === 'river') {
-      this._populateRiverChunk(chunk, rng, addProp, addRamp, addItemBox, floraType);
+      this._populateRiverChunk(chunk, rng, addProp, addRamp, addItemBox, floraType, extraRng);
     } else if (district === 'plaza') {
       this._populatePlazaChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox, floraType);
     } else if (district === 'airport') {
-      this._populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox);
+      this._populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox, extraRng);
     } else if (district === 'downtown') {
       this._populateDowntownChunk(chunk, rng, addBuilding, addProp, floraType);
     } else if (district === 'suburban') {
@@ -447,9 +500,9 @@ export class World {
     } else if (district === 'park') {
       this._populateParkChunk(chunk, rng, addBuilding, addProp, floraType);
     } else if (district === 'gas_station') {
-      this._populateGasStationChunk(chunk, rng, addBuilding, addProp, addItemBox, floraType);
+      this._populateGasStationChunk(chunk, rng, addBuilding, addProp, addItemBox, floraType, extraRng);
     } else if (district === 'stunt_park') {
-      this._populateStuntParkChunk(chunk, rng, addProp, addRamp, addItemBox);
+      this._populateStuntParkChunk(chunk, rng, addProp, addRamp, addItemBox, extraRng);
     }
 
     // Sidewalk streetlights & hydrants along roads (outside river chunks, central plaza & open airport runways)
@@ -459,14 +512,15 @@ export class World {
 
     // Highway jump ramps & floating Mario Kart ? Item Boxes on roads/intersections
     if (district !== 'river') {
-      this._populateRoadRampsAndBoxes(chunk, rng, addRamp, addItemBox);
+      this._populateRoadRampsAndBoxes(chunk, rng, addRamp, addItemBox, extraRng);
     }
 
     return chunk;
   }
 
-  _populateRiverChunk(chunk, rng, addProp, addRamp, addItemBox, floraType) {
+  _populateRiverChunk(chunk, rng, addProp, addRamp, addItemBox, floraType, extraRng = rng) {
     const { cx, cz, x0, z0, x1, z1 } = chunk;
+    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.1, 5.0);
     // West border NS road at x = x0 belongs to this chunk's bridge check if cx % 2 === 0
     if (this.hasBridgeAtGridX(cx)) {
       const bw = this.getNSRoadHalfWidth(cx) * 2;
@@ -480,18 +534,70 @@ export class World {
         height: BRIDGE_Y,
       });
       // Item boxes on bridge crest!
-      if (rng() < 0.75 * this.options.itemBoxDensity) {
-        addItemBox(x0 - 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5, rng() < 0.24 ? 'sugar' : 'normal');
-        addItemBox(x0 + 3.2, BRIDGE_Y, z0 + CHUNK_SIZE * 0.5, rng() < 0.28 ? 'sugar' : 'normal');
+      if (rng() < 0.75 * Math.min(density, 1.5)) {
+        addItemBox(
+          x0 - 3.2,
+          BRIDGE_Y,
+          z0 + CHUNK_SIZE * 0.5,
+          rng() < this._computeSugarProb(0.24) ? 'sugar' : 'normal',
+          { alreadyResolved: true }
+        );
+        addItemBox(
+          x0 + 3.2,
+          BRIDGE_Y,
+          z0 + CHUNK_SIZE * 0.5,
+          rng() < this._computeSugarProb(0.28) ? 'sugar' : 'normal',
+          { alreadyResolved: true }
+        );
+      }
+      if (density > 1.3) {
+        const extraBridgeChance = clamp((density - 1.0) * 0.24, 0, 0.92);
+        const bridgeExtraSlots = [
+          [x0 - 3.2, z0 + 18.5],
+          [x0 + 3.2, z0 + 18.5],
+          [x0 - 3.2, z1 - 18.5],
+          [x0 + 3.2, z1 - 18.5],
+        ];
+        for (let i = 0; i < bridgeExtraSlots.length; i++) {
+          if (extraRng() < extraBridgeChance) {
+            addItemBox(
+              bridgeExtraSlots[i][0],
+              BRIDGE_Y,
+              bridgeExtraSlots[i][1],
+              extraRng() < this._computeSugarProb(0.26) ? 'sugar' : 'normal',
+              { alreadyResolved: true }
+            );
+          }
+        }
       }
     } else {
       // Non-bridge street T-junction: either warning cones/fence or an epic river-jump stunt ramp!
       if (Math.abs(cx) % 4 === 1) {
         // Stunt jump ramps on both banks to leap over the water!
         const southRamp = addRamp(x0, z0 + 11.5, 8.5, 11.0, 0, 3.6);
-        addItemBox(southRamp.x, 3.6, southRamp.z + 4.2, rng() < 0.35 ? 'sugar' : 'normal');
+        if (density >= 1.0 || extraRng() < density) {
+          addItemBox(
+            southRamp.x,
+            3.6,
+            southRamp.z + 4.2,
+            rng() < this._computeSugarProb(0.35) ? 'sugar' : 'normal',
+            { alreadyResolved: true }
+          );
+        } else {
+          rng();
+        }
         const northRamp = addRamp(x0, z1 - 11.5, 8.5, 11.0, Math.PI, 3.6);
-        addItemBox(northRamp.x, 3.6, northRamp.z - 4.2, rng() < 0.35 ? 'sugar' : 'normal');
+        if (density >= 1.0 || extraRng() < density) {
+          addItemBox(
+            northRamp.x,
+            3.6,
+            northRamp.z - 4.2,
+            rng() < this._computeSugarProb(0.35) ? 'sugar' : 'normal',
+            { alreadyResolved: true }
+          );
+        } else {
+          rng();
+        }
       } else {
         for (let ox = -4.5; ox <= 4.5; ox += 3.0) {
           addProp('cone', x0 + ox, z0 + 8.5);
@@ -711,8 +817,9 @@ export class World {
     }
   }
 
-  _populateGasStationChunk(chunk, rng, addBuilding, addProp, addItemBox, floraType) {
+  _populateGasStationChunk(chunk, rng, addBuilding, addProp, addItemBox, floraType, extraRng = rng) {
     const { key, lotBounds } = chunk;
+    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.1, 5.0);
     const cx = (lotBounds.minX + lotBounds.maxX) * 0.5;
     const cz = (lotBounds.minZ + lotBounds.maxZ) * 0.5;
     const stationId = `${key}:gs0`;
@@ -751,26 +858,84 @@ export class World {
     addProp(floraType(), lotBounds.maxX - 3.0, lotBounds.maxZ - 3.0);
 
     // Risk-reward Mario Kart ? / Sugar box right under the explosive gas station canopy!
-    if (rng() < 0.85 * this.options.itemBoxDensity) {
-      addItemBox(cx - 2.6, 0, canopyZ - 3.8, rng() < 0.3 ? 'sugar' : 'normal');
+    if (rng() < 0.85 * Math.min(density, 1.5)) {
+      addItemBox(
+        cx - 2.6,
+        0,
+        canopyZ - 3.8,
+        rng() < this._computeSugarProb(0.3) ? 'sugar' : 'normal',
+        { alreadyResolved: true }
+      );
+    }
+    if (density > 1.4) {
+      const extraGasChance = clamp((density - 1.0) * 0.24, 0, 0.92);
+      const gasSlots = [
+        [cx + 2.6, canopyZ - 3.8],
+        [cx - 4.5, lotBounds.minZ + 3.6],
+        [cx + 4.5, lotBounds.minZ + 3.6],
+      ];
+      for (let i = 0; i < gasSlots.length; i++) {
+        if (extraRng() < extraGasChance) {
+          addItemBox(
+            gasSlots[i][0],
+            0,
+            gasSlots[i][1],
+            extraRng() < this._computeSugarProb(0.28) ? 'sugar' : 'normal',
+            { alreadyResolved: true }
+          );
+        }
+      }
     }
   }
 
-  _populateStuntParkChunk(chunk, rng, addProp, addRamp, addItemBox) {
+  _populateStuntParkChunk(chunk, rng, addProp, addRamp, addItemBox, extraRng = rng) {
     const { lotBounds } = chunk;
+    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.1, 5.0);
     const cx = (lotBounds.minX + lotBounds.maxX) * 0.5;
     const cz = (lotBounds.minZ + lotBounds.maxZ) * 0.5;
 
     // Two opposing super ramps with ? & Sugar boxes at the launch lips!
     const r1 = addRamp(cx - 7.5, cz, 7.6, 13.5, 0, 3.6);
     const r2 = addRamp(cx + 7.5, cz, 7.6, 13.5, Math.PI, 3.6);
-    addItemBox(r1.x, 3.6, r1.z + r1.length * 0.42, 'normal');
-    addItemBox(r2.x, 3.6, r2.z - r2.length * 0.42, 'sugar');
+    if (density >= 1.0 || extraRng() < density) {
+      addItemBox(r1.x, 3.6, r1.z + r1.length * 0.42, 'normal');
+    }
+    if (density >= 1.0 || extraRng() < density) {
+      addItemBox(r2.x, 3.6, r2.z - r2.length * 0.42, 'sugar');
+    }
 
     // Optional East-West ramp if lot is roomy
     if (lotBounds.maxX - lotBounds.minX > 32) {
       const r3 = addRamp(cx, cz - 11.5, 7.0, 11.5, Math.PI * 0.5, 3.6);
-      addItemBox(r3.x + r3.length * 0.42, 3.6, r3.z, rng() < 0.45 ? 'sugar' : 'normal');
+      const r3Sugar = rng() < this._computeSugarProb(0.45);
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(r3.x + r3.length * 0.42, 3.6, r3.z, r3Sugar ? 'sugar' : 'normal', {
+          alreadyResolved: true,
+        });
+      }
+    }
+
+    if (density > 1.2) {
+      const stuntChance = clamp((density - 1.0) * 0.26, 0, 0.94);
+      const stuntSlots = [
+        [cx - 7.5, lotBounds.minZ + 4.8],
+        [cx + 7.5, lotBounds.maxZ - 4.8],
+        [lotBounds.minX + 4.8, cz - 5.5],
+        [lotBounds.minX + 4.8, cz + 5.5],
+        [lotBounds.maxX - 4.8, cz - 5.5],
+        [lotBounds.maxX - 4.8, cz + 5.5],
+      ];
+      for (let i = 0; i < stuntSlots.length; i++) {
+        if (extraRng() < stuntChance) {
+          addItemBox(
+            stuntSlots[i][0],
+            0,
+            stuntSlots[i][1],
+            extraRng() < this._computeSugarProb(0.32) ? 'sugar' : 'normal',
+            { alreadyResolved: true }
+          );
+        }
+      }
     }
 
     // Slalom cones & crate pyramids to smash through
@@ -783,8 +948,9 @@ export class World {
     addProp('crate', lotBounds.maxX - 5.2, lotBounds.maxZ - 3.5);
   }
 
-  _populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox) {
+  _populateAirportChunk(chunk, rng, addBuilding, addProp, addRamp, addItemBox, extraRng = rng) {
     const { cx, cz, lotBounds } = chunk;
+    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.1, 5.0);
     const lotCX = (lotBounds.minX + lotBounds.maxX) * 0.5;
     const lotCZ = (lotBounds.minZ + lotBounds.maxZ) * 0.5;
     const isEastHalf = this._isAirportChunk(cx - 1, cz);
@@ -798,14 +964,51 @@ export class World {
       const rRight = addRamp(lotCX + 6.4, lotCZ, 7.8, 15.2, launchDir, 5.0);
 
       // Guaranteed Sugar Mystery Boxes atop both 5.0m Mega-Ramps!
-      addItemBox(rLeft.x, 5.0, rLeft.z + rLeft.dirZ * (rLeft.length * 0.44), 'sugar');
-      addItemBox(rRight.x, 5.0, rRight.z + rRight.dirZ * (rRight.length * 0.44), 'sugar');
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(rLeft.x, 5.0, rLeft.z + rLeft.dirZ * (rLeft.length * 0.44), 'sugar');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(rRight.x, 5.0, rRight.z + rRight.dirZ * (rRight.length * 0.44), 'sugar');
+      }
 
       // Runway approach line of Sugar & Normal Mystery Boxes!
       const approachZ = isNorthHalf ? lotBounds.maxZ - 5.2 : lotBounds.minZ + 5.2;
-      addItemBox(lotCX - 6.4, 0, approachZ, 'sugar');
-      addItemBox(lotCX, 0, approachZ, 'normal');
-      addItemBox(lotCX + 6.4, 0, approachZ, 'sugar');
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX - 6.4, 0, approachZ, 'sugar');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX, 0, approachZ, 'normal');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX + 6.4, 0, approachZ, 'sugar');
+      }
+
+      if (density > 1.2) {
+        const runwayChance = clamp((density - 1.0) * 0.26, 0, 0.95);
+        const exitZ = isNorthHalf ? lotBounds.minZ + 5.2 : lotBounds.maxZ - 5.2;
+        const midApproachZ = isNorthHalf ? lotCZ + 10.5 : lotCZ - 10.5;
+        const westRunwaySlots = [
+          [lotCX - 6.4, exitZ],
+          [lotCX, exitZ],
+          [lotCX + 6.4, exitZ],
+          [lotCX - 11.5, approachZ],
+          [lotCX + 11.5, approachZ],
+          [lotCX, midApproachZ],
+          [lotCX + 11.5, lotCZ - 4.5],
+          [lotCX + 11.5, lotCZ + 4.5],
+        ];
+        for (let i = 0; i < westRunwaySlots.length; i++) {
+          if (extraRng() < runwayChance) {
+            addItemBox(
+              westRunwaySlots[i][0],
+              0,
+              westRunwaySlots[i][1],
+              extraRng() < this._computeSugarProb(0.38) ? 'sugar' : 'normal',
+              { alreadyResolved: true }
+            );
+          }
+        }
+      }
 
       // Parked stunt jet on outer apron + runway guide cones
       const apronX = lotBounds.minX + 5.2;
@@ -850,10 +1053,42 @@ export class World {
 
       // Taxiway Mega-Ramp (height = 5.0) + Diagonal Sugar Mystery Box streak!
       const jetRamp = addRamp(lotCX - 5.5, lotCZ, 8.2, 14.8, isNorthHalf ? 0 : Math.PI, 5.0);
-      addItemBox(jetRamp.x, 5.0, jetRamp.z + jetRamp.dirZ * (jetRamp.length * 0.44), 'sugar');
-      addItemBox(lotCX + 2.5, 0, lotCZ - 3.5, 'sugar');
-      addItemBox(lotCX + 2.5, 0, lotCZ + 3.5, 'sugar');
-      addItemBox(lotCX - 5.5, 0, isNorthHalf ? lotBounds.minZ + 4.8 : lotBounds.maxZ - 4.8, 'normal');
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(jetRamp.x, 5.0, jetRamp.z + jetRamp.dirZ * (jetRamp.length * 0.44), 'sugar');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX + 2.5, 0, lotCZ - 3.5, 'sugar');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX + 2.5, 0, lotCZ + 3.5, 'sugar');
+      }
+      if (density >= 1.0 || extraRng() < density) {
+        addItemBox(lotCX - 5.5, 0, isNorthHalf ? lotBounds.minZ + 4.8 : lotBounds.maxZ - 4.8, 'normal');
+      }
+
+      if (density > 1.2) {
+        const taxiChance = clamp((density - 1.0) * 0.26, 0, 0.95);
+        const oppZ = isNorthHalf ? lotBounds.maxZ - 4.8 : lotBounds.minZ + 4.8;
+        const eastTaxiSlots = [
+          [lotCX - 11.5, lotCZ - 4.5],
+          [lotCX - 11.5, lotCZ + 4.5],
+          [lotCX - 5.5, oppZ],
+          [lotCX + 1.5, oppZ],
+          [lotCX - 11.5, isNorthHalf ? lotBounds.minZ + 4.8 : lotBounds.maxZ - 4.8],
+          [lotCX + 8.5, isNorthHalf ? lotCZ + 1.5 : lotCZ - 1.5],
+        ];
+        for (let i = 0; i < eastTaxiSlots.length; i++) {
+          if (extraRng() < taxiChance) {
+            addItemBox(
+              eastTaxiSlots[i][0],
+              0,
+              eastTaxiSlots[i][1],
+              extraRng() < this._computeSugarProb(0.38) ? 'sugar' : 'normal',
+              { alreadyResolved: true }
+            );
+          }
+        }
+      }
 
       addProp('crate', lotBounds.maxX - 3.5, lotCZ);
       addProp('cone', lotCX + 7.5, lotCZ);
@@ -878,22 +1113,24 @@ export class World {
     }
   }
 
-  _populateRoadRampsAndBoxes(chunk, rng, addRamp, addItemBox) {
+  _populateRoadRampsAndBoxes(chunk, rng, addRamp, addItemBox, extraRng = rng) {
     const { cx, cz, x0, z0 } = chunk;
-    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.2, 3.0);
-    const pickType = (sugarProb = 0.22) => (rng() < sugarProb ? 'sugar' : 'normal');
+    const density = clamp(this.options.itemBoxDensity ?? 1.2, 0.1, 5.0);
+    const baseDensity = Math.min(density, 1.5);
+    const pickType = (sugarProb = 0.22) =>
+      rng() < this._computeSugarProb(sugarProb) ? 'sugar' : 'normal';
 
     // Intersection (x0, z0) owned uniquely by chunk (cx, cz) — never duplicated!
     if (!(cx === 0 && cz === 0)) {
       const isMajor = this.isHighwayGrid(cx) || this.isHighwayGrid(cz);
-      const boxChance = (isMajor ? 0.62 : 0.34) * density;
+      const boxChance = (isMajor ? 0.62 : 0.34) * baseDensity;
       if (rng() < boxChance) {
         if (isMajor && rng() < 0.55) {
           // Pair of Mario Kart ? / Sugar boxes across the intersection!
-          addItemBox(x0 - 3.5, 0, z0, pickType(0.22));
-          addItemBox(x0 + 3.5, 0, z0, pickType(0.22));
+          addItemBox(x0 - 3.5, 0, z0, pickType(0.22), { alreadyResolved: true });
+          addItemBox(x0 + 3.5, 0, z0, pickType(0.22), { alreadyResolved: true });
         } else {
-          addItemBox(x0, 0, z0, pickType(0.22));
+          addItemBox(x0, 0, z0, pickType(0.22), { alreadyResolved: true });
         }
       }
     }
@@ -904,15 +1141,22 @@ export class World {
       if (this.isHighwayGrid(cx) && rng() < 0.26) {
         const dirAngle = rng() < 0.5 ? 0 : Math.PI;
         const ramp = addRamp(x0 + (dirAngle === 0 ? 4.2 : -4.2), midZ, 7.6, 12.5, dirAngle, 3.6);
-        addItemBox(
-          ramp.x + ramp.dirX * (ramp.length * 0.42),
-          3.6,
-          ramp.z + ramp.dirZ * (ramp.length * 0.42),
-          pickType(0.32)
-        );
-      } else if (rng() < 0.32 * density) {
-        addItemBox(x0 - 2.8, 0, midZ, pickType(0.22));
-        if (rng() < 0.5 * density) addItemBox(x0 + 2.8, 0, midZ, pickType(0.22));
+        if (density >= 1.0 || extraRng() < density) {
+          addItemBox(
+            ramp.x + ramp.dirX * (ramp.length * 0.42),
+            3.6,
+            ramp.z + ramp.dirZ * (ramp.length * 0.42),
+            pickType(0.32),
+            { alreadyResolved: true }
+          );
+        } else {
+          rng();
+        }
+      } else if (rng() < 0.32 * baseDensity) {
+        addItemBox(x0 - 2.8, 0, midZ, pickType(0.22), { alreadyResolved: true });
+        if (rng() < 0.5 * baseDensity) {
+          addItemBox(x0 + 2.8, 0, midZ, pickType(0.22), { alreadyResolved: true });
+        }
       }
     }
 
@@ -922,15 +1166,80 @@ export class World {
       if (this.isHighwayGrid(cz) && rng() < 0.24) {
         const dirAngle = rng() < 0.5 ? Math.PI * 0.5 : -Math.PI * 0.5;
         const ramp = addRamp(midX, z0 + (dirAngle > 0 ? -4.2 : 4.2), 7.6, 12.5, dirAngle, 3.6);
-        addItemBox(
-          ramp.x + ramp.dirX * (ramp.length * 0.42),
-          3.6,
-          ramp.z + ramp.dirZ * (ramp.length * 0.42),
-          pickType(0.32)
-        );
-      } else if (rng() < 0.3 * density) {
-        addItemBox(midX, 0, z0 - 2.8, pickType(0.22));
-        if (rng() < 0.45 * density) addItemBox(midX, 0, z0 + 2.8, pickType(0.22));
+        if (density >= 1.0 || extraRng() < density) {
+          addItemBox(
+            ramp.x + ramp.dirX * (ramp.length * 0.42),
+            3.6,
+            ramp.z + ramp.dirZ * (ramp.length * 0.42),
+            pickType(0.32),
+            { alreadyResolved: true }
+          );
+        } else {
+          rng();
+        }
+      } else if (rng() < 0.3 * baseDensity) {
+        addItemBox(midX, 0, z0 - 2.8, pickType(0.22), { alreadyResolved: true });
+        if (rng() < 0.45 * baseDensity) {
+          addItemBox(midX, 0, z0 + 2.8, pickType(0.22), { alreadyResolved: true });
+        }
+      }
+    }
+
+    // High-density road & intersection box rows for 100%..500% (1.0..5.0) without overlapping (x, z)!
+    if (density > 1.0) {
+      const extra = density - 1.0; // 0 .. 4.0
+      const slotProb = clamp(extra * 0.19, 0, 0.86);
+      const overlapsRamp = (px, pz) => {
+        for (let i = 0; i < chunk.ramps.length; i++) {
+          const r = chunk.ramps[i];
+          const rx = px - r.x;
+          const rz = pz - r.z;
+          const along = Math.abs(rx * r.dirX + rz * r.dirZ);
+          const across = Math.abs(rx * r.dirZ - rz * r.dirX);
+          if (along <= r.length * 0.5 + 1.5 && across <= r.w * 0.5 + 1.2) return true;
+        }
+        return false;
+      };
+
+      const roadSlots = [
+        // Quarter-block NS lanes (z0 + 15, z0 + 45) + midZ opposite lane fill
+        [x0 - 3.0, z0 + 15.0],
+        [x0 + 3.0, z0 + 15.0],
+        [x0 - 3.0, z0 + 45.0],
+        [x0 + 3.0, z0 + 45.0],
+        [x0 - 3.0, midZ],
+        [x0 + 3.0, midZ],
+        // Quarter-block EW lanes (x0 + 15, x0 + 45) + midX opposite lane fill
+        [x0 + 15.0, z0 - 3.0],
+        [x0 + 15.0, z0 + 3.0],
+        [x0 + 45.0, z0 - 3.0],
+        [x0 + 45.0, z0 + 3.0],
+        [midX, z0 - 3.0],
+        [midX, z0 + 3.0],
+      ];
+
+      if (!(cx === 0 && cz === 0)) {
+        roadSlots.push([x0 - 3.6, z0], [x0 + 3.6, z0]);
+        if (this.isHighwayGrid(cx)) {
+          roadSlots.push([x0 - 7.0, midZ], [x0 + 7.0, midZ]);
+        }
+      }
+
+      for (let i = 0; i < roadSlots.length; i++) {
+        const sx = roadSlots[i][0];
+        const sz = roadSlots[i][1];
+        if (Math.abs(sx) > HALF_WORLD - 12 || Math.abs(sz) > HALF_WORLD - 12) continue;
+        if (this._isCentralPlazaRoad(sx, sz)) continue;
+        if (overlapsRamp(sx, sz)) continue;
+        if (extraRng() < slotProb) {
+          addItemBox(
+            sx,
+            0,
+            sz,
+            extraRng() < this._computeSugarProb(0.24) ? 'sugar' : 'normal',
+            { alreadyResolved: true }
+          );
+        }
       }
     }
   }

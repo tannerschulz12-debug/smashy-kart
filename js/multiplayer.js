@@ -1,4 +1,7 @@
 // ISO/IEC 18004 Standards-Compliant QR Code SVG Generator + Real-Time WebSocket Party Client
+import { ABILITIES, COP_VEHICLES, cloneItemWeights, createDefaultItemWeights } from './config.js';
+
+const VALID_CLOUD_COP_IDS = new Set(COP_VEHICLES.map((c) => c.id));
 
 // ============================================================================
 // 1. Genuine ISO/IEC 18004 QR Code Generator (Byte Mode 0100, Level L, V1..V6)
@@ -479,6 +482,11 @@ function concatUint8(...arrays) {
 function sanitizeCloudProfile(raw = {}, fallbackName = 'Player') {
   const out = {
     name: String(raw.name || fallbackName).trim().slice(0, 16) || fallbackName,
+    playerRole: raw.playerRole === 'cop' ? 'cop' : 'runner',
+    copVehicleId:
+      typeof raw.copVehicleId === 'string' && VALID_CLOUD_COP_IDS.has(raw.copVehicleId)
+        ? raw.copVehicleId
+        : 'cop_heli',
     characterMode:
       raw.characterMode === 'photo_car' || raw.characterMode === 'runner'
         ? raw.characterMode
@@ -496,6 +504,121 @@ function sanitizeCloudProfile(raw = {}, fallbackName = 'Player') {
     ready: raw.ready !== undefined ? Boolean(raw.ready) : true,
   };
   return out;
+}
+
+function defaultCloudRoomSettings() {
+  const enabledItems = {};
+  for (const ab of ABILITIES) enabledItems[ab.id] = true;
+  return {
+    biome: 'city',
+    aiCopsEnabled: true,
+    copIntensity: 1.0,
+    startStars: 1,
+    trafficDensity: 1.0,
+    itemBoxDensity: 1.2,
+    sugarBoxRate: 1.0,
+    gravityMult: 1.0,
+    worldSeed: Math.floor(100000 + Math.random() * 900000),
+    enabledItems,
+    itemWeights: createDefaultItemWeights(),
+    lobbyRules: {
+      lockStats: true,
+      allowCarChoice: true,
+      allowModeChoice: true,
+      allowCustomPhotos: true,
+      allowPlayerCops: true,
+      universalSpeedMult: 1.0,
+      universalDriftMult: 1.0,
+      universalMassMult: 1.0,
+      universalScaleMult: 1.0,
+      universalVehicleId: 'sedan',
+      universalCharacterMode: 'car_driver',
+    },
+  };
+}
+
+function sanitizeCloudRoomSettings(current = {}, patch = {}) {
+  const base = { ...defaultCloudRoomSettings(), ...(current || {}) };
+  const next = { ...base };
+
+  if (patch.biome === 'city' || patch.biome === 'desert' || patch.biome === 'snow') {
+    next.biome = patch.biome;
+  }
+  if (patch.aiCopsEnabled !== undefined) {
+    next.aiCopsEnabled = Boolean(patch.aiCopsEnabled);
+  } else {
+    next.aiCopsEnabled = next.aiCopsEnabled !== false;
+  }
+  if (patch.copIntensity !== undefined && patch.copIntensity !== null && Number.isFinite(Number(patch.copIntensity))) {
+    next.copIntensity = Math.max(0.4, Math.min(2.0, Number(patch.copIntensity)));
+  }
+  if (patch.startStars !== undefined && patch.startStars !== null && Number.isFinite(Number(patch.startStars))) {
+    next.startStars = Math.max(1, Math.min(5, Math.round(Number(patch.startStars))));
+  }
+  if (patch.trafficDensity !== undefined && patch.trafficDensity !== null && Number.isFinite(Number(patch.trafficDensity))) {
+    next.trafficDensity = Math.max(0, Math.min(2.0, Number(patch.trafficDensity)));
+  }
+  if (patch.itemBoxDensity !== undefined && patch.itemBoxDensity !== null && Number.isFinite(Number(patch.itemBoxDensity))) {
+    next.itemBoxDensity = Math.round(Math.max(0.1, Math.min(5.0, Number(patch.itemBoxDensity))) * 100) / 100;
+  } else {
+    next.itemBoxDensity = Math.round(Math.max(0.1, Math.min(5.0, Number(next.itemBoxDensity ?? 1.2))) * 100) / 100;
+  }
+  if (patch.sugarBoxRate !== undefined && patch.sugarBoxRate !== null && Number.isFinite(Number(patch.sugarBoxRate))) {
+    next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(patch.sugarBoxRate))) * 100) / 100;
+  } else {
+    next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(next.sugarBoxRate ?? 1.0))) * 100) / 100;
+  }
+  if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
+    next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
+  }
+  if (patch.worldSeed !== undefined && patch.worldSeed !== null && Number.isFinite(Number(patch.worldSeed))) {
+    next.worldSeed = Math.floor(Math.abs(Number(patch.worldSeed))) || 777123;
+  }
+  if (patch.enabledItems && typeof patch.enabledItems === 'object') {
+    next.enabledItems = { ...(next.enabledItems || {}) };
+    for (const [k, v] of Object.entries(patch.enabledItems)) {
+      next.enabledItems[k] = Boolean(v);
+    }
+  }
+  if (patch.itemWeights && typeof patch.itemWeights === 'object') {
+    next.itemWeights = cloneItemWeights({ ...(next.itemWeights || {}), ...patch.itemWeights });
+  } else {
+    next.itemWeights = cloneItemWeights(next.itemWeights);
+  }
+  if (patch.lobbyRules && typeof patch.lobbyRules === 'object') {
+    const curR = next.lobbyRules || {};
+    const pr = patch.lobbyRules;
+    next.lobbyRules = {
+      lockStats: pr.lockStats !== undefined ? Boolean(pr.lockStats) : curR.lockStats !== false,
+      allowCarChoice: pr.allowCarChoice !== undefined ? Boolean(pr.allowCarChoice) : curR.allowCarChoice !== false,
+      allowModeChoice: pr.allowModeChoice !== undefined ? Boolean(pr.allowModeChoice) : curR.allowModeChoice !== false,
+      allowCustomPhotos: pr.allowCustomPhotos !== undefined ? Boolean(pr.allowCustomPhotos) : curR.allowCustomPhotos !== false,
+      allowPlayerCops: pr.allowPlayerCops !== undefined ? Boolean(pr.allowPlayerCops) : curR.allowPlayerCops !== false,
+      universalSpeedMult: Number.isFinite(Number(pr.universalSpeedMult))
+        ? Math.max(0.6, Math.min(1.7, Number(pr.universalSpeedMult)))
+        : curR.universalSpeedMult ?? 1.0,
+      universalDriftMult: Number.isFinite(Number(pr.universalDriftMult))
+        ? Math.max(0.6, Math.min(1.7, Number(pr.universalDriftMult)))
+        : curR.universalDriftMult ?? 1.0,
+      universalMassMult: Number.isFinite(Number(pr.universalMassMult))
+        ? Math.max(0.6, Math.min(1.9, Number(pr.universalMassMult)))
+        : curR.universalMassMult ?? 1.0,
+      universalScaleMult: Number.isFinite(Number(pr.universalScaleMult))
+        ? Math.max(0.65, Math.min(1.7, Number(pr.universalScaleMult)))
+        : curR.universalScaleMult ?? 1.0,
+      universalVehicleId:
+        typeof pr.universalVehicleId === 'string'
+          ? pr.universalVehicleId.slice(0, 24)
+          : curR.universalVehicleId || 'sedan',
+      universalCharacterMode:
+        pr.universalCharacterMode === 'photo_car' || pr.universalCharacterMode === 'runner'
+          ? pr.universalCharacterMode
+          : pr.universalCharacterMode === 'car_driver'
+            ? 'car_driver'
+            : curR.universalCharacterMode || 'car_driver',
+    };
+  }
+  return next;
 }
 
 class MqttWssClient {
@@ -600,7 +723,14 @@ class MqttWssClient {
             let pos = 2 + topicLen;
             const topic = textDecoder.decode(body.subarray(2, pos));
             const qos = (typeFlags >> 1) & 0x03;
-            if (qos > 0) pos += 2;
+            if (qos > 0) {
+              const pidHi = body[pos];
+              const pidLo = body[pos + 1];
+              pos += 2;
+              if (qos === 1 && ws.readyState === WebSocket.OPEN) {
+                try { ws.send(new Uint8Array([0x40, 0x02, pidHi, pidLo])); } catch {}
+              }
+            }
             const payloadStr = textDecoder.decode(body.subarray(pos));
             try {
               this.onTopicMessage?.(topic, JSON.parse(payloadStr));
@@ -663,7 +793,7 @@ class MqttWssClient {
     const body = concatUint8(
       new Uint8Array([(id >> 8) & 0xff, id & 0xff, (tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
       tBytes,
-      new Uint8Array([0x00]) // QoS 0
+      new Uint8Array([0x01]) // QoS 1 so discrete room & hit events are never dropped
     );
     const pkt = concatUint8(new Uint8Array([0x82, ...encodeMqttVarLen(body.length)]), body);
     return new Promise((resolve) => {
@@ -679,15 +809,28 @@ class MqttWssClient {
     });
   }
 
-  publish(topic, obj) {
+  publish(topic, obj, qos = 0) {
     const tBytes = textEncoder.encode(topic);
     const pBytes = textEncoder.encode(JSON.stringify(obj));
-    const body = concatUint8(
-      new Uint8Array([(tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
-      tBytes,
-      pBytes
-    );
-    const pkt = concatUint8(new Uint8Array([0x30, ...encodeMqttVarLen(body.length)]), body);
+    let body;
+    let hdrByte = 0x30;
+    if (qos === 1) {
+      hdrByte = 0x32;
+      const id = (this._pktId++ & 0x7fff) || 1;
+      body = concatUint8(
+        new Uint8Array([(tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
+        tBytes,
+        new Uint8Array([(id >> 8) & 0xff, id & 0xff]),
+        pBytes
+      );
+    } else {
+      body = concatUint8(
+        new Uint8Array([(tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
+        tBytes,
+        pBytes
+      );
+    }
+    const pkt = concatUint8(new Uint8Array([hdrByte, ...encodeMqttVarLen(body.length)]), body);
     if (!this._txQueue) this._txQueue = [];
     this._txQueue.push(pkt);
     this._drainTxQueue();
@@ -699,7 +842,7 @@ class MqttWssClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const now = Date.now();
-    const minGap = (this._lastLargeSendAt && now - this._lastLargeSendAt < 45) ? 35 : 14;
+    const minGap = (this._lastLargeSendAt && now - this._lastLargeSendAt < 70) ? 55 : 16;
     const elapsed = now - (this._lastSendAt || 0);
     if (elapsed < minGap) {
       this._txTimer = setTimeout(() => {
@@ -721,7 +864,7 @@ class MqttWssClient {
       this._txTimer = setTimeout(() => {
         this._txTimer = null;
         this._drainTxQueue();
-      }, pkt.length > 4096 ? 35 : 14);
+      }, pkt.length > 4096 ? 55 : 16);
     }
   }
 
@@ -1070,7 +1213,8 @@ export class MultiplayerClient {
 
   _publishCloud(code, packet) {
     if (!this.mqtt || !this.mqtt.connected || !code) return;
-    this.mqtt.publish(this._roomTopic(code), packet);
+    const isHighFreqState = packet?.env === 'peer' && packet?.msg?.type === 'player_state';
+    this.mqtt.publish(this._roomTopic(code), packet, isHighFreqState ? 0 : 1);
   }
 
   _serializeCloudRoom(room, includeAvatars = false) {
@@ -1082,10 +1226,22 @@ export class MultiplayerClient {
       if (member.profile.avatarDataUrl) {
         this._cloudAvatarBook.set(id, member.profile.avatarDataUrl);
       }
+      const isHost = id === room.hostId;
+      const effectiveRole =
+        rules.allowPlayerCops === false && !isHost
+          ? 'runner'
+          : member.profile.playerRole === 'cop'
+            ? 'cop'
+            : 'runner';
+      const effectiveCopVeh = VALID_CLOUD_COP_IDS.has(member.profile.copVehicleId)
+        ? member.profile.copVehicleId
+        : 'cop_heli';
       const effectiveMode =
-        rules.allowModeChoice === false
-          ? rules.universalCharacterMode || 'car_driver'
-          : member.profile.characterMode;
+        effectiveRole === 'cop'
+          ? 'car_driver'
+          : rules.allowModeChoice === false
+            ? rules.universalCharacterMode || 'car_driver'
+            : member.profile.characterMode;
       const effectiveVeh =
         rules.allowCarChoice === false
           ? rules.universalVehicleId || 'sedan'
@@ -1093,8 +1249,10 @@ export class MultiplayerClient {
       players.push({
         id,
         name: member.profile.name,
-        isHost: id === room.hostId,
+        isHost,
         spawnIndex: idx++,
+        playerRole: effectiveRole,
+        copVehicleId: effectiveCopVeh,
         characterMode: effectiveMode,
         vehicleId: effectiveVeh,
         primaryColor: member.profile.primaryColor,
@@ -1126,7 +1284,7 @@ export class MultiplayerClient {
     });
   }
 
-  _computeCloudStandings(room) {
+  _computeCloudStandings(room, preferredWinnerTeam = null) {
     if (!room?.match) return [];
     const elapsedSec = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
     const list = Array.from(room.match.participants.values()).map((p) => ({
@@ -1134,7 +1292,15 @@ export class MultiplayerClient {
       survivalTime: Number((p.alive ? Math.max(p.survivalTime || 0, elapsedSec) : p.survivalTime || 0).toFixed(2)),
     }));
     list.sort((a, b) => {
+      if (preferredWinnerTeam) {
+        const aWin = (a.playerRole === 'cop' ? 'cop' : 'runner') === preferredWinnerTeam;
+        const bWin = (b.playerRole === 'cop' ? 'cop' : 'runner') === preferredWinnerTeam;
+        if (aWin !== bWin) return aWin ? -1 : 1;
+      }
       if (a.alive !== b.alive) return a.alive ? -1 : 1;
+      if (preferredWinnerTeam === 'cop' && (b.copsWrecked || 0) !== (a.copsWrecked || 0)) {
+        return (b.copsWrecked || 0) - (a.copsWrecked || 0);
+      }
       if (Math.abs(b.survivalTime - a.survivalTime) > 0.001) return b.survivalTime - a.survivalTime;
       return (b.score || 0) - (a.score || 0);
     });
@@ -1145,6 +1311,8 @@ export class MultiplayerClient {
       id: p.id,
       playerId: p.id,
       name: p.name,
+      playerRole: p.playerRole || 'runner',
+      copVehicleId: p.copVehicleId || 'cop_heli',
       alive: p.alive,
       survivalTime: p.survivalTime,
       score: Math.round(p.score || 0),
@@ -1160,20 +1328,33 @@ export class MultiplayerClient {
     const total = participants.length;
     if (total === 0) return;
     const alive = participants.filter((p) => p.alive);
-    const shouldFinish = (total >= 2 && alive.length <= 1) || alive.length === 0;
+    const isTeamVsMatch = Boolean(room.match.isTeamVsMatch);
+
+    let shouldFinish = false;
+    let winnerTeam = null;
+    if (isTeamVsMatch) {
+      const aliveRunners = alive.filter((p) => p.playerRole !== 'cop');
+      const aliveCops = alive.filter((p) => p.playerRole === 'cop');
+      if (aliveRunners.length === 0 || aliveCops.length === 0) {
+        shouldFinish = true;
+        winnerTeam = aliveRunners.length === 0 && aliveCops.length > 0 ? 'cop' : 'runner';
+      }
+    } else {
+      shouldFinish = (total >= 2 && alive.length <= 1) || alive.length === 0;
+    }
     if (!shouldFinish) return;
 
-    if (alive.length === 1) {
-      const maxElim = participants
-        .filter((p) => !p.alive)
-        .reduce((mx, p) => Math.max(mx, p.survivalTime || 0), 0);
-      const elapsed = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
-      alive[0].survivalTime = Math.max(alive[0].survivalTime || 0, elapsed, maxElim + 0.05);
+    const maxElim = participants
+      .filter((p) => !p.alive)
+      .reduce((mx, p) => Math.max(mx, p.survivalTime || 0), 0);
+    const elapsed = Math.max(0, (Date.now() - room.match.liveStartAt) / 1000);
+    for (const survivor of alive) {
+      survivor.survivalTime = Math.max(survivor.survivalTime || 0, elapsed, maxElim + 0.05);
     }
 
     room.match.finished = true;
     room.state = 'results';
-    const standings = this._computeCloudStandings(room);
+    const standings = this._computeCloudStandings(room, winnerTeam);
     const winner = standings[0] || null;
     const msg = {
       type: 'match_results',
@@ -1181,6 +1362,7 @@ export class MultiplayerClient {
       roomCode: room.code,
       winnerId: winner ? winner.id : null,
       winnerName: winner ? winner.name : null,
+      winnerTeam,
       standings,
       leaderboard: standings,
     };
@@ -1260,7 +1442,10 @@ export class MultiplayerClient {
 
       case 'update_room_settings': {
         if (this.isHost && this._cloudHostRoom) {
-          this._cloudHostRoom.settings = { ...this._cloudHostRoom.settings, ...(obj.settings || {}) };
+          this._cloudHostRoom.settings = sanitizeCloudRoomSettings(
+            this._cloudHostRoom.settings,
+            obj.settings || obj
+          );
           this._broadcastCloudFromHost(this._cloudHostRoom, {
             type: 'room_settings_updated',
             code: this._cloudHostRoom.code,
@@ -1279,16 +1464,22 @@ export class MultiplayerClient {
         const seed = Number.isFinite(Number(obj.seed))
           ? Math.floor(Math.abs(Number(obj.seed)))
           : Math.floor(100000 + Math.random() * 899999);
-        room.settings = { ...(room.settings || {}), worldSeed: seed };
+        room.settings = sanitizeCloudRoomSettings(room.settings, { worldSeed: seed });
         room.state = 'countdown';
 
         const participants = new Map();
         const serialized = this._serializeCloudRoom(room);
+        let initialRunners = 0;
+        let initialCops = 0;
         for (const p of serialized.players) {
+          if (p.playerRole === 'cop') initialCops++;
+          else initialRunners++;
           participants.set(p.id, {
             id: p.id,
             name: p.name,
             spawnIndex: p.spawnIndex,
+            playerRole: p.playerRole || 'runner',
+            copVehicleId: p.copVehicleId || 'cop_heli',
             alive: true,
             survivalTime: 0,
             score: 0,
@@ -1303,6 +1494,7 @@ export class MultiplayerClient {
           seed,
           liveStartAt: now + 3000,
           finished: false,
+          isTeamVsMatch: initialRunners >= 1 && initialCops >= 1,
           participants,
           countdownTimer: setTimeout(() => {
             if (room.state === 'countdown' && room.match && !room.match.finished) {
@@ -1313,6 +1505,8 @@ export class MultiplayerClient {
                 code: room.code,
                 roomCode: room.code,
                 seed,
+                settings: room.settings,
+                players: serialized.players,
               });
             }
           }, 3000),
@@ -1697,6 +1891,8 @@ export class MultiplayerClient {
       ...state,
       id: playerId,
       name: state.name || bucket?.latest?.name || rosterEntry?.name || 'Player',
+      playerRole: state.playerRole || bucket?.latest?.playerRole || rosterEntry?.playerRole || 'runner',
+      copVehicleId: state.copVehicleId || bucket?.latest?.copVehicleId || rosterEntry?.copVehicleId || 'cop_heli',
       avatarId: state.avatarId || bucket?.latest?.avatarId || rosterEntry?.avatarId || `net_${playerId}`,
       primaryColor: state.primaryColor || bucket?.latest?.primaryColor || rosterEntry?.primaryColor,
       accentColor: state.accentColor || bucket?.latest?.accentColor || rosterEntry?.accentColor,
@@ -1791,7 +1987,7 @@ export class MultiplayerClient {
         code,
         hostId: this.playerId,
         state: 'lobby',
-        settings: { ...settings },
+        settings: sanitizeCloudRoomSettings(defaultCloudRoomSettings(), settings),
         members: new Map([[this.playerId, { id: this.playerId, profile: cleanProfile }]]),
         match: null,
       };
@@ -1912,6 +2108,12 @@ export class MultiplayerClient {
         stars: player.stars || 1,
         score: Math.round(player.score || 0),
         copsWrecked: player.copsWrecked || 0,
+        playerRole: player.playerRole || this._lastProfile?.playerRole || 'runner',
+        copVehicleId: player.copVehicleId || this._lastProfile?.copVehicleId || 'cop_heli',
+        flying: Boolean(player.flying),
+        groundY: Number((player.groundY || 0).toFixed(2)),
+        turretAngle: Number((player.turretAngle || player.angle || 0).toFixed(3)),
+        copMissileCooldown: Number((player.copMissileCooldown || 0).toFixed(2)),
         characterMode: player.characterMode,
         vehicleId: player.vehicleId,
         primaryColor: player.primaryColor,

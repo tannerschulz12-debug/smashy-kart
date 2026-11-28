@@ -1,5 +1,14 @@
-// Mario Kart Item Box Roulette, 9 Signature Abilities (incl. Twin-Rocket RPG & 3x Sugar Rush), Projectiles & Multiplayer Sync
-import { ABILITIES } from './config.js';
+// Mario Kart Item Box Roulette, 9 Signature Abilities, Cop 2s Soft-Tracking Missiles, Projectiles & Multiplayer Sync
+import { ABILITIES, WORLD_CONFIG, clampDropRatePct } from './config.js';
+
+const COP_MISSILE_COOLDOWN = 2.0;
+const COP_MISSILE_SPEED = 64;
+const COP_MISSILE_TTL = 3.4;
+const COP_MISSILE_TURN_RATE = 1.15; // Gentle <= 1.15 rad/s tracking so runners can juke/dodge!
+const COP_MISSILE_CONE_DOT = 0.52;
+const COP_MISSILE_BREAK_DIST = 10.0; // Stops homing inside 10m horizontal distance!
+const COP_MISSILE_BLAST_RADIUS = 5.8;
+const COP_MISSILE_DAMAGE = 36;
 
 const ROULETTE_DURATION = 1.15;
 const SUGAR_ROULETTE_DURATION = 0.5;
@@ -56,6 +65,7 @@ export class AbilitySystem {
       sugarTimer: 0,
       shrunkTimer: 0,
       shockwaveVisualTimer: 0,
+      copMissileCooldown: 0,
     };
   }
 
@@ -68,10 +78,12 @@ export class AbilitySystem {
   }
 
   _pickWeightedAbility(enabled, rankBias = 0) {
-    if (!enabled.length) return null;
+    if (!enabled || !enabled.length) return null;
     const bias = Math.max(0, Math.min(1, Number(rankBias) || 0));
+    const itemWeights = this.settings?.itemWeights;
     const weights = enabled.map((ab) => {
-      let w = ab.weight || 1.0;
+      const rateMult = clampDropRatePct(itemWeights?.[ab.id] ?? 100) / 100;
+      let w = (ab.weight || 1.0) * rateMult;
       if (bias > 0) {
         if (ab.id === 'star_power' || ab.id === 'mega_giant' || ab.id === 'lightning_zap') {
           w *= 1 + bias * 0.95;
@@ -81,9 +93,12 @@ export class AbilitySystem {
           w *= 1 + bias * 0.4;
         }
       }
-      return Math.max(0.05, w);
+      return Math.max(0, w);
     });
     const total = weights.reduce((acc, v) => acc + v, 0);
+    if (!(total > 0)) {
+      return enabled[Math.floor(Math.random() * enabled.length)];
+    }
     let roll = Math.random() * total;
     for (let i = 0; i < enabled.length; i++) {
       roll -= weights[i];
@@ -199,12 +214,13 @@ export class AbilitySystem {
           items.forcedResultId && ABILITY_MAP.has(items.forcedResultId)
             ? items.forcedResultId
             : null;
-        const fallbackId = enabled[0]?.id || null;
+        const lockedTargetValid =
+          items._rouletteTargetId && enabled.some((a) => a.id === items._rouletteTargetId);
         const lockedId = forcedId
           ? forcedId
-          : items._rouletteTargetId && enabled.some((a) => a.id === items._rouletteTargetId)
+          : lockedTargetValid
             ? items._rouletteTargetId
-            : fallbackId;
+            : this._pickWeightedAbility(enabled, 0)?.id || enabled[0]?.id || null;
         if (lockedId) {
           const def = this.getAbilityDef(lockedId);
           items.heldItem = lockedId;
@@ -234,10 +250,22 @@ export class AbilitySystem {
     if (items.shockwaveVisualTimer > 0) {
       items.shockwaveVisualTimer = Math.max(0, items.shockwaveVisualTimer - dt);
     }
+    if (player.copMissileCooldown === undefined) {
+      player.copMissileCooldown = Number(items.copMissileCooldown) || 0;
+    }
+    if (player.copMissileCooldown > 0) {
+      player.copMissileCooldown = Math.max(0, player.copMissileCooldown - dt);
+    } else {
+      player.copMissileCooldown = 0;
+    }
+    items.copMissileCooldown = player.copMissileCooldown;
 
     if (items.sugarTimer > 0) {
       player.spinOutTimer = 0;
       player.bustedProgress = 0;
+    }
+    if (player.playerRole === 'cop' && player.copVehicleId === 'cop_tank') {
+      player.spinOutTimer = 0;
     }
 
     // Sync player-level convenience flags & visual scale
@@ -278,7 +306,7 @@ export class AbilitySystem {
       const copPad = items.sugarTimer > 0 ? 0.8 : 0.65;
       const trafficPad = items.sugarTimer > 0 ? 0.8 : 0.5;
       const playerRadius = (player.radius || 2.1) * (player.scale || 1.0);
-      const cops = context.cops || [];
+      const cops = player.playerRole === 'cop' ? [] : context.cops || [];
       for (let i = 0; i < cops.length; i++) {
         const cop = cops[i];
         if (!cop || cop.wrecked || cop.alive === false || cop.type === 'heli') continue;
@@ -366,8 +394,184 @@ export class AbilitySystem {
     });
   }
 
+  fireCopMissile(player, context = {}) {
+    if (!player || player.alive === false) {
+      return { used: false, fired: false, abilityId: null };
+    }
+    if ((player.copMissileCooldown || 0) > 0) {
+      return {
+        used: false,
+        fired: false,
+        abilityId: null,
+        cooldownLeft: player.copMissileCooldown,
+      };
+    }
+
+    const copUnit = player.copVehicleId || 'cop_heli';
+    if (!player.items) {
+      player.items = this.createPlayerItemState();
+    }
+
+    // Ground Cruiser & SWAT: 2.0s-cooldown Siren Surge speed burst when item slot is empty!
+    if (copUnit === 'cop_cruiser' || copUnit === 'cop_swat') {
+      player.copMissileCooldown = COP_MISSILE_COOLDOWN;
+      player.items.copMissileCooldown = COP_MISSILE_COOLDOWN;
+      player.items.boostTimer = Math.max(player.items.boostTimer || 0, 0.85);
+      player.boostTimer = player.items.boostTimer;
+      player.boostActive = true;
+      player.spinOutTimer = 0;
+      if (player.activeBuffs) player.activeBuffs.boost = true;
+
+      const angle = player.angle || 0;
+      const fx = Math.sin(angle);
+      const fz = Math.cos(angle);
+      const curFwd = (player.vx || 0) * fx + (player.vz || 0) * fz;
+      const surgeFwd = Math.max(curFwd + 20, (player.baseSpeed || 48) * 1.38);
+      player.vx = fx * surgeFwd;
+      player.vz = fz * surgeFwd;
+      player.speed = Math.hypot(player.vx, player.vz);
+
+      const netEvent = {
+        abilityId: 'cop_siren_surge',
+        playerId: player.id || 'local',
+        ownerName: player.name || 'Officer',
+        x: player.x || 0,
+        y: player.y || 0,
+        z: player.z || 0,
+        angle,
+      };
+      context.onEvent?.({
+        type: 'item_used',
+        abilityId: 'cop_siren_surge',
+        playerId: player.id || 'local',
+        chargesLeft: 0,
+        cooldown: COP_MISSILE_COOLDOWN,
+        x: player.x || 0,
+        y: player.y || 0,
+        z: player.z || 0,
+        netEvent,
+      });
+      return {
+        used: true,
+        fired: false,
+        abilityId: 'cop_siren_surge',
+        chargesLeft: 0,
+        cooldown: COP_MISSILE_COOLDOWN,
+        netEvent,
+      };
+    }
+
+    // Attack Helicopter & Police Tank: strict 2.0s-cooldown light/gentle soft-tracking missile!
+    const sourceUnit = copUnit === 'cop_tank' ? 'tank' : 'heli';
+    player.copMissileCooldown = COP_MISSILE_COOLDOWN;
+    player.items.copMissileCooldown = COP_MISSILE_COOLDOWN;
+
+    const px = Number(player.x) || 0;
+    const pz = Number(player.z) || 0;
+    const launchAngle =
+      sourceUnit === 'tank' && Number.isFinite(player.turretAngle)
+        ? player.turretAngle
+        : Number(player.angle) || 0;
+    const fx = Math.sin(launchAngle);
+    const fz = Math.cos(launchAngle);
+    const g = context.world?.getGroundHeight ? context.world.getGroundHeight(px, pz) : { y: 0 };
+    const groundY = Number.isFinite(player.groundY) ? player.groundY : g.y || 0;
+
+    let sx;
+    let sy;
+    let sz;
+    let vy = 0;
+
+    if (sourceUnit === 'tank') {
+      sx = px + fx * 3.8;
+      sz = pz + fz * 3.8;
+      sy = Math.max(1.1, (Number.isFinite(player.y) ? player.y : groundY) + 1.35);
+      vy = 0;
+    } else {
+      sx = px + fx * 2.15;
+      sz = pz + fz * 2.15;
+      const heliY = Number.isFinite(player.y) && player.y > 2 ? player.y : Math.max(groundY + 10.5, 11.5);
+      sy = Math.max(groundY + 2.5, heliY - 0.55);
+
+      const lockCand = this._pickInitialCopMissileTarget(sx, sz, launchAngle, player.id || 'local', context);
+      const aimDist = lockCand ? Math.max(15, Math.min(78, lockCand.dist)) : 36;
+      const targetFloorY = lockCand ? (lockCand.entity.y || 0) + 0.9 : groundY + 0.9;
+      const estFlightT = Math.max(0.24, aimDist / COP_MISSILE_SPEED);
+      vy = Math.max(-26, Math.min(-3.0, (targetFloorY - sy) / estFlightT));
+    }
+
+    const vx = fx * COP_MISSILE_SPEED;
+    const vz = fz * COP_MISSILE_SPEED;
+
+    const proj = this._spawnCopMissile({
+      ownerId: player.id || 'local',
+      ownerName: player.name || 'Officer',
+      ownerRole: player.playerRole || 'cop',
+      ownerRef: player,
+      sourceUnit,
+      x: sx,
+      y: sy,
+      z: sz,
+      vx,
+      vy,
+      vz,
+      angle: launchAngle,
+      context,
+    });
+
+    const netEvent = {
+      abilityId: 'cop_missile',
+      sourceUnit,
+      playerId: player.id || 'local',
+      ownerName: player.name || 'Officer',
+      x: sx,
+      y: sy,
+      z: sz,
+      vx,
+      vy,
+      vz,
+      angle: launchAngle,
+    };
+
+    context.onEvent?.({
+      type: 'item_used',
+      abilityId: 'cop_missile',
+      sourceUnit,
+      playerId: player.id || 'local',
+      chargesLeft: 0,
+      cooldown: COP_MISSILE_COOLDOWN,
+      x: sx,
+      y: sy,
+      z: sz,
+      netEvent,
+    });
+
+    return {
+      used: true,
+      fired: true,
+      abilityId: 'cop_missile',
+      sourceUnit,
+      chargesLeft: 0,
+      cooldown: COP_MISSILE_COOLDOWN,
+      projectile: proj,
+      netEvent,
+    };
+  }
+
   useHeldItem(player, context = {}) {
-    if (!player || player.alive === false || !player.items) {
+    if (!player || player.alive === false) {
+      return { used: false, abilityId: null };
+    }
+    if (player.playerRole === 'cop') {
+      const copUnit = player.copVehicleId || 'cop_heli';
+      if (copUnit === 'cop_heli' || copUnit === 'cop_tank') {
+        return this.fireCopMissile(player, context);
+      }
+      if (!player.items?.heldItem || (player.items?.charges || 0) <= 0) {
+        return this.fireCopMissile(player, context);
+      }
+    }
+    if (!player.items) {
       return { used: false, abilityId: null };
     }
     const items = player.items;
@@ -670,6 +874,28 @@ export class AbilitySystem {
         });
         break;
 
+      case 'cop_missile': {
+        const srcUnit = payload.sourceUnit === 'tank' ? 'tank' : 'heli';
+        this._spawnCopMissile({
+          ownerId,
+          ownerName,
+          ownerRole: 'cop',
+          ownerRef: null,
+          sourceUnit: srcUnit,
+          x,
+          y: Number.isFinite(Number(payload.y)) ? Number(payload.y) : srcUnit === 'heli' ? 11.0 : 1.4,
+          z,
+          vx: Number.isFinite(Number(payload.vx)) ? Number(payload.vx) : fx * COP_MISSILE_SPEED,
+          vy: Number.isFinite(Number(payload.vy)) ? Number(payload.vy) : srcUnit === 'heli' ? -14.0 : 0,
+          vz: Number.isFinite(Number(payload.vz)) ? Number(payload.vz) : fz * COP_MISSILE_SPEED,
+          angle,
+          context,
+        });
+        break;
+      }
+
+      case 'cop_surge':
+      case 'cop_siren_surge':
       case 'star_power':
       case 'mega_giant':
       case 'triple_boost':
@@ -693,9 +919,10 @@ export class AbilitySystem {
             match.megaActive = true;
             match.activeBuffs.mega = true;
           }
-          if (abilityId === 'triple_boost') {
-            match.items.boostTimer = 1.65;
-            match.boostTimer = 1.65;
+          if (abilityId === 'triple_boost' || abilityId === 'cop_siren_surge' || abilityId === 'cop_surge') {
+            const dur = abilityId === 'cop_siren_surge' || abilityId === 'cop_surge' ? 0.85 : 1.65;
+            match.items.boostTimer = dur;
+            match.boostTimer = dur;
             match.boostActive = true;
             match.activeBuffs.boost = true;
           }
@@ -1202,8 +1429,8 @@ export class AbilitySystem {
       intensity: Math.min(1.6, radius / 9),
     });
 
-    // Blast cops in radius
-    const cops = context.cops || [];
+    // Blast cops in radius (unless fired by a friendly Cop player!)
+    const cops = options.skipAiCops ? [] : context.cops || [];
     for (let i = 0; i < cops.length; i++) {
       const cop = cops[i];
       if (!cop || cop.wrecked || cop.alive === false || cop.type === 'heli') continue;
@@ -1228,7 +1455,7 @@ export class AbilitySystem {
       }
     }
 
-    // Launch civilian traffic in radius
+    // Launch civilian traffic & outlaw street racers in radius
     const traffic = context.traffic || [];
     for (let i = 0; i < traffic.length; i++) {
       const car = traffic[i];
@@ -1245,22 +1472,41 @@ export class AbilitySystem {
         car.vy = 16;
         car.spinTimer = 1.7;
         car.panic = true;
+        if (options.isCopAttack && !car._copTakedownAwarded) {
+          car._copTakedownAwarded = true;
+          car.wrecked = Boolean(car.isOutlaw);
+          if (ownerRef) {
+            ownerRef.score = (ownerRef.score || 0) + 150;
+            ownerRef.copsWrecked = (ownerRef.copsWrecked || 0) + 1;
+          }
+          context.onEvent?.({
+            type: 'cop_wrecked',
+            copType: 'outlaw',
+            cause: 'cop_missile',
+            ownerId: ownerId || null,
+            x: car.x,
+            y: (car.y || 0) + 0.9,
+            z: car.z,
+            points: 150,
+          });
+        }
       }
     }
 
-    // Affect localPlayer if inside blast (for enemy bombs, tank shells, heli bombs, gas pumps)
+    // Affect localPlayer if inside blast (for enemy bombs, cop missiles, tank shells, heli bombs, gas pumps)
     const local = context.localPlayer;
     if (local && local.alive !== false) {
       const isSelfBomb = ownerId && ownerId === local.id && !options.hurtOwner;
       const protectedBuff = (local.items?.starTimer || 0) > 0 || (local.items?.megaTimer || 0) > 0;
       const dx = local.x - x;
       const dz = local.z - z;
+      const yd = Math.abs((local.y || 0) - (y || 0));
       const dist = Math.hypot(dx, dz);
-      if (!isSelfBomb && !protectedBuff && dist <= radius + (local.radius || 2.0)) {
+      if (!isSelfBomb && !protectedBuff && yd <= radius + 4.5 && dist <= radius + (local.radius || 2.0)) {
         const inv = dist > 0.001 ? 1 / dist : 1;
         const nx = dist > 0.001 ? dx * inv : Math.sin(local.angle || 0);
         const nz = dist > 0.001 ? dz * inv : Math.cos(local.angle || 0);
-        const falloff = Math.max(0.25, 1 - dist / (radius + 3));
+        const falloff = options.directHitPlayer === local ? 1.0 : Math.max(0.35, 1 - dist / (radius + 3));
         local.vx += nx * 30 * falloff;
         local.vz += nz * 30 * falloff;
         local.vy = Math.max(local.vy || 0, 12 * falloff);
@@ -1271,9 +1517,138 @@ export class AbilitySystem {
         }
         if (ownerId && ownerId !== local.id && ownerId !== 'police' && ownerId !== 'world') {
           local.lastBumpedBy = { id: ownerId, name: ownerName || 'Rival', time: context.time || 0 };
+          if (options.isCopAttack) {
+            context.onEvent?.({
+              type: 'pvp_slam',
+              reason: 'cop_missile',
+              attackerId: ownerId,
+              attackerName: ownerName || 'Officer',
+              x: local.x,
+              y: local.y || 0,
+              z: local.z,
+            });
+          }
         }
       }
     }
+  }
+
+  _collectCopMissileTargets(ownerId, context = {}) {
+    const out = [];
+    const remotes = Array.isArray(context.remotePlayers)
+      ? context.remotePlayers
+      : Array.from(context.remotePlayers?.values?.() || []);
+    for (let i = 0; i < remotes.length; i++) {
+      const rp = remotes[i];
+      if (!rp || rp.id === ownerId || rp.alive === false) continue;
+      out.push({
+        kind: 'player',
+        priority: rp.playerRole !== 'cop' ? 0.72 : 1.05,
+        entity: rp,
+      });
+    }
+    if (context.localPlayer && context.localPlayer.id !== ownerId && context.localPlayer.alive !== false) {
+      const lp = context.localPlayer;
+      out.push({
+        kind: 'player',
+        priority: lp.playerRole !== 'cop' ? 0.72 : 1.05,
+        entity: lp,
+      });
+    }
+    const traffic = context.traffic || [];
+    const hasPlayerTargets = out.length > 0;
+    for (let i = 0; i < traffic.length; i++) {
+      const car = traffic[i];
+      if (!car || car.wrecked) continue;
+      if (hasPlayerTargets && !car.isOutlaw) continue;
+      out.push({
+        kind: 'traffic',
+        priority: car.isOutlaw ? 0.85 : 1.35,
+        entity: car,
+      });
+    }
+    return out;
+  }
+
+  _pickInitialCopMissileTarget(x, z, angle, ownerId, context = {}) {
+    const candidates = this._collectCopMissileTargets(ownerId, context);
+    if (candidates.length === 0) return null;
+    const fx = Math.sin(angle);
+    const fz = Math.cos(angle);
+    let best = null;
+    let bestScore = Infinity;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      const ent = cand.entity;
+      if (!ent) continue;
+      const tx = ent.x - x;
+      const tz = ent.z - z;
+      const dist = Math.hypot(tx, tz);
+      if (dist <= COP_MISSILE_BREAK_DIST || dist > 95) continue;
+      const dot = (tx / dist) * fx + (tz / dist) * fz;
+      if (dot <= COP_MISSILE_CONE_DOT) continue;
+      const score = dist * cand.priority * (1.25 - dot * 0.35);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { entity: ent, dist, dot };
+      }
+    }
+    return best;
+  }
+
+  _spawnCopMissile({
+    ownerId,
+    ownerName,
+    ownerRole = 'cop',
+    ownerRef = null,
+    sourceUnit = 'heli',
+    x,
+    y,
+    z,
+    vx,
+    vy = 0,
+    vz,
+    angle = 0,
+    context = {},
+  }) {
+    const initTarget = this._pickInitialCopMissileTarget(x, z, angle, ownerId, context);
+    const proj = {
+      id: this.nextProjectileId++,
+      type: 'cop_missile',
+      kind: 'cop_missile',
+      abilityId: 'cop_missile',
+      sourceUnit: sourceUnit === 'tank' ? 'tank' : 'heli',
+      ownerId,
+      ownerName,
+      ownerRole,
+      ownerRef: ownerRef || null,
+      x,
+      y,
+      z,
+      vx,
+      vy,
+      vz,
+      speed: COP_MISSILE_SPEED,
+      turnRate: COP_MISSILE_TURN_RATE,
+      maxTurnRate: COP_MISSILE_TURN_RATE,
+      coneDot: COP_MISSILE_CONE_DOT,
+      breakLockDist: COP_MISSILE_BREAK_DIST,
+      lockBroken: false,
+      preferredTargetId: initTarget ? this._getEntityId(initTarget.entity) : null,
+      blastRadius: COP_MISSILE_BLAST_RADIUS,
+      damage: COP_MISSILE_DAMAGE,
+      angle,
+      pitch: Math.atan2(vy || 0, COP_MISSILE_SPEED),
+      spin: 0,
+      radius: 1.35,
+      ttl: COP_MISSILE_TTL,
+      maxTtl: COP_MISSILE_TTL,
+      age: 0,
+      color: '#38bdf8',
+    };
+    this.projectiles.push(proj);
+    return proj;
   }
 
   _collectTargetCandidates(ownerId, context) {
@@ -1332,6 +1707,164 @@ export class AbilitySystem {
 
       if (proj.type === 'lightning') {
         proj.progress = 1 - proj.ttl / (proj.maxTtl || 0.6);
+        continue;
+      }
+
+      if (proj.type === 'cop_missile') {
+        proj.spin = (proj.spin || 0) + dt * 18;
+        const speed = proj.speed || COP_MISSILE_SPEED;
+        const maxTurnRate = Math.min(COP_MISSILE_TURN_RATE, proj.maxTurnRate || COP_MISSILE_TURN_RATE);
+        const coneDot = proj.coneDot ?? COP_MISSILE_CONE_DOT;
+        const breakDist = proj.breakLockDist ?? COP_MISSILE_BREAK_DIST;
+        const blastRadius = proj.blastRadius || COP_MISSILE_BLAST_RADIUS;
+        const maxDmg = proj.damage || COP_MISSILE_DAMAGE;
+
+        let fx = Math.sin(proj.angle);
+        let fz = Math.cos(proj.angle);
+
+        if (!proj.lockBroken) {
+          const candidates = this._collectCopMissileTargets(proj.ownerId, context);
+          let bestCand = null;
+          let bestScore = Infinity;
+
+          for (let cIdx = 0; cIdx < candidates.length; cIdx++) {
+            const cand = candidates[cIdx];
+            const ent = cand.entity;
+            if (!ent) continue;
+            const tx = ent.x - proj.x;
+            const tz = ent.z - proj.z;
+            const horizDist = Math.hypot(tx, tz);
+            if (horizDist <= breakDist) {
+              if (!proj.preferredTargetId || this._getEntityId(ent) === proj.preferredTargetId) {
+                proj.lockBroken = true;
+              }
+              continue;
+            }
+            if (horizDist > 95) continue;
+            const dot = (tx / horizDist) * fx + (tz / horizDist) * fz;
+            if (dot <= coneDot) continue;
+            const prefBoost =
+              proj.preferredTargetId && this._getEntityId(ent) === proj.preferredTargetId ? 0.85 : 1.0;
+            const score = horizDist * cand.priority * prefBoost * (1.25 - dot * 0.35);
+            if (score < bestScore) {
+              bestScore = score;
+              bestCand = { entity: ent, horizDist };
+            }
+          }
+
+          if (!proj.lockBroken && bestCand) {
+            proj.preferredTargetId = this._getEntityId(bestCand.entity);
+            const tx = bestCand.entity.x - proj.x;
+            const tz = bestCand.entity.z - proj.z;
+            const targetAngle = Math.atan2(tx, tz);
+            let diff = targetAngle - proj.angle;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            const maxStep = maxTurnRate * dt;
+            proj.angle += Math.max(-maxStep, Math.min(maxStep, diff));
+            fx = Math.sin(proj.angle);
+            fz = Math.cos(proj.angle);
+
+            if (proj.sourceUnit === 'heli') {
+              const desiredY = (bestCand.entity.y || 0) + 0.9;
+              const estT = Math.max(0.2, bestCand.horizDist / speed);
+              const desiredVy = Math.max(-28, Math.min(6, (desiredY - proj.y) / estT));
+              proj.vy = (proj.vy || 0) + (desiredVy - (proj.vy || 0)) * Math.min(1, dt * 4.5);
+            }
+          }
+        }
+
+        proj.vx = fx * speed;
+        proj.vz = fz * speed;
+        proj.x += proj.vx * dt;
+        proj.z += proj.vz * dt;
+
+        const g = world?.getGroundHeight
+          ? world.getGroundHeight(proj.x, proj.z)
+          : { y: 0, surface: 'road' };
+        const surfaceY = g.surface === 'water' ? WORLD_CONFIG.WATER_Y : g.y || 0;
+
+        if (proj.sourceUnit === 'heli') {
+          proj.y += (proj.vy || 0) * dt;
+          proj.pitch = Math.atan2(proj.vy || 0, speed);
+          if (proj.y <= surfaceY + 0.35) {
+            proj.y = surfaceY + 0.35;
+            this.detonateExplosion(proj.x, proj.y, proj.z, blastRadius, proj.ownerId, proj.ownerName, proj.ownerRef, context, {
+              maxPlayerDamage: maxDmg,
+              skipAiCops: proj.ownerRole === 'cop',
+              isCopAttack: true,
+            });
+            this.projectiles.splice(i, 1);
+            continue;
+          }
+        } else {
+          const skimY = g.surface === 'water' ? Math.max(1.1, proj.y || 1.35) : (g.y || 0) + 1.1;
+          proj.y += (skimY - proj.y) * Math.min(1, dt * 14);
+          proj.pitch = 0;
+        }
+
+        if (world?.resolveBuildingCollision) {
+          const wall = world.resolveBuildingCollision(proj);
+          if (wall?.hit) {
+            this.detonateExplosion(proj.x, proj.y, proj.z, blastRadius, proj.ownerId, proj.ownerName, proj.ownerRef, context, {
+              maxPlayerDamage: maxDmg,
+              skipAiCops: proj.ownerRole === 'cop',
+              isCopAttack: true,
+            });
+            this.projectiles.splice(i, 1);
+            continue;
+          }
+        }
+
+        let hitTarget = null;
+        const local = context.localPlayer;
+        if (local && local.id !== proj.ownerId && local.alive !== false) {
+          const yd = Math.abs((local.y || 0) + 1.0 - proj.y);
+          const hd = Math.hypot(local.x - proj.x, local.z - proj.z);
+          if (yd <= 3.2 && hd <= proj.radius + (local.radius || 2.0) * (local.scale || 1)) {
+            hitTarget = local;
+          }
+        }
+
+        if (!hitTarget) {
+          const remotes = Array.isArray(context.remotePlayers)
+            ? context.remotePlayers
+            : Array.from(context.remotePlayers?.values?.() || []);
+          for (let rIdx = 0; rIdx < remotes.length; rIdx++) {
+            const rp = remotes[rIdx];
+            if (!rp || rp.id === proj.ownerId || rp.alive === false) continue;
+            const yd = Math.abs((rp.y || 0) + 1.0 - proj.y);
+            const hd = Math.hypot(rp.x - proj.x, rp.z - proj.z);
+            if (yd <= 3.2 && hd <= proj.radius + (rp.radius || 2.0) * (rp.scale || 1)) {
+              hitTarget = rp;
+              break;
+            }
+          }
+        }
+
+        if (!hitTarget) {
+          const traffic = context.traffic || [];
+          for (let tIdx = 0; tIdx < traffic.length; tIdx++) {
+            const car = traffic[tIdx];
+            if (!car || car.wrecked) continue;
+            const yd = Math.abs((car.y || 0) + 0.9 - proj.y);
+            const hd = Math.hypot(car.x - proj.x, car.z - proj.z);
+            if (yd <= 2.8 && hd <= proj.radius + (car.radius || 2.0)) {
+              hitTarget = car;
+              break;
+            }
+          }
+        }
+
+        if (hitTarget) {
+          this.detonateExplosion(proj.x, proj.y, proj.z, blastRadius, proj.ownerId, proj.ownerName, proj.ownerRef, context, {
+            maxPlayerDamage: maxDmg,
+            skipAiCops: proj.ownerRole === 'cop',
+            isCopAttack: true,
+            directHitPlayer: hitTarget === local ? local : null,
+          });
+          this.projectiles.splice(i, 1);
+        }
         continue;
       }
 
@@ -1563,10 +2096,13 @@ export class AbilitySystem {
           if (!triggered && context.localPlayer && context.localPlayer.alive !== false) {
             const lp = context.localPlayer;
             const sameOwnerBlocked = lp.id === proj.ownerId && proj.ownerGraceTimer > 0;
-            if (!sameOwnerBlocked) {
+            const copBananaImmune =
+              lp.flying || (lp.playerRole === 'cop' && lp.copVehicleId === 'cop_tank');
+            if (!sameOwnerBlocked && !lp.flying) {
               const dist = Math.hypot(lp.x - proj.x, lp.z - proj.z);
               if (dist <= proj.radius + (lp.radius || 2.0) * (lp.scale || 1)) {
                 const protectedBuff =
+                  copBananaImmune ||
                   (lp.items?.starTimer || 0) > 0 ||
                   (lp.items?.megaTimer || 0) > 0 ||
                   (lp.items?.sugarTimer || 0) > 0;
