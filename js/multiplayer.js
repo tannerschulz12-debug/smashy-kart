@@ -430,7 +430,6 @@ export function renderQrCodeSvg(text, options = {}) {
 // ============================================================================
 
 const CLOUD_MQTT_BROKERS = [
-  'wss://broker.hivemq.com:8884/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
   'wss://test.mosquitto.org:8081',
 ];
@@ -663,6 +662,7 @@ class MqttWssClient {
   _connectSingle(url) {
     return new Promise((resolve, reject) => {
       let settled = false;
+      this._rxBuf = new Uint8Array(0);
       const ws = new WebSocket(url, 'mqtt');
       ws.binaryType = 'arraybuffer';
 
@@ -953,6 +953,16 @@ export class MultiplayerClient {
     this._cloudAvatarBook = new Map(); // playerId -> avatarDataUrl
     this._joinTimeout = null;
     this._joinRetry = null;
+    this._joinTimers = [];
+    this._joinAttemptGen = 0;
+    this._pendingJoinCode = null;
+    this._pendingJoinProfile = null;
+    this._pendingJoinAvatar = null;
+    this._hostBrokerUrl = null;
+    this._watchdogTimer = null;
+    this._lifecycleBound = false;
+    this._onLifecycleWake = null;
+    this._reconnectingCloud = false;
 
     for (const [key, val] of Object.entries(options)) {
       if (key.startsWith('on') && typeof val === 'function') {
@@ -991,6 +1001,18 @@ export class MultiplayerClient {
     const params = new URLSearchParams(window.location.search);
     const code = (params.get('room') || '').trim().toUpperCase();
     return /^[A-Z0-9]{4}$/.test(code) ? code : null;
+  }
+
+  getBrokerHintFromUrl() {
+    if (typeof window === 'undefined' || !window.location?.search) return null;
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('b');
+    if (raw === null || raw === '') return null;
+    const idx = Number(raw);
+    if (Number.isInteger(idx) && idx >= 0 && idx < this.cloudBrokers.length) {
+      return this.cloudBrokers[idx];
+    }
+    return null;
   }
 
   _getStaticBaseUrl() {
@@ -1044,7 +1066,14 @@ export class MultiplayerClient {
   getShareUrl(roomCode = this.roomCode) {
     const base = this.networkInfo?.shareBaseUrl || this._getStaticBaseUrl();
     const cleanBase = base.replace(/\/+$/, '');
-    return roomCode ? `${cleanBase}/?room=${encodeURIComponent(roomCode)}` : `${cleanBase}/`;
+    if (!roomCode) return `${cleanBase}/`;
+    if (this._useCloudMode() && this.mqtt?.brokerUrl) {
+      const bIdx = this.cloudBrokers.indexOf(this.mqtt.brokerUrl);
+      if (bIdx >= 0) {
+        return `${cleanBase}/?room=${encodeURIComponent(roomCode)}&b=${bIdx}`;
+      }
+    }
+    return `${cleanBase}/?room=${encodeURIComponent(roomCode)}`;
   }
 
   getQrCodeSvg(roomCode = this.roomCode, options = {}) {
@@ -1075,10 +1104,98 @@ export class MultiplayerClient {
     return 'ws://127.0.0.1:4567/ws';
   }
 
-  async connect(explicitUrl) {
+  _orderedBrokers(preferredUrl = null) {
+    const out = [];
+    const push = (u) => {
+      if (u && typeof u === 'string' && !out.includes(u)) out.push(u);
+    };
+    push(preferredUrl);
+    push(this.getBrokerHintFromUrl());
+    push(this._hostBrokerUrl);
+    push(this.mqtt?.brokerUrl);
+    for (const u of this.cloudBrokers || CLOUD_MQTT_BROKERS) push(u);
+    return out;
+  }
+
+  _installLifecycleHeal() {
+    if (this._lifecycleBound || typeof window === 'undefined' || typeof document === 'undefined') return;
+    this._lifecycleBound = true;
+    this._onLifecycleWake = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (this._useCloudMode() && this.roomCode) {
+        this._ensureCloudConnected();
+      }
+    };
+    document.addEventListener('visibilitychange', this._onLifecycleWake);
+    window.addEventListener('focus', this._onLifecycleWake);
+    window.addEventListener('online', this._onLifecycleWake);
+    if (!this._watchdogTimer) {
+      this._watchdogTimer = setInterval(() => {
+        if (this._useCloudMode() && this.roomCode) {
+          this._ensureCloudConnected();
+        }
+      }, 10000);
+    }
+  }
+
+  _teardownLifecycleHeal() {
+    if (this._watchdogTimer) {
+      clearInterval(this._watchdogTimer);
+      this._watchdogTimer = null;
+    }
+    if (this._lifecycleBound && this._onLifecycleWake && typeof window !== 'undefined' && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._onLifecycleWake);
+      window.removeEventListener('focus', this._onLifecycleWake);
+      window.removeEventListener('online', this._onLifecycleWake);
+    }
+    this._lifecycleBound = false;
+    this._onLifecycleWake = null;
+  }
+
+  async _ensureCloudConnected() {
+    if (!this._useCloudMode() || !this.roomCode || !this._shouldReconnect) return;
+    const isAlive = Boolean(this.mqtt?.connected && this.mqtt?.ws?.readyState === WebSocket.OPEN);
+    if (isAlive) return;
+    if (this._reconnectingCloud) return;
+    this._reconnectingCloud = true;
+    this._emit('connection_status', { state: 'reconnecting', cloud: true, brokerUrl: this._hostBrokerUrl || null });
+    try {
+      const brokers = this._orderedBrokers(this._hostBrokerUrl);
+      if (this.mqtt) {
+        try { this.mqtt.close(); } catch {}
+      }
+      await this.connect(undefined, brokers);
+      if (this.mqtt?.connected && this.roomCode) {
+        await this.mqtt.subscribe(this._roomTopic(this.roomCode));
+        this.mqtt._drainTxQueue?.();
+        this._emit('connection_status', { state: 'online', cloud: true, brokerUrl: this.mqtt.brokerUrl });
+        if (this.isHost && this._cloudHostRoom) {
+          this._hostBrokerUrl = this.mqtt.brokerUrl;
+          this._publishCloud(this.roomCode, {
+            env: 'h2c',
+            from: this.playerId,
+            msg: { type: 'host_ready', code: this.roomCode },
+          });
+          this._broadcastCloudFromHost(this._cloudHostRoom, this._serializeCloudRoom(this._cloudHostRoom));
+        }
+      }
+    } catch {
+      // Next watchdog tick or visibility wake will retry cleanly
+    } finally {
+      this._reconnectingCloud = false;
+    }
+  }
+
+  async connect(explicitUrl, brokerOverride = null) {
     if (this._useCloudMode() && !explicitUrl) {
       this._shouldReconnect = true;
-      if (this.mqtt && this.mqtt.connected) {
+      const desiredBrokers = brokerOverride || this._orderedBrokers();
+      const alreadyOnDesired =
+        this.mqtt &&
+        this.mqtt.connected &&
+        this.mqtt.ws?.readyState === WebSocket.OPEN &&
+        (!brokerOverride || brokerOverride.includes(this.mqtt.brokerUrl));
+      if (alreadyOnDesired) {
         this.connected = true;
         return this;
       }
@@ -1089,24 +1206,23 @@ export class MultiplayerClient {
             this.connected = false;
             this._emit('disconnected', {});
             if (this._shouldReconnect && this.roomCode) {
-              this._reconnectTimer = setTimeout(async () => {
-                if (!this._shouldReconnect || !this.roomCode) return;
-                try {
-                  await this.connect();
-                  if (this.mqtt?.connected && this.roomCode) {
-                    await this.mqtt.subscribe(this._roomTopic(this.roomCode));
-                    this.mqtt._drainTxQueue?.();
-                  }
-                } catch {}
-              }, 650);
+              this._emit('connection_status', { state: 'reconnecting', cloud: true, brokerUrl: this._hostBrokerUrl || null });
+              if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+              this._reconnectTimer = setTimeout(() => {
+                this._reconnectTimer = null;
+                this._ensureCloudConnected();
+              }, 750);
             }
           }
         );
+      } else if (brokerOverride && this.mqtt.connected && !brokerOverride.includes(this.mqtt.brokerUrl)) {
+        try { this.mqtt.close(); } catch {}
       }
-      await this.mqtt.connect(this.cloudBrokers);
+      await this.mqtt.connect(desiredBrokers);
       this.connected = true;
       this.mqtt._drainTxQueue?.();
       this._emit('connected', { url: this.mqtt.brokerUrl, cloud: true });
+      this._emit('connection_status', { state: 'online', cloud: true, brokerUrl: this.mqtt.brokerUrl });
       this._emit('welcome', { type: 'welcome', playerId: this.playerId });
       return this;
     }
@@ -1180,7 +1296,13 @@ export class MultiplayerClient {
 
   disconnect() {
     this._shouldReconnect = false;
+    this._joinAttemptGen++;
     this._clearJoinTimers();
+    this._teardownLifecycleHeal();
+    this._hostBrokerUrl = null;
+    this._pendingJoinCode = null;
+    this._pendingJoinProfile = null;
+    this._pendingJoinAvatar = null;
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -1211,6 +1333,18 @@ export class MultiplayerClient {
     if (this._joinRetry) {
       clearTimeout(this._joinRetry);
       this._joinRetry = null;
+    }
+    if (Array.isArray(this._joinTimers)) {
+      for (const t of this._joinTimers) {
+        clearTimeout(t);
+        clearInterval(t);
+      }
+      this._joinTimers = [];
+    }
+    if (this._joinResolve) {
+      const fn = this._joinResolve;
+      this._joinResolve = null;
+      fn(Boolean(this.roomCode));
     }
   }
 
@@ -1774,6 +1908,16 @@ export class MultiplayerClient {
     // 2. Host-to-Client room broadcasts
     if (packet.env === 'h2c') {
       if (this.isHost) return; // Host already applied locally
+      if (packet.msg?.type === 'host_ready') {
+        if (!this.roomCode && this._pendingJoinCode && this._pendingJoinProfile) {
+          this._publishCloud(this._pendingJoinCode, {
+            env: 'c2h',
+            from: this.playerId,
+            cmd: { type: 'join_room', code: this._pendingJoinCode, profile: this._pendingJoinProfile },
+          });
+        }
+        return;
+      }
       if (packet.targetId && packet.targetId !== this.playerId) return;
       if (packet.from && this.roomState?.hostId && packet.from !== this.roomState.hostId) return;
       if (
@@ -1783,9 +1927,19 @@ export class MultiplayerClient {
         return;
       }
       if (packet.msg?.type === 'room_joined') {
+        this._joinAttemptGen++;
         this._clearJoinTimers();
+        this._pendingJoinCode = null;
+        this._pendingJoinProfile = null;
+        this._hostBrokerUrl = this.mqtt?.brokerUrl || null;
+        this._installLifecycleHeal();
       }
       this._handleServerMessage(packet.msg);
+      if (packet.msg?.type === 'room_joined' && this._pendingJoinAvatar) {
+        const av = this._pendingJoinAvatar;
+        this._pendingJoinAvatar = null;
+        this.updateProfile({ avatarDataUrl: av });
+      }
       return;
     }
 
@@ -2164,6 +2318,7 @@ export class MultiplayerClient {
     await this.connect();
 
     if (this._useCloudMode()) {
+      this._joinAttemptGen++;
       this._clearJoinTimers();
       const code = this._generateRoomCode();
       await this.mqtt.subscribe(this._roomTopic(code));
@@ -2182,6 +2337,15 @@ export class MultiplayerClient {
       this.isHost = true;
       this.roomCode = code;
       this._lastCloudCode = code;
+      this._hostBrokerUrl = this.mqtt.brokerUrl;
+      this._installLifecycleHeal();
+
+      // Announce host presence so any friend already waiting on this code joins immediately
+      this._publishCloud(code, {
+        env: 'h2c',
+        from: this.playerId,
+        msg: { type: 'host_ready', code },
+      });
 
       const serialized = this._serializeCloudRoom(this._cloudHostRoom);
       this._handleServerMessage({
@@ -2202,43 +2366,107 @@ export class MultiplayerClient {
   async joinRoom(code, profile = {}) {
     const cleanCode = String(code || '').trim().toUpperCase();
     this._lastProfile = { ...profile };
-    await this.connect();
 
     if (this._useCloudMode()) {
+      const gen = ++this._joinAttemptGen;
       this._clearJoinTimers();
       this._cloudHostRoom = null;
       this.isHost = false;
+      this.roomCode = null;
       this._lastCloudCode = cleanCode;
-      await this.mqtt.subscribe(this._roomTopic(cleanCode));
 
-      const sendJoinReq = () => {
-        this._publishCloud(cleanCode, {
-          env: 'c2h',
-          from: this.playerId,
-          cmd: { type: 'join_room', code: cleanCode, profile },
-        });
-      };
-      sendJoinReq();
-      this._joinRetry = setTimeout(() => {
-        if (!this.roomCode) sendJoinReq();
-      }, 950);
-      this._joinTimeout = setTimeout(() => {
-        if (!this.roomCode) {
-          this._emit('error', {
-            type: 'error',
-            code: 'ROOM_NOT_FOUND',
-            message: `Room "${cleanCode}" not found — make sure the host has the lobby open!`,
-          });
+      // Keep the initial join handshake tiny (<400B) so public WSS relays NEVER drop it;
+      // the custom avatar syncs immediately after room_joined succeeds!
+      const lightProfile = { ...profile, avatarDataUrl: null };
+      this._pendingJoinCode = cleanCode;
+      this._pendingJoinProfile = lightProfile;
+      this._pendingJoinAvatar = profile?.avatarDataUrl || null;
+
+      const brokers = this._orderedBrokers();
+      let anyConnected = false;
+
+      for (let i = 0; i < brokers.length; i++) {
+        if (gen !== this._joinAttemptGen || this.roomCode) return;
+        const brokerUrl = brokers[i];
+        try {
+          await this.connect(undefined, [brokerUrl]);
+          anyConnected = true;
+        } catch {
+          continue;
         }
-      }, 4200);
+        if (gen !== this._joinAttemptGen || this.roomCode) return;
+
+        try {
+          await this.mqtt.subscribe(this._roomTopic(cleanCode));
+        } catch {
+          continue;
+        }
+        if (gen !== this._joinAttemptGen || this.roomCode) return;
+
+        const sendJoinReq = () => {
+          if (gen !== this._joinAttemptGen || this.roomCode) return;
+          this._publishCloud(cleanCode, {
+            env: 'c2h',
+            from: this.playerId,
+            cmd: { type: 'join_room', code: cleanCode, profile: lightProfile },
+          });
+        };
+
+        sendJoinReq();
+        const r1 = setTimeout(sendJoinReq, 800);
+        const r2 = setTimeout(sendJoinReq, 1650);
+        this._joinTimers.push(r1, r2);
+
+        const waitMs = i === 0 ? 2900 : 2400;
+        const joined = await new Promise((resolve) => {
+          const finish = (ok) => {
+            if (this._joinResolve === finish) this._joinResolve = null;
+            clearInterval(poll);
+            resolve(ok);
+          };
+          this._joinResolve = finish;
+          const startedAt = Date.now();
+          const poll = setInterval(() => {
+            if (gen !== this._joinAttemptGen || this.roomCode) {
+              finish(Boolean(this.roomCode));
+            } else if (Date.now() - startedAt >= waitMs) {
+              finish(false);
+            }
+          }, 80);
+          this._joinTimers.push(poll);
+        });
+        clearTimeout(r1);
+        clearTimeout(r2);
+        if (joined || gen !== this._joinAttemptGen || this.roomCode) return;
+      }
+
+      if (gen === this._joinAttemptGen && !this.roomCode) {
+        this._pendingJoinCode = null;
+        this._pendingJoinProfile = null;
+        this._pendingJoinAvatar = null;
+        this._emit('error', {
+          type: 'error',
+          code: anyConnected ? 'ROOM_NOT_FOUND' : 'RELAY_UNREACHABLE',
+          message: anyConnected
+            ? `Room "${cleanCode}" not found — make sure the host's lobby screen is open on the same web link (refresh both phones if needed)!`
+            : 'Could not reach the internet party relay — check your signal and try again!',
+        });
+      }
       return;
     }
 
+    await this.connect();
     this._sendRaw({ type: 'join_room', code: cleanCode, profile });
   }
 
   leaveRoom() {
+    this._joinAttemptGen++;
     this._clearJoinTimers();
+    this._teardownLifecycleHeal();
+    this._hostBrokerUrl = null;
+    this._pendingJoinCode = null;
+    this._pendingJoinProfile = null;
+    this._pendingJoinAvatar = null;
     this.roomCode = null;
     this.roomState = null;
     this.remoteSnapshots.clear();

@@ -465,6 +465,7 @@
             </div>
           </div>
         </div>
+        <div id="lobby-status" class="lobby-status-banner hidden"></div>
         <div id="lobby-error" class="error-banner hidden"></div>
       </div>
 
@@ -473,7 +474,10 @@
         <div class="room-invite-strip">
           <div id="room-qr-box" class="room-qr-box" aria-label="Scan with phone camera to join"></div>
           <div class="room-invite-info">
-            <div class="room-code-pill">ROOM CODE: <strong id="room-code-display">----</strong></div>
+            <div class="room-code-head-row">
+              <div class="room-code-pill">ROOM CODE: <strong id="room-code-display">----</strong></div>
+              <span id="lobby-conn-pill" class="lobby-conn-pill online">🟢 Live on Internet</span>
+            </div>
             <p class="invite-help">Scan this QR code with a phone camera or text the link to up to 16 friends anywhere:</p>
             <div class="invite-link-row">
               <input id="room-share-url" class="share-url-input" type="text" readonly />
