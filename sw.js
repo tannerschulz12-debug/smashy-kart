@@ -1,6 +1,6 @@
 // Smashy Kart Network-First PWA Service Worker
 // Enables instant native Home Screen install while ALWAYS preferring fresh network updates when online!
-const CACHE_NAME = 'smashy-kart-shell-v4';
+const CACHE_NAME = 'smashy-kart-shell-v5';
 const PRECACHE_ASSETS = [
   './',
   './index.html',
@@ -36,7 +36,7 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws')) return;
 
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (res && res.ok) {
           const clone = res.clone();
