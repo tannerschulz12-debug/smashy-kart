@@ -503,7 +503,10 @@
         <div id="host-manager-panel" class="host-manager-panel hidden">
           <div class="manager-header">
             <strong>👑 Lobby Manager Controls (Applies to All Players)</strong>
-            <button class="arcade-btn small cyan" type="button" data-open-modal="world-modal">Edit ? Items &amp; Map</button>
+            <div class="manager-header-actions">
+              <button id="btn-host-lobby-sounds" class="arcade-btn small gold" type="button" data-open-modal="sound-modal">🎙️ Lobby Sounds</button>
+              <button class="arcade-btn small cyan" type="button" data-open-modal="world-modal">Edit ? Items &amp; Map</button>
+            </div>
           </div>
 
           <!-- One-Tap Universal Presets -->
@@ -544,6 +547,10 @@
             <label class="switch-row highlight-switch">
               <input id="perm-allow-cops" type="checkbox" checked />
               <span><strong>Allow Players to Play as Police</strong> (Helicopter / Tank / SWAT / Cruiser)</span>
+            </label>
+            <label class="switch-row highlight-switch">
+              <input id="perm-share-sounds" type="checkbox" checked />
+              <span><strong>🔊 Share My Custom Voices &amp; Sounds With Everyone</strong> (Everyone in this lobby hears the screams, horns &amp; crashes YOU recorded)</span>
             </label>
             <label class="switch-row">
               <input id="perm-lock-stats" type="checkbox" checked />
@@ -1046,6 +1053,7 @@
         <button class="close-modal-btn" type="button" data-close-modal="sound-modal">Done</button>
       </div>
       <p class="modal-lead">Record your own screams, laughs, or sirens (or upload a quick phone clip) for each game moment!</p>
+      <div id="sound-lobby-banner" class="sound-lobby-banner hidden"></div>
       <div class="slider-row">
         <label>Master Game Volume <span id="val-volume">85%</span></label>
         <input id="rng-volume" type="range" min="0" max="1" step="0.05" value="0.85" />

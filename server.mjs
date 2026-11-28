@@ -115,6 +115,9 @@ function createClosePayload(code = 1000, reason = '') {
 }
 
 const VALID_COP_VEHICLE_IDS = new Set(['cop_cruiser', 'cop_swat', 'cop_heli', 'cop_tank']);
+const VALID_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted']);
+const SAFE_AUDIO_DATA_URL_RE = /^data:audio\/(?:wav|mpeg|mp3|ogg|webm|mp4);base64,[A-Za-z0-9+/=]+$/;
+const MAX_SOUND_DATA_URL_LEN = 190000;
 
 function sanitizeProfile(raw = {}, fallbackName = 'Player') {
   const out = {};
@@ -214,6 +217,7 @@ function defaultRoomSettings() {
       allowModeChoice: true,
       allowCustomPhotos: true,
       allowPlayerCops: true,
+      shareHostSounds: true,
       universalSpeedMult: 1.0,
       universalDriftMult: 1.0,
       universalMassMult: 1.0,
@@ -281,6 +285,7 @@ function sanitizeRoomSettings(current, patch = {}) {
       allowModeChoice: pr.allowModeChoice !== undefined ? Boolean(pr.allowModeChoice) : curR.allowModeChoice !== false,
       allowCustomPhotos: pr.allowCustomPhotos !== undefined ? Boolean(pr.allowCustomPhotos) : curR.allowCustomPhotos !== false,
       allowPlayerCops: pr.allowPlayerCops !== undefined ? Boolean(pr.allowPlayerCops) : curR.allowPlayerCops !== false,
+      shareHostSounds: pr.shareHostSounds !== undefined ? Boolean(pr.shareHostSounds) : curR.shareHostSounds !== false,
       universalSpeedMult: Number.isFinite(Number(pr.universalSpeedMult))
         ? Math.max(0.6, Math.min(1.7, Number(pr.universalSpeedMult)))
         : curR.universalSpeedMult ?? 1.0,
@@ -540,6 +545,12 @@ export function createSmashyServer() {
     if (room.hostId === client.id) {
       const nextHost = room.clients.values().next().value;
       room.hostId = nextHost.id;
+      if (room.hostSounds) room.hostSounds.clear();
+      broadcastRoom(room, {
+        type: 'sound_sync_clear',
+        code: room.code,
+        roomCode: room.code,
+      });
       broadcastRoom(room, {
         type: 'host_promoted',
         code: room.code,
@@ -607,6 +618,7 @@ export function createSmashyServer() {
           state: 'lobby',
           settings,
           clients: new Map([[client.id, client]]),
+          hostSounds: new Map(), // slot -> { slot, dataUrl, label }
           match: null,
           createdAt: Date.now(),
         };
@@ -658,6 +670,24 @@ export function createSmashyServer() {
           room: serialized,
         });
         broadcastRoomState(room);
+        if (
+          room.hostId !== client.id &&
+          room.settings?.lobbyRules?.shareHostSounds !== false &&
+          room.hostSounds &&
+          room.hostSounds.size > 0
+        ) {
+          const hostClient = room.clients.get(room.hostId);
+          const hostName = hostClient?.profile?.name || 'Host';
+          for (const entry of room.hostSounds.values()) {
+            sendJson(client, {
+              type: 'sound_sync',
+              slot: entry.slot,
+              dataUrl: entry.dataUrl,
+              label: entry.label,
+              hostName,
+            });
+          }
+        }
         break;
       }
 
@@ -907,6 +937,86 @@ export function createSmashyServer() {
             vz: Number(msg.vz) || 0,
             spinOut: Number(msg.spinOut) || 0,
             power: Boolean(msg.power),
+          },
+          client.id
+        );
+        break;
+      }
+
+      case 'sound_sync': {
+        if (!client.roomCode) return;
+        const room = rooms.get(client.roomCode);
+        if (!room || room.hostId !== client.id) {
+          sendJson(client, { type: 'error', code: 'NOT_HOST', message: 'Only the host can sync lobby sounds.' });
+          return;
+        }
+        const slot = typeof msg.slot === 'string' ? msg.slot : '';
+        if (!VALID_SOUND_SLOTS.has(slot)) return;
+        const rawDataUrl = msg.dataUrl;
+        let cleanDataUrl = null;
+        if (rawDataUrl !== null && rawDataUrl !== undefined && rawDataUrl !== '') {
+          if (
+            typeof rawDataUrl !== 'string' ||
+            rawDataUrl.length > MAX_SOUND_DATA_URL_LEN ||
+            !SAFE_AUDIO_DATA_URL_RE.test(rawDataUrl)
+          ) {
+            sendJson(client, {
+              type: 'error',
+              code: 'INVALID_SOUND',
+              message: 'Invalid or oversized lobby sound payload.',
+            });
+            return;
+          }
+          cleanDataUrl = rawDataUrl;
+        }
+        const cleanLabel =
+          typeof msg.label === 'string' && msg.label.trim()
+            ? msg.label.trim().slice(0, 32)
+            : 'Host Sound';
+        if (!room.hostSounds) room.hostSounds = new Map();
+        if (cleanDataUrl) {
+          room.hostSounds.set(slot, { slot, dataUrl: cleanDataUrl, label: cleanLabel });
+        } else {
+          room.hostSounds.delete(slot);
+        }
+        broadcastRoom(room, {
+          type: 'sound_sync',
+          slot,
+          dataUrl: cleanDataUrl,
+          label: cleanLabel,
+          hostName: client.profile.name,
+        });
+        break;
+      }
+
+      case 'sound_sync_clear': {
+        if (!client.roomCode) return;
+        const room = rooms.get(client.roomCode);
+        if (!room || room.hostId !== client.id) {
+          sendJson(client, { type: 'error', code: 'NOT_HOST', message: 'Only the host can clear lobby sounds.' });
+          return;
+        }
+        if (room.hostSounds) room.hostSounds.clear();
+        broadcastRoom(room, {
+          type: 'sound_sync_clear',
+          code: room.code,
+          roomCode: room.code,
+        });
+        break;
+      }
+
+      case 'horn_event': {
+        if (!client.roomCode) return;
+        const room = rooms.get(client.roomCode);
+        if (!room) return;
+        broadcastRoom(
+          room,
+          {
+            type: 'horn_event',
+            playerId: client.id,
+            playerName: client.profile.name,
+            x: Number.isFinite(Number(msg.x)) ? Number(msg.x) : 0,
+            z: Number.isFinite(Number(msg.z)) ? Number(msg.z) : 0,
           },
           client.id
         );

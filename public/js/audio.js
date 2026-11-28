@@ -4,6 +4,72 @@ export const SOUND_SLOTS = ['boost', 'crash', 'item', 'horn', 'busted'];
 const DB_NAME = 'smashy_kart_sounds_v1';
 const STORE_NAME = 'sounds';
 const MAX_CUSTOM_SECONDS = 5.0;
+const SAFE_AUDIO_DATA_URL_RE = /^data:audio\/(?:wav|mpeg|mp3|ogg|webm|mp4);base64,[A-Za-z0-9+/=]+$/;
+const MAX_LOBBY_AUDIO_DATA_URL_CHARS = 190000;
+const MAX_NETWORK_AUDIO_BYTES = 138 * 1024;
+
+function arrayBufferToBase64(ab) {
+  const bytes = new Uint8Array(ab);
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...sub);
+  }
+  return btoa(binary);
+}
+
+function dataUrlToArrayBuffer(dataUrl) {
+  if (typeof dataUrl !== 'string') return null;
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) return null;
+  const b64 = dataUrl.slice(commaIdx + 1);
+  if (typeof Buffer !== 'undefined') {
+    const buf = Buffer.from(b64, 'base64');
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  }
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function tryDecodeMonoPcm16WavBuffer(ab) {
+  if (!ab || ab.byteLength <= 44) return null;
+  const view = new DataView(ab);
+  // RIFF....WAVE, PCM=1, mono=1, 16-bit
+  if (
+    view.getUint32(0, false) !== 0x52494646 ||
+    view.getUint32(8, false) !== 0x57415645 ||
+    view.getUint16(20, true) !== 1 ||
+    view.getUint16(22, true) !== 1 ||
+    view.getUint16(34, true) !== 16
+  ) {
+    return null;
+  }
+  const srcRate = view.getUint32(24, true);
+  if (!srcRate || srcRate < 4000 || srcRate > 192000) return null;
+  const dataBytes = Math.min(view.getUint32(40, true), ab.byteLength - 44);
+  const numSamples = Math.floor(dataBytes / 2);
+  if (numSamples <= 0) return null;
+  const floatSamples = new Float32Array(numSamples);
+  for (let i = 0; i < numSamples; i++) {
+    const s = view.getInt16(44 + i * 2, true);
+    floatSamples[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
+  }
+  return {
+    sampleRate: srcRate,
+    numberOfChannels: 1,
+    length: numSamples,
+    duration: numSamples / srcRate,
+    getChannelData: () => floatSamples,
+  };
+}
 
 const STAR_MELODY_HZ = [
   523.25, 659.25, 783.99, 880.0, 1046.5, 880.0, 783.99, 659.25,
@@ -112,6 +178,9 @@ export class SoundManager {
     this.loops = null;
 
     this.customRecords = new Map(); // slot -> { slot, blob, buffer, duration, label, updatedAt }
+    this.lobbyRecords = new Map();  // slot -> { slot, dataUrl, buffer, label }
+    this.lobbyOverrideEnabled = false;
+    this.lobbyHostName = '';
     this._dbPromise = null;
     this._rouletteStep = 0;
     this._starStep = 0;
@@ -190,6 +259,21 @@ export class SoundManager {
           rec.buffer = await this.ctx.decodeAudioData(ab.slice(0));
         } catch {
           // Ignore corrupt custom audio entry without breaking synth
+        }
+      }
+    }
+    for (const rec of this.lobbyRecords.values()) {
+      if (!rec.buffer && rec.dataUrl) {
+        try {
+          const ab = dataUrlToArrayBuffer(rec.dataUrl);
+          if (ab) {
+            const decoded = await this.ctx.decodeAudioData(ab.slice(0));
+            if (this.lobbyRecords.get(rec.slot) === rec) {
+              rec.buffer = decoded;
+            }
+          }
+        } catch {
+          // Ignore corrupt lobby audio entry without breaking synth
         }
       }
     }
@@ -384,7 +468,9 @@ export class SoundManager {
   }
 
   _playCustomSlotBuffer(slot, gainScale = 1.0, bypassActionBus = false) {
-    const rec = this.customRecords.get(slot);
+    const rec = this.lobbyOverrideEnabled
+      ? this.lobbyRecords.get(slot)
+      : this.customRecords.get(slot);
     if (!rec || !rec.buffer) return false;
     const ctx = this._ensureContext();
     if (!ctx) return false;
@@ -480,7 +566,11 @@ export class SoundManager {
           eventName === 'pvp_slam' ||
           scale >= 0.72;
 
-        if (isBigCrash && this.hasCustomSound('crash') && nowMs - this._lastCustomCrashAt > 220) {
+        const hasActiveCrash = this.lobbyOverrideEnabled
+          ? this.lobbyRecords.has('crash')
+          : this.customRecords.has('crash');
+
+        if (isBigCrash && hasActiveCrash && nowMs - this._lastCustomCrashAt > 220) {
           this._lastCustomCrashAt = nowMs;
           if (this._playCustomSlotBuffer('crash', scale)) {
             if (eventName === 'wrecked') {
@@ -752,6 +842,130 @@ export class SoundManager {
 
   hasCustomSound(slot) {
     return this.customRecords.has(slot);
+  }
+
+  async exportSlotForNetwork(slot, { maxDuration = 3.2, sampleRate = 11025 } = {}) {
+    if (!SOUND_SLOTS.includes(slot)) return null;
+    const rec = this.customRecords.get(slot);
+    if (!rec) return null;
+
+    let targetBlob = rec.blob || null;
+    let outDuration = rec.duration || rec.buffer?.duration || 1.0;
+
+    if (
+      rec.buffer &&
+      (rec.buffer.sampleRate > sampleRate ||
+        rec.buffer.duration > maxDuration ||
+        !targetBlob ||
+        targetBlob.size > MAX_NETWORK_AUDIO_BYTES)
+    ) {
+      const ds = downsampleAndNormalize(rec.buffer, sampleRate, maxDuration);
+      targetBlob = encodeMonoWavBlob(ds.samples, ds.sampleRate);
+      outDuration = Number(ds.duration.toFixed(2));
+    }
+
+    if (!targetBlob) return null;
+    let ab = await targetBlob.arrayBuffer();
+
+    // If blob came from IndexedDB before AudioContext unlocked and exceeds network cap, downsample PCM WAV directly
+    if (ab.byteLength > MAX_NETWORK_AUDIO_BYTES) {
+      const parsed = tryDecodeMonoPcm16WavBuffer(ab);
+      if (parsed) {
+        const ds = downsampleAndNormalize(parsed, sampleRate, maxDuration);
+        targetBlob = encodeMonoWavBlob(ds.samples, ds.sampleRate);
+        outDuration = Number(ds.duration.toFixed(2));
+        ab = await targetBlob.arrayBuffer();
+      }
+    }
+
+    // Final safety downstep if still slightly over 140 KB
+    if (ab.byteLength > MAX_NETWORK_AUDIO_BYTES) {
+      const srcBuf = rec.buffer || tryDecodeMonoPcm16WavBuffer(ab);
+      if (srcBuf) {
+        const ds = downsampleAndNormalize(srcBuf, Math.min(sampleRate, 8000), Math.min(maxDuration, 2.8));
+        targetBlob = encodeMonoWavBlob(ds.samples, ds.sampleRate);
+        outDuration = Number(ds.duration.toFixed(2));
+        ab = await targetBlob.arrayBuffer();
+      }
+    }
+
+    if (ab.byteLength > MAX_NETWORK_AUDIO_BYTES) return null;
+
+    const rawMime = typeof targetBlob.type === 'string' ? targetBlob.type.split(';')[0].trim().toLowerCase() : '';
+    const mime = /^audio\/(?:wav|mpeg|mp3|ogg|webm|mp4)$/.test(rawMime) ? rawMime : 'audio/wav';
+    const dataUrl = `data:${mime};base64,${arrayBufferToBase64(ab)}`;
+    if (dataUrl.length > MAX_LOBBY_AUDIO_DATA_URL_CHARS || !SAFE_AUDIO_DATA_URL_RE.test(dataUrl)) {
+      return null;
+    }
+
+    return {
+      slot,
+      dataUrl,
+      duration: Number(outDuration) || 1.0,
+      label: String(rec.label || 'Host Sound').slice(0, 32),
+    };
+  }
+
+  async exportAllCustomSoundsForNetwork() {
+    const exported = [];
+    for (const slot of SOUND_SLOTS) {
+      const item = await this.exportSlotForNetwork(slot);
+      if (item) exported.push(item);
+    }
+    return exported;
+  }
+
+  async setLobbySound(slot, dataUrl, label = 'Host Sound') {
+    if (!SOUND_SLOTS.includes(slot)) return false;
+    if (!dataUrl) {
+      this.lobbyRecords.delete(slot);
+      return true;
+    }
+    if (
+      typeof dataUrl !== 'string' ||
+      dataUrl.length > MAX_LOBBY_AUDIO_DATA_URL_CHARS ||
+      !SAFE_AUDIO_DATA_URL_RE.test(dataUrl)
+    ) {
+      return false;
+    }
+    const cleanLabel = String(label || 'Host Sound').trim().slice(0, 32) || 'Host Sound';
+    const record = {
+      slot,
+      dataUrl,
+      buffer: null,
+      label: cleanLabel,
+    };
+    this.lobbyRecords.set(slot, record);
+
+    if (this.ctx) {
+      try {
+        const ab = dataUrlToArrayBuffer(dataUrl);
+        if (ab) {
+          const decoded = await this.ctx.decodeAudioData(ab.slice(0));
+          if (this.lobbyRecords.get(slot) === record) {
+            record.buffer = decoded;
+          }
+        }
+      } catch {
+        // Ignore corrupt lobby audio entry without breaking synth
+      }
+    }
+    return true;
+  }
+
+  setLobbyOverride(enabled, hostName = '') {
+    this.lobbyOverrideEnabled = Boolean(enabled);
+    this.lobbyHostName = String(hostName || '').trim().slice(0, 24);
+  }
+
+  clearLobbySounds() {
+    this.lobbyRecords.clear();
+    this.lobbyOverrideEnabled = false;
+    this.lobbyHostName = '';
+  }
+
+  getLobbySoundCount() {
+    return this.lobbyRecords.size;
   }
 
   previewSlot(slot) {

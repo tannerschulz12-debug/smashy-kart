@@ -430,12 +430,16 @@ export function renderQrCodeSvg(text, options = {}) {
 // ============================================================================
 
 const CLOUD_MQTT_BROKERS = [
+  'wss://broker.hivemq.com:8884/mqtt',
   'wss://broker.emqx.io:8084/mqtt',
   'wss://test.mosquitto.org:8081',
 ];
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SAFE_AVATAR_RE = /^data:image\/(?:png|webp|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/;
+const VALID_CLOUD_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted']);
+const SAFE_AUDIO_DATA_URL_RE = /^data:audio\/(?:wav|mpeg|mp3|ogg|webm|mp4);base64,[A-Za-z0-9+/=]+$/;
+const MAX_SOUND_DATA_URL_LEN = 190000;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -527,6 +531,7 @@ function defaultCloudRoomSettings() {
       allowModeChoice: true,
       allowCustomPhotos: true,
       allowPlayerCops: true,
+      shareHostSounds: true,
       universalSpeedMult: 1.0,
       universalDriftMult: 1.0,
       universalMassMult: 1.0,
@@ -594,6 +599,7 @@ function sanitizeCloudRoomSettings(current = {}, patch = {}) {
       allowModeChoice: pr.allowModeChoice !== undefined ? Boolean(pr.allowModeChoice) : curR.allowModeChoice !== false,
       allowCustomPhotos: pr.allowCustomPhotos !== undefined ? Boolean(pr.allowCustomPhotos) : curR.allowCustomPhotos !== false,
       allowPlayerCops: pr.allowPlayerCops !== undefined ? Boolean(pr.allowPlayerCops) : curR.allowPlayerCops !== false,
+      shareHostSounds: pr.shareHostSounds !== undefined ? Boolean(pr.shareHostSounds) : curR.shareHostSounds !== false,
       universalSpeedMult: Number.isFinite(Number(pr.universalSpeedMult))
         ? Math.max(0.6, Math.min(1.7, Number(pr.universalSpeedMult)))
         : curR.universalSpeedMult ?? 1.0,
@@ -793,7 +799,7 @@ class MqttWssClient {
     const body = concatUint8(
       new Uint8Array([(id >> 8) & 0xff, id & 0xff, (tBytes.length >> 8) & 0xff, tBytes.length & 0xff]),
       tBytes,
-      new Uint8Array([0x01]) // QoS 1 so discrete room & hit events are never dropped
+      new Uint8Array([0x00]) // QoS 0 avoids PUBACK burst throttling on public WSS brokers
     );
     const pkt = concatUint8(new Uint8Array([0x82, ...encodeMqttVarLen(body.length)]), body);
     return new Promise((resolve) => {
@@ -842,7 +848,27 @@ class MqttWssClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const now = Date.now();
-    const minGap = (this._lastLargeSendAt && now - this._lastLargeSendAt < 70) ? 55 : 16;
+    if (!this._sentTimestamps) this._sentTimestamps = [];
+    while (this._sentTimestamps.length > 0 && now - this._sentTimestamps[0] >= 1050) {
+      this._sentTimestamps.shift();
+    }
+
+    // Stay safely below public WSS broker 10 msg/sec burst limits (<= 8 msgs per 1.05s window)
+    if (this._sentTimestamps.length >= 8) {
+      const waitMs = Math.max(25, 1050 - (now - this._sentTimestamps[0]) + 15);
+      this._txTimer = setTimeout(() => {
+        this._txTimer = null;
+        this._drainTxQueue();
+      }, waitMs);
+      return;
+    }
+
+    const minGap =
+      this._lastHugeSendAt && now - this._lastHugeSendAt < 160
+        ? 140
+        : this._lastLargeSendAt && now - this._lastLargeSendAt < 120
+          ? 100
+          : 25;
     const elapsed = now - (this._lastSendAt || 0);
     if (elapsed < minGap) {
       this._txTimer = setTimeout(() => {
@@ -854,6 +880,8 @@ class MqttWssClient {
 
     const pkt = this._txQueue.shift();
     this._lastSendAt = now;
+    this._sentTimestamps.push(now);
+    if (pkt.length > 32768) this._lastHugeSendAt = now;
     if (pkt.length > 4096) this._lastLargeSendAt = now;
     try {
       this.ws.send(pkt);
@@ -864,7 +892,7 @@ class MqttWssClient {
       this._txTimer = setTimeout(() => {
         this._txTimer = null;
         this._drainTxQueue();
-      }, pkt.length > 4096 ? 55 : 16);
+      }, pkt.length > 32768 ? 140 : pkt.length > 4096 ? 100 : 25);
     }
   }
 
@@ -1212,9 +1240,10 @@ export class MultiplayerClient {
   }
 
   _publishCloud(code, packet) {
-    if (!this.mqtt || !this.mqtt.connected || !code) return;
+    if (!this.mqtt || !code) return;
     const isHighFreqState = packet?.env === 'peer' && packet?.msg?.type === 'player_state';
-    this.mqtt.publish(this._roomTopic(code), packet, isHighFreqState ? 0 : 1);
+    if (isHighFreqState && !this.mqtt.connected) return;
+    this.mqtt.publish(this._roomTopic(code), packet, 0);
   }
 
   _serializeCloudRoom(room, includeAvatars = false) {
@@ -1366,12 +1395,12 @@ export class MultiplayerClient {
       standings,
       leaderboard: standings,
     };
-    this._publishCloud(room.code, { env: 'h2c', msg });
+    this._publishCloud(room.code, { env: 'h2c', from: room.hostId, msg });
     this._handleServerMessage(msg);
   }
 
   _broadcastCloudFromHost(room, msg, targetId = null) {
-    this._publishCloud(room.code, { env: 'h2c', targetId, msg });
+    this._publishCloud(room.code, { env: 'h2c', from: room.hostId, targetId, msg });
     if (!targetId || targetId === this.playerId) {
       this._handleServerMessage(msg);
     }
@@ -1562,6 +1591,79 @@ export class MultiplayerClient {
         break;
       }
 
+      case 'sound_sync': {
+        if (!this.roomCode || !this.isHost || !this._cloudHostRoom) return;
+        const room = this._cloudHostRoom;
+        const slot = typeof obj.slot === 'string' ? obj.slot : '';
+        if (!VALID_CLOUD_SOUND_SLOTS.has(slot)) return;
+        const rawDataUrl = obj.dataUrl;
+        let cleanDataUrl = null;
+        if (rawDataUrl !== null && rawDataUrl !== undefined && rawDataUrl !== '') {
+          if (
+            typeof rawDataUrl !== 'string' ||
+            rawDataUrl.length > MAX_SOUND_DATA_URL_LEN ||
+            !SAFE_AUDIO_DATA_URL_RE.test(rawDataUrl)
+          ) {
+            return;
+          }
+          cleanDataUrl = rawDataUrl;
+        }
+        const cleanLabel =
+          typeof obj.label === 'string' && obj.label.trim()
+            ? obj.label.trim().slice(0, 32)
+            : 'Host Sound';
+        if (!room.hostSounds) room.hostSounds = new Map();
+        if (cleanDataUrl) {
+          room.hostSounds.set(slot, { slot, dataUrl: cleanDataUrl, label: cleanLabel });
+        } else {
+          room.hostSounds.delete(slot);
+        }
+        const hostName =
+          room.members.get(this.playerId)?.profile?.name || this._lastProfile?.name || 'Host';
+        this._broadcastCloudFromHost(room, {
+          type: 'sound_sync',
+          slot,
+          dataUrl: cleanDataUrl,
+          label: cleanLabel,
+          hostName,
+        });
+        break;
+      }
+
+      case 'sound_sync_clear': {
+        if (!this.roomCode || !this.isHost || !this._cloudHostRoom) return;
+        const room = this._cloudHostRoom;
+        if (room.hostSounds) room.hostSounds.clear();
+        this._broadcastCloudFromHost(room, {
+          type: 'sound_sync_clear',
+          code: room.code,
+          roomCode: room.code,
+        });
+        break;
+      }
+
+      case 'horn_event': {
+        if (!this.roomCode) return;
+        const rosterMe = this.roomState?.players?.find((p) => p.id === this.playerId);
+        const playerName =
+          this._cloudHostRoom?.members?.get(this.playerId)?.profile?.name ||
+          rosterMe?.name ||
+          this._lastProfile?.name ||
+          'Player';
+        this._publishCloud(this.roomCode, {
+          env: 'peer',
+          from: this.playerId,
+          msg: {
+            type: 'horn_event',
+            playerId: this.playerId,
+            playerName,
+            x: Number.isFinite(Number(obj.x)) ? Number(obj.x) : 0,
+            z: Number.isFinite(Number(obj.z)) ? Number(obj.z) : 0,
+          },
+        });
+        break;
+      }
+
       case 'player_eliminated': {
         if (!this.roomCode) return;
         if (this.isHost && this._cloudHostRoom) {
@@ -1633,9 +1735,10 @@ export class MultiplayerClient {
   _handleCloudPacket(topic, packet) {
     if (!packet || typeof packet !== 'object') return;
 
-    // 1. Direct 1-hop peer packets (20Hz position, Mario Kart abilities, PvP slams)
+    // 1. Direct 1-hop peer packets (20Hz position, Mario Kart abilities, PvP slams, Horns)
     if (packet.env === 'peer') {
       if (!packet.from || packet.from === this.playerId) return;
+      if (packet.msg?.type === 'sound_sync' || packet.msg?.type === 'sound_sync_clear') return;
       if (this.isHost && this._cloudHostRoom?.match && packet.msg?.type === 'player_state') {
         const part = this._cloudHostRoom.match.participants.get(packet.from);
         if (part && part.alive) {
@@ -1652,6 +1755,13 @@ export class MultiplayerClient {
     if (packet.env === 'h2c') {
       if (this.isHost) return; // Host already applied locally
       if (packet.targetId && packet.targetId !== this.playerId) return;
+      if (packet.from && this.roomState?.hostId && packet.from !== this.roomState.hostId) return;
+      if (
+        (packet.msg?.type === 'sound_sync' || packet.msg?.type === 'sound_sync_clear') &&
+        !(this.roomState?.hostId && packet.from === this.roomState.hostId)
+      ) {
+        return;
+      }
       if (packet.msg?.type === 'room_joined') {
         this._clearJoinTimers();
       }
@@ -1716,6 +1826,26 @@ export class MultiplayerClient {
           fromId
         );
         this._broadcastCloudFromHost(room, serialized);
+        if (
+          room.settings?.lobbyRules?.shareHostSounds !== false &&
+          room.hostSounds &&
+          room.hostSounds.size > 0
+        ) {
+          const hostName = room.members.get(room.hostId)?.profile?.name || 'Host';
+          for (const entry of room.hostSounds.values()) {
+            this._broadcastCloudFromHost(
+              room,
+              {
+                type: 'sound_sync',
+                slot: entry.slot,
+                dataUrl: entry.dataUrl,
+                label: entry.label,
+                hostName,
+              },
+              fromId
+            );
+          }
+        }
       } else if (cmd.type === 'update_profile') {
         const m = room.members.get(fromId);
         if (m) {
@@ -1854,6 +1984,43 @@ export class MultiplayerClient {
         break;
       }
 
+      case 'sound_sync': {
+        if (!VALID_CLOUD_SOUND_SLOTS.has(msg.slot)) break;
+        const rawUrl = msg.dataUrl;
+        const cleanUrl =
+          rawUrl === null || rawUrl === undefined || rawUrl === ''
+            ? null
+            : typeof rawUrl === 'string' &&
+                rawUrl.length <= MAX_SOUND_DATA_URL_LEN &&
+                SAFE_AUDIO_DATA_URL_RE.test(rawUrl)
+              ? rawUrl
+              : undefined;
+        if (cleanUrl === undefined) break;
+        this._emit('sound_sync', {
+          slot: msg.slot,
+          dataUrl: cleanUrl,
+          label: typeof msg.label === 'string' ? msg.label.slice(0, 32) : 'Host Sound',
+          hostName: typeof msg.hostName === 'string' ? msg.hostName.slice(0, 24) : '',
+        });
+        break;
+      }
+
+      case 'sound_sync_clear': {
+        this._emit('sound_sync_clear', msg);
+        break;
+      }
+
+      case 'horn_event': {
+        if (msg.playerId && msg.playerId === this.playerId) break;
+        this._emit('horn_event', {
+          playerId: msg.playerId || null,
+          playerName: typeof msg.playerName === 'string' ? msg.playerName.slice(0, 24) : 'Player',
+          x: Number.isFinite(Number(msg.x)) ? Number(msg.x) : 0,
+          z: Number.isFinite(Number(msg.z)) ? Number(msg.z) : 0,
+        });
+        break;
+      }
+
       case 'player_eliminated': {
         const entry = this.remoteSnapshots.get(msg.playerId);
         if (entry?.latest) entry.latest.alive = false;
@@ -1989,6 +2156,7 @@ export class MultiplayerClient {
         state: 'lobby',
         settings: sanitizeCloudRoomSettings(defaultCloudRoomSettings(), settings),
         members: new Map([[this.playerId, { id: this.playerId, profile: cleanProfile }]]),
+        hostSounds: new Map(), // slot -> { slot, dataUrl, label }
         match: null,
       };
       this.isHost = true;
@@ -2083,7 +2251,9 @@ export class MultiplayerClient {
     if (!player || !this.roomCode || !this.connected) return;
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const playerCount = this.roomState?.players?.length || 2;
-    const minIntervalMs = playerCount >= 12 ? 85 : playerCount >= 7 ? 68 : 50;
+    const minIntervalMs = this._useCloudMode()
+      ? (playerCount >= 10 ? 185 : 145)
+      : (playerCount >= 12 ? 85 : playerCount >= 7 ? 68 : 50);
     if (!force && now - this._lastStateSentAt < minIntervalMs) return;
     this._lastStateSentAt = now;
 
@@ -2132,6 +2302,31 @@ export class MultiplayerClient {
   sendPvpBump(bump) {
     if (!this.roomCode || !bump) return;
     this._sendRaw({ type: 'pvp_bump', ...bump });
+  }
+
+  syncHostSound(slot, dataUrl, label = '') {
+    if (!this.roomCode || !this.isHost) return;
+    if (!VALID_CLOUD_SOUND_SLOTS.has(slot)) return;
+    this._sendRaw({
+      type: 'sound_sync',
+      slot,
+      dataUrl: dataUrl || null,
+      label: typeof label === 'string' ? label.slice(0, 32) : '',
+    });
+  }
+
+  clearAllHostSounds() {
+    if (!this.roomCode || !this.isHost) return;
+    this._sendRaw({ type: 'sound_sync_clear' });
+  }
+
+  sendHornEvent(payload = {}) {
+    if (!this.roomCode) return;
+    this._sendRaw({
+      type: 'horn_event',
+      x: Number.isFinite(Number(payload?.x)) ? Number(payload.x) : 0,
+      z: Number.isFinite(Number(payload?.z)) ? Number(payload.z) : 0,
+    });
   }
 
   sendPlayerEliminated(reason, killerName = null, survivalTime = 0, score = 0, copsWrecked = 0) {

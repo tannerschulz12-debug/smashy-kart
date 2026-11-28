@@ -24,9 +24,32 @@ import { World } from '../public/js/world.js';
 import { buildVehicleParts } from '../public/js/models.js';
 import { Renderer3D, POV_CAMERA_RIGS } from '../public/js/renderer3d.js';
 import { AbilitySystem } from '../public/js/abilities.js';
+import { SoundManager } from '../public/js/audio.js';
 import { Simulation } from '../public/js/physics_ai.js';
 import { renderQrCodeSvg, generateQrMatrix } from '../public/js/multiplayer.js';
 import { startServer } from '../server.mjs';
+
+function createSampleWavBytes(numSamples = 4500, sampleRate = 11025) {
+  const buf = Buffer.alloc(44 + numSamples * 2);
+  buf.write('RIFF', 0, 'ascii');
+  buf.writeUInt32LE(36 + numSamples * 2, 4);
+  buf.write('WAVE', 8, 'ascii');
+  buf.write('fmt ', 12, 'ascii');
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36, 'ascii');
+  buf.writeUInt32LE(numSamples * 2, 40);
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 0.5;
+    buf.writeInt16LE(Math.round(s * 0x7fff), 44 + i * 2);
+  }
+  return buf;
+}
 
 function httpGet(url) {
   return new Promise((resolve, reject) => {
@@ -122,12 +145,18 @@ function connectTestWs(port) {
           header[0] = 0x81;
           header[1] = 0x80 | payload.length;
           mask.copy(header, 2);
-        } else {
+        } else if (payload.length < 65536) {
           header = Buffer.alloc(8);
           header[0] = 0x81;
           header[1] = 0x80 | 126;
           header.writeUInt16BE(payload.length, 2);
           mask.copy(header, 4);
+        } else {
+          header = Buffer.alloc(14);
+          header[0] = 0x81;
+          header[1] = 0x80 | 127;
+          header.writeBigUInt64BE(BigInt(payload.length), 2);
+          mask.copy(header, 10);
         }
         const masked = Buffer.alloc(payload.length);
         for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i & 3];
@@ -519,6 +548,37 @@ async function runAllChecks() {
   const svg = renderQrCodeSvg('http://192.168.1.35:4567/?room=KART');
   assert.ok(svg.startsWith('<svg') && svg.includes('<path'));
 
+  console.log('4b. Checking SoundManager lobby sound overlay, compact WAV export, & payload validation...');
+  assert.equal(createDefaultSettings().lobbyRules.shareHostSounds, true, 'shareHostSounds must default to true');
+  const sm = new SoundManager(0.85);
+  const sampleWavBytes = createSampleWavBytes(4500, 11025);
+  const sampleHornWav = `data:audio/wav;base64,${sampleWavBytes.toString('base64')}`;
+  sm.customRecords.set('horn', {
+    slot: 'horn',
+    blob: new Blob([sampleWavBytes], { type: 'audio/wav' }),
+    buffer: null,
+    duration: 0.41,
+    label: 'Tanner Airhorn',
+    updatedAt: Date.now(),
+  });
+  const exportedHorn = await sm.exportSlotForNetwork('horn');
+  assert.ok(exportedHorn && exportedHorn.dataUrl.startsWith('data:audio/wav;base64,'));
+  assert.equal(exportedHorn.slot, 'horn');
+  assert.ok(exportedHorn.dataUrl.length <= 190000, 'Exported lobby sound must stay under 190k chars');
+  const exportedAll = await sm.exportAllCustomSoundsForNetwork();
+  assert.equal(exportedAll.length, 1);
+  assert.equal(await sm.setLobbySound('horn', exportedHorn.dataUrl, 'Host Airhorn'), true);
+  assert.equal(sm.getLobbySoundCount(), 1);
+  assert.equal(await sm.setLobbySound('horn', 'data:text/html;base64,PHNjcmlwdD4=', 'Bad'), false);
+  assert.equal(sm.getLobbySoundCount(), 1, 'Invalid lobby sound must not corrupt valid slot');
+  sm.setLobbyOverride(true, 'Tanner');
+  assert.equal(sm.lobbyOverrideEnabled, true);
+  assert.equal(sm.lobbyHostName, 'Tanner');
+  sm.clearLobbySounds();
+  assert.equal(sm.getLobbySoundCount(), 0);
+  assert.equal(sm.lobbyOverrideEnabled, false);
+  assert.equal(sm.hasCustomSound('horn'), true, 'Clearing lobby sounds must preserve personal saved sounds');
+
   console.log('5. Checking HTTP static server, path traversal guard (negative check), & 2-phone Party WebSocket match...');
   const srv = await startServer(0, '127.0.0.1');
   try {
@@ -679,6 +739,50 @@ async function runAllChecks() {
     await p2.waitFor((m) => m.type === 'room_state' && m.settings?.lobbyRules?.allowPlayerCops === true);
 
     for (const ck of extraClients) ck.close();
+    await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
+
+    // Verify Lobby Owner sound_sync broadcast, late-join replay, guest forgery rejection, & horn_event relay!
+    p1.send({ type: 'sound_sync', slot: 'horn', dataUrl: sampleHornWav, label: 'Tanner Airhorn' });
+    const guestSound = await p2.waitFor((m) => m.type === 'sound_sync' && m.slot === 'horn');
+    assert.equal(guestSound.dataUrl, sampleHornWav, 'Guest must receive exact Host sound_sync WAV payload');
+    assert.equal(guestSound.label, 'Tanner Airhorn');
+    assert.equal(guestSound.hostName, 'Tanner');
+
+    // Late-joining Guest #3 must automatically receive cached Host sound_sync on join_room!
+    const p3 = await connectTestWs(port);
+    await p3.waitFor((m) => m.type === 'welcome');
+    p3.send({
+      type: 'join_room',
+      code: created.code,
+      profile: { name: 'LateJoiner', characterMode: 'car_driver', vehicleId: 'sedan', ready: true },
+    });
+    await p3.waitFor((m) => m.type === 'room_joined');
+    const lateSound = await p3.waitFor((m) => m.type === 'sound_sync' && m.slot === 'horn');
+    assert.equal(lateSound.dataUrl, sampleHornWav, 'Late-joining guest must receive cached Host sound_sync');
+    assert.equal(lateSound.hostName, 'Tanner');
+
+    // Negative security check: Guest forging sound_sync or sound_sync_clear MUST be rejected!
+    p2.send({ type: 'sound_sync', slot: 'boost', dataUrl: sampleHornWav, label: 'Forged Boost' });
+    const forgeErr = await p2.waitFor((m) => m.type === 'error' && m.code === 'NOT_HOST');
+    assert.equal(forgeErr.code, 'NOT_HOST', 'Non-host sound_sync must be rejected with NOT_HOST');
+    p2.send({ type: 'sound_sync_clear' });
+    const forgeClearErr = await p2.waitFor((m) => m.type === 'error' && m.code === 'NOT_HOST');
+    assert.equal(forgeClearErr.code, 'NOT_HOST', 'Non-host sound_sync_clear must be rejected with NOT_HOST');
+
+    // Live horn_event relays from any room member to all other members
+    p1.send({ type: 'horn_event', x: 12.5, z: -34.25 });
+    const hornP2 = await p2.waitFor((m) => m.type === 'horn_event');
+    const hornP3 = await p3.waitFor((m) => m.type === 'horn_event');
+    assert.equal(hornP2.playerName, 'Tanner');
+    assert.equal(hornP2.x, 12.5);
+    assert.equal(hornP2.z, -34.25);
+    assert.equal(hornP3.playerName, 'Tanner');
+
+    // Host clearing lobby sounds notifies guests cleanly
+    p1.send({ type: 'sound_sync_clear' });
+    await p2.waitFor((m) => m.type === 'sound_sync_clear');
+
+    p3.close();
     await p1.waitFor((m) => m.type === 'room_state' && m.players?.length === 2);
 
     p1.send({ type: 'start_match', seed: 888999 });

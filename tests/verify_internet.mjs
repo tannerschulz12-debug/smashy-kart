@@ -2,6 +2,28 @@
 import assert from 'node:assert/strict';
 import { MultiplayerClient, generateQrMatrix, renderQrCodeSvg } from '../public/js/multiplayer.js';
 
+function createSampleWavDataUrl(numSamples = 4500, sampleRate = 11025) {
+  const buf = Buffer.alloc(44 + numSamples * 2);
+  buf.write('RIFF', 0, 'ascii');
+  buf.writeUInt32LE(36 + numSamples * 2, 4);
+  buf.write('WAVE', 8, 'ascii');
+  buf.write('fmt ', 12, 'ascii');
+  buf.writeUInt32LE(16, 16);
+  buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(1, 22);
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28);
+  buf.writeUInt16LE(2, 32);
+  buf.writeUInt16LE(16, 34);
+  buf.write('data', 36, 'ascii');
+  buf.writeUInt32LE(numSamples * 2, 40);
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.sin((2 * Math.PI * 523.25 * i) / sampleRate) * 0.5;
+    buf.writeInt16LE(Math.round(s * 0x7fff), 44 + i * 2);
+  }
+  return `data:audio/wav;base64,${buf.toString('base64')}`;
+}
+
 function waitForEvent(client, eventName, predicate = () => true, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -60,6 +82,28 @@ async function runInternetPartyTest() {
     assert.equal(twoRoom.players[0].avatarDataUrl.length, avatar1.length);
     assert.equal(twoRoom.players[1].avatarDataUrl.length, avatar2.length);
     console.log('   Both 22KB custom photo cutouts synced phone-to-phone over internet WSS!');
+
+    // Verify Host custom sound_sync (~12KB WAV) + horn_event + sound_sync_clear over live WSS internet room!
+    const sampleHornWav = createSampleWavDataUrl(4500, 11025);
+    const soundSyncP = waitForEvent(phone2, 'sound_sync', (m) => m.slot === 'horn');
+    phone1.syncHostSound('horn', sampleHornWav, 'Host Airhorn');
+    const soundRecv = await soundSyncP;
+    assert.equal(soundRecv.slot, 'horn');
+    assert.equal(soundRecv.dataUrl, sampleHornWav, 'Guest phone must receive exact 12KB Host WAV payload');
+    assert.equal(soundRecv.label, 'Host Airhorn');
+    assert.equal(soundRecv.hostName, 'Tanner');
+
+    const hornRecvP = waitForEvent(phone2, 'horn_event');
+    phone1.sendHornEvent({ x: 42, z: -18 });
+    const hornRecv = await hornRecvP;
+    assert.equal(hornRecv.playerName, 'Tanner');
+    assert.equal(hornRecv.x, 42);
+    assert.equal(hornRecv.z, -18);
+
+    const soundClearP = waitForEvent(phone2, 'sound_sync_clear');
+    phone1.clearAllHostSounds();
+    await soundClearP;
+    console.log('   Live ~12KB Host sound_sync + horn_event synced phone-to-phone over internet WSS!');
 
     const cd1P = waitForEvent(phone1, 'match_countdown');
     const cd2P = waitForEvent(phone2, 'match_countdown');
