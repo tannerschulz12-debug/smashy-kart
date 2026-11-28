@@ -110,6 +110,10 @@ const SOUND_SLOT_LABELS = {
   item: { title: 'Fire Mario Kart Ability', hint: 'Plays when throwing shells, bombs, or zaps' },
   horn: { title: 'Custom Horn / Taunt', hint: 'Plays whenever you tap the horn button' },
   busted: { title: 'Busted / Wrecked Sound', hint: 'Plays when police arrest or wreck you' },
+  nuke: {
+    title: '☢️ Tactical Nuke Siren / Voice',
+    hint: 'Plays during the 5-second Nuke countdown (host clip plays for all 16 players!)',
+  },
 };
 
 function loadSavedSettings() {
@@ -193,6 +197,7 @@ function loadSavedSettings() {
         : (defaults.copVehicleId || 'cop_heli'),
       itemBoxDensity: Number(clampNum(parsed.itemBoxDensity, 0.1, 5.0, defaults.itemBoxDensity ?? 1.2).toFixed(2)),
       sugarBoxRate: Number(clampNum(parsed.sugarBoxRate, 0, 5.0, defaults.sugarBoxRate ?? 1.0).toFixed(2)),
+      nukeKillDoubleOdds: parsed.nukeKillDoubleOdds !== false,
       enabledItems: { ...defaults.enabledItems, ...(parsed.enabledItems || {}) },
       itemWeights: cloneItemWeights(parsed.itemWeights),
       lobbyRules: {
@@ -329,6 +334,8 @@ class SmashyKartApp {
     this._fpsFrames = 0;
     this._fpsAccum = 0;
     this._currentFps = 60;
+    this._lastNukeUiTargetMs = 0;
+    this._nukeFlashTimeout = null;
   }
 
   async init() {
@@ -346,6 +353,7 @@ class SmashyKartApp {
     this._bindGlobalAudioUnlock();
     this._bindKeyboardInput();
     this._bindTouchControls();
+    this._bindNukeTargeting();
     this._bindHudLayoutEditor();
     this._bindHomeAndModals();
     this._bindPersonalSettings();
@@ -676,6 +684,15 @@ class SmashyKartApp {
       if (!el) return;
       el.addEventListener('pointerdown', (e) => {
         if (this.editingHudLayout) return;
+        if (
+          (el === leftZone || el === rightZone) &&
+          this._isHoldingTacticalNuke() &&
+          this._tryFireNukeAtScreenPoint(e.clientX, e.clientY)
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         e.preventDefault();
         if (stopProp) e.stopPropagation();
         el.setPointerCapture?.(e.pointerId);
@@ -779,6 +796,139 @@ class SmashyKartApp {
     window.matchMedia?.('(pointer: coarse)')?.addEventListener?.('change', () => {
       this._applyHudLayout();
     });
+  }
+
+  _bindNukeTargeting() {
+    const worldLabels = document.getElementById('world-labels');
+    const handleLabelTarget = (e) => {
+      const tag = e.target?.closest?.('[data-nuke-target-id]');
+      if (!tag) return;
+      if (!this._isHoldingTacticalNuke()) return;
+      if (e.type === 'click' && performance.now() - (this._lastNukeUiTargetMs || 0) < 300) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      this._lastNukeUiTargetMs = performance.now();
+      this._fireTargetedNukeFromUi(tag.dataset.nukeTargetId, tag.dataset.nukeTargetKind || null);
+    };
+
+    worldLabels?.addEventListener('pointerdown', handleLabelTarget);
+    worldLabels?.addEventListener('click', handleLabelTarget);
+
+    this.canvas?.addEventListener('pointerdown', (e) => {
+      if (this.editingHudLayout) return;
+      if (!this._isHoldingTacticalNuke()) return;
+      if (this._tryFireNukeAtScreenPoint(e.clientX, e.clientY)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+  }
+
+  _isHoldingTacticalNuke() {
+    const inPlay = this.mode === 'playing_solo' || this.mode === 'playing_party';
+    if (!inPlay || this.editingHudLayout) return false;
+    const lp = this.sim?.localPlayer;
+    return Boolean(lp && lp.alive && lp.items?.heldItem === 'tactical_nuke');
+  }
+
+  _tryFireNukeAtScreenPoint(clientX, clientY) {
+    if (!this._isHoldingTacticalNuke()) return false;
+    const isParty = Boolean(this.net.roomCode || this.mode === 'playing_party');
+    const hitRadius = 62;
+    let bestDist = hitRadius;
+    let bestId = null;
+    let bestKind = null;
+
+    const testEntity = (ent, kind) => {
+      if (!ent) return;
+      const proj = this.renderer.projectToScreen(ent.x, (ent.y || 0) + 1.5, ent.z);
+      if (!proj || !proj.visible) return;
+      const dist = Math.hypot(clientX - proj.x, clientY - proj.y);
+      if (dist <= bestDist) {
+        bestDist = dist;
+        bestId = ent.id;
+        bestKind = kind;
+      }
+    };
+
+    if (isParty) {
+      // Party mode: ONLY target alive real players! NEVER target NPCs!
+      for (let i = 0; i < this.sim.remotePlayers.length; i++) {
+        const rp = this.sim.remotePlayers[i];
+        if (!rp || rp.alive === false) continue;
+        testEntity(rp, 'player');
+      }
+    } else {
+      // Solo mode: target alive AI cops (or traffic cars if needed)
+      for (let i = 0; i < this.sim.cops.length; i++) {
+        const cop = this.sim.cops[i];
+        if (!cop || cop.wrecked || cop.alive === false) continue;
+        testEntity(cop, 'cop');
+      }
+      if (!bestId) {
+        for (let i = 0; i < this.sim.traffic.length; i++) {
+          const car = this.sim.traffic[i];
+          if (!car || car.wrecked) continue;
+          testEntity(car, 'traffic');
+        }
+      }
+    }
+
+    if (bestId) {
+      this._lastNukeUiTargetMs = performance.now();
+      this._fireTargetedNukeFromUi(bestId, bestKind);
+      return true;
+    }
+    return false;
+  }
+
+  _fireTargetedNukeFromUi(targetId, targetKind = null) {
+    if (!this._isHoldingTacticalNuke()) return false;
+    if (typeof this.sim.fireTargetedNuke !== 'function') return false;
+    const res = this.sim.fireTargetedNuke(targetId, targetKind);
+    if (res && Array.isArray(res.events)) {
+      for (const ev of res.events) {
+        this._handleSimEvent(ev);
+      }
+    }
+    return Boolean(res?.used);
+  }
+
+  _triggerNukeFlash() {
+    const flashEl = document.getElementById('nuke-flash');
+    if (!flashEl) return;
+    flashEl.classList.remove('hidden', 'active');
+    void flashEl.offsetWidth;
+    flashEl.classList.add('active');
+    if (this._nukeFlashTimeout) clearTimeout(this._nukeFlashTimeout);
+    this._nukeFlashTimeout = setTimeout(() => {
+      flashEl.classList.add('hidden');
+      flashEl.classList.remove('active');
+      this._nukeFlashTimeout = null;
+    }, 1500);
+  }
+
+  _hideNukeOverlays() {
+    if (this._nukeFlashTimeout) {
+      clearTimeout(this._nukeFlashTimeout);
+      this._nukeFlashTimeout = null;
+    }
+    const flashEl = document.getElementById('nuke-flash');
+    if (flashEl) {
+      flashEl.classList.add('hidden');
+      flashEl.classList.remove('active');
+    }
+    document.getElementById('nuke-target-hint')?.classList.add('hidden');
+    const bannerEl = document.getElementById('nuke-countdown-banner');
+    if (bannerEl) {
+      bannerEl.classList.add('hidden');
+      bannerEl.classList.remove('targeted-self');
+    }
+    document.getElementById('world-labels')?.classList.remove('nuke-targeting');
   }
 
   _updateJoystick(clientX, clientY, stickEl, maxR) {
@@ -1595,6 +1745,11 @@ class SmashyKartApp {
       if (!v) {
         document.getElementById('speed-lines')?.classList.add('hidden');
         document.getElementById('danger-vignette')?.classList.add('hidden');
+        const flashEl = document.getElementById('nuke-flash');
+        if (flashEl) {
+          flashEl.classList.add('hidden');
+          flashEl.classList.remove('active');
+        }
       }
     });
 
@@ -2482,7 +2637,7 @@ class SmashyKartApp {
         this.settings.enabledItems[ab.id] = true;
         weights[ab.id] = 100;
       }
-      toastMsg = '↺ Reset all 9 abilities to 100% drop rate!';
+      toastMsg = `↺ Reset all ${ABILITIES.length} abilities to 100% drop rate!`;
     } else if (presetId === 'equal') {
       const anyEnabled = ABILITIES.some((ab) => this.settings.enabledItems[ab.id] !== false);
       if (!anyEnabled) {
@@ -2497,7 +2652,14 @@ class SmashyKartApp {
         this.settings.enabledItems[ab.id] = true;
         weights[ab.id] = 500;
       }
-      toastMsg = '🔥 All 9 abilities cranked to 500% drop rate!';
+      toastMsg = `🔥 All ${ABILITIES.length} abilities cranked to 500% drop rate!`;
+    } else if (presetId === 'nuke1000') {
+      for (const ab of ABILITIES) {
+        this.settings.enabledItems[ab.id] = true;
+        weights[ab.id] = ab.id === 'tactical_nuke' ? 1000 : 0.1;
+      }
+      this.settings.enabledItems.tactical_nuke = true;
+      toastMsg = '☢️ 1000% Tactical Nuke Chaos!';
     } else if (presetId === 'rpg1000') {
       for (const ab of ABILITIES) {
         this.settings.enabledItems[ab.id] = true;
@@ -2533,11 +2695,13 @@ class SmashyKartApp {
     if (grid.querySelectorAll('[data-ability-card]').length !== ABILITIES.length) {
       grid.innerHTML = '';
       for (const ab of ABILITIES) {
+        const isNuke = ab.id === 'tactical_nuke';
         const card = document.createElement('div');
-        card.className = 'ability-mixer-card';
+        card.className = isNuke ? 'ability-mixer-card nuke-featured' : 'ability-mixer-card';
         card.dataset.abilityCard = ab.id;
         card.style.setProperty('--ab-accent', ab.color || '#facc15');
         card.innerHTML = `
+          ${isNuke ? '<div class="nuke-featured-eyebrow">☢️ TACTICAL NUKE LUCKY DROP SECTION</div>' : ''}
           <div class="ab-card-head">
             <div class="ab-title-group">
               <span class="ab-icon" aria-hidden="true">${ab.icon}</span>
@@ -2583,16 +2747,40 @@ class SmashyKartApp {
             </div>
             <div class="ab-quick-chips" role="group" aria-label="${this._escapeHtml(ab.name)} quick drop rates">
               <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="0.1">0.1%</button>
+              ${isNuke ? `<button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="10">10%</button>` : ''}
               <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="100">100%</button>
               <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="500">500%</button>
               <button type="button" class="ab-qchip" data-quick-ability="${ab.id}" data-quick-rate="1000">1000%</button>
             </div>
           </div>
+          ${
+            isNuke
+              ? `<label class="nuke-kill-double-row" for="chk-nuke-kill-double"><input id="chk-nuke-kill-double" type="checkbox" checked /><span><strong>🎯 Real-Player Kill Doubles Nuke Odds</strong> <small>(2x -> 4x -> 8x per real player eliminated)</small></span></label>`
+              : ''
+          }
         `;
 
         const toggleBtn = card.querySelector('[data-toggle-item]');
         const sliderEl = card.querySelector('[data-rate-slider]');
         const numEl = card.querySelector('[data-rate-input]');
+
+        if (isNuke) {
+          const doubleChk = card.querySelector('#chk-nuke-kill-double');
+          doubleChk?.addEventListener('change', () => {
+            if (this.net.roomCode && !this.net.isHost) {
+              this._updateAbilityOddsLabels();
+              this._showChaosToast('🔒 Ability drop rates are controlled by the Lobby Host!');
+              return;
+            }
+            this.settings.nukeKillDoubleOdds = Boolean(doubleChk.checked);
+            saveSettings(this.settings);
+            this.abilities.updateSettings(this.settings);
+            this._updateAbilityOddsLabels();
+            if (this.net.roomCode && this.net.isHost) {
+              this.net.updateRoomSettings(this.settings);
+            }
+          });
+        }
 
         toggleBtn?.addEventListener('click', () => {
           if (this.net.roomCode && !this.net.isHost) {
@@ -2711,8 +2899,19 @@ class SmashyKartApp {
     if (!grid) return;
     const weights = this._ensureItemWeights();
     const enabledItems = this.settings.enabledItems || {};
-    const oddsMap = computeAbilityDropOdds(enabledItems, weights);
+    const inActiveMatch = this.mode === 'playing_solo' || this.mode === 'playing_party';
+    const oddsMap = computeAbilityDropOdds(enabledItems, weights, {
+      playerKills: inActiveMatch ? this.sim?.localPlayer?.playerKills || 0 : 0,
+      nukeKillDoubleOdds: this.settings.nukeKillDoubleOdds !== false,
+    });
     const isGuestLocked = Boolean(this.net.roomCode && !this.net.isHost);
+
+    const nukeDoubleChk = document.getElementById('chk-nuke-kill-double');
+    if (nukeDoubleChk) {
+      nukeDoubleChk.checked = this.settings.nukeKillDoubleOdds !== false;
+      nukeDoubleChk.disabled = isGuestLocked;
+      nukeDoubleChk.closest('.nuke-kill-double-row')?.classList.toggle('is-disabled', isGuestLocked);
+    }
 
     for (const ab of ABILITIES) {
       const enabled = enabledItems[ab.id] !== false;
@@ -2778,6 +2977,11 @@ class SmashyKartApp {
           (a) => Math.abs((weights[a.id] ?? 100) - clampDropRatePct(100 / (a.weight || 1))) < 0.15
         ),
       boost500: allEnabled && ABILITIES.every((a) => Math.abs((weights[a.id] ?? 100) - 500) < 0.05),
+      nuke1000:
+        enabledItems.tactical_nuke !== false &&
+        ABILITIES.every((a) =>
+          Math.abs((weights[a.id] ?? 100) - (a.id === 'tactical_nuke' ? 1000 : 0.1)) < 0.05
+        ),
       rpg1000:
         allEnabled &&
         ABILITIES.every((a) =>
@@ -2822,7 +3026,7 @@ class SmashyKartApp {
     list.innerHTML = '';
 
     for (const slot of SOUND_SLOTS) {
-      const info = SOUND_SLOT_LABELS[slot];
+      const info = SOUND_SLOT_LABELS[slot] || { title: slot, hint: '' };
       const slotState = summary[slot] || { hasCustom: false };
       const isRec = this.recordingSlot === slot;
 
@@ -3501,6 +3705,8 @@ class SmashyKartApp {
         traffic: this.sim.traffic,
         localPlayer: this.sim.localPlayer,
         remotePlayers: this.sim.remotePlayers,
+        isParty: Boolean(this.net.roomCode || this.mode === 'playing_party'),
+        time: this.sim.runTime || 0,
         onEvent: (simEv) => this._handleSimEvent(simEv),
       });
     });
@@ -3518,7 +3724,23 @@ class SmashyKartApp {
 
     this.net.on('player_eliminated', (msg) => {
       if (msg.standings) this.partyStandings = msg.standings;
-      if (msg.announcement) this._showChaosToast(`🚨 ${msg.announcement}`);
+      const gotRealKill = Boolean(
+        msg.playerId !== this.net.playerId &&
+          this.sim.localPlayer?.alive &&
+          ((msg.killerId && msg.killerId === this.net.playerId) ||
+            (!msg.killerId && msg.killerName && msg.killerName === this.settings.playerName))
+      );
+      if (gotRealKill) {
+        this.sim.localPlayer.playerKills = (this.sim.localPlayer.playerKills || 0) + 1;
+        if (this.settings.nukeKillDoubleOdds !== false) {
+          const mult = Math.pow(2, Math.min(8, this.sim.localPlayer.playerKills));
+          this._showChaosToast(`☢️ REAL-PLAYER KILL! Nuke Lucky Drop Odds DOUBLED (${mult}x)!`);
+        } else if (msg.announcement) {
+          this._showChaosToast(`🚨 ${msg.announcement}`);
+        }
+      } else if (msg.announcement) {
+        this._showChaosToast(`🚨 ${msg.announcement}`);
+      }
       this._updateSurvivorStrip();
     });
 
@@ -3577,6 +3799,7 @@ class SmashyKartApp {
         this.settings.startStars = 1;
         this.settings.itemBoxDensity = 1.2;
         this.settings.sugarBoxRate = 1.0;
+        this.settings.nukeKillDoubleOdds = true;
         this.settings.itemWeights = createDefaultItemWeights();
         for (const ab of ABILITIES) this.settings.enabledItems[ab.id] = true;
         this.abilities.updateSettings(this.settings);
@@ -3730,6 +3953,9 @@ class SmashyKartApp {
       );
     }
     if (rs.gravityMult !== undefined) this.settings.gravityMult = rs.gravityMult;
+    if (rs.nukeKillDoubleOdds !== undefined) {
+      this.settings.nukeKillDoubleOdds = Boolean(rs.nukeKillDoubleOdds);
+    }
     if (rs.enabledItems) this.settings.enabledItems = { ...this.settings.enabledItems, ...rs.enabledItems };
     if (rs.itemWeights) {
       this.settings.itemWeights = cloneItemWeights({
@@ -3929,6 +4155,7 @@ class SmashyKartApp {
   _startAttractDemo() {
     this.mode = 'attract';
     this._clearTouchState();
+    this._hideNukeOverlays();
     document.getElementById('hud').classList.add('hidden');
     document.getElementById('gameover-modal').classList.add('hidden');
     document.getElementById('danger-vignette').classList.add('hidden');
@@ -3996,6 +4223,7 @@ class SmashyKartApp {
     this._syncAllPhotoTextures();
     this.sim.resetRun(freshSeed, {
       ...this.settings,
+      isParty: false,
       playerId: 'local',
       spawnIndex: 0,
     });
@@ -4057,6 +4285,7 @@ class SmashyKartApp {
 
     const mergedSettings = {
       ...this.settings,
+      isParty: true,
       aiCopsEnabled: roomAiCops,
       playerRole: localRole,
       copVehicleId: localCopVehicleId,
@@ -4074,6 +4303,10 @@ class SmashyKartApp {
       itemBoxDensity: mergedItemBoxDensity,
       sugarBoxRate: mergedSugarBoxRate,
       gravityMult: roomSettings.gravityMult ?? this.settings.gravityMult,
+      nukeKillDoubleOdds:
+        roomSettings.nukeKillDoubleOdds !== undefined
+          ? Boolean(roomSettings.nukeKillDoubleOdds)
+          : this.settings.nukeKillDoubleOdds !== false,
       enabledItems: roomSettings.enabledItems || this.settings.enabledItems,
       itemWeights: mergedItemWeights,
       worldSeed: msg.seed,
@@ -4136,6 +4369,7 @@ class SmashyKartApp {
     this._wasHost = false;
     this._lobbyHostName = '';
     this.sound.clearLobbySounds?.();
+    this._hideNukeOverlays();
     this._startAttractDemo();
     document.getElementById('home-screen')?.classList.remove('hidden');
     document.getElementById('lobby-modal')?.classList.add('hidden');
@@ -4380,6 +4614,8 @@ class SmashyKartApp {
         } else if (id === 'cop_siren_surge' || id === 'cop_surge') {
           this.sound.playEvent('boost', 1.0);
           this._triggerHaptic(16);
+        } else if (id === 'tactical_nuke') {
+          this._triggerHaptic([35, 30, 50]);
         } else if (id === 'sugar_rush') {
           this.cameraShake = Math.max(this.cameraShake, 0.42);
           this.sound.playEvent('boost', 1.25);
@@ -4429,25 +4665,55 @@ class SmashyKartApp {
         }
         break;
       }
+      case 'nuke_incoming': {
+        this.sound.playEvent('nuke_incoming', 1.25);
+        this._triggerHaptic([35, 30, 50]);
+        this._showChaosToast(
+          `☢️ ${ev.ownerName || 'Player'} CALLED A NUKE ON ${ev.targetName || 'TARGET'}! (5s)`
+        );
+        break;
+      }
+      case 'nuke_detonate': {
+        this.sound.playEvent('nuke_detonate', 1.45);
+        this.cameraShake = Math.max(this.cameraShake, 1.85);
+        this.renderer.spawnExplosionVisual(ev.x, (ev.y || 0) + 1.5, ev.z, 26);
+        this.renderer.spawnDebris(ev.x, (ev.y || 0) + 2, ev.z, '#84cc16', 24, 28, 0.75);
+        if (this.settings.screenEffects !== false) {
+          this._triggerNukeFlash();
+        }
+        this._triggerHaptic([70, 40, 100, 40, 140]);
+        this._showChaosToast('☢️ TACTICAL NUKE DETONATED!');
+        break;
+      }
+      case 'nuke_no_target': {
+        this._showChaosToast('☢️ No live real players left on the map to target!');
+        break;
+      }
       case 'water_splash': {
         this.renderer.spawnDebris(ev.x, 0.2, ev.z, '#38bdf8', 18, 16, 0.48);
         this.sound.playEvent('water_splash', 1.0);
         if (ev.eliminated) {
           this._triggerHaptic([45, 40, 75]);
-          this._onLocalPlayerEliminated('drowned', ev.killerName);
+          this._onLocalPlayerEliminated(ev.isNuke ? 'nuked' : 'drowned', ev.killerName, ev.killerId);
         }
         break;
       }
       case 'busted': {
         this.sound.playEvent('busted', 1.0);
         this._triggerHaptic([45, 40, 75]);
-        this._onLocalPlayerEliminated('busted', ev.killerName);
+        this._onLocalPlayerEliminated(ev.isNuke ? 'nuked' : 'busted', ev.killerName, ev.killerId);
         break;
       }
       case 'wrecked': {
         this.sound.playEvent('busted', 1.0);
         this._triggerHaptic([55, 40, 85]);
-        this._onLocalPlayerEliminated('wrecked', ev.killerName);
+        this._onLocalPlayerEliminated(ev.isNuke ? 'nuked' : 'wrecked', ev.killerName, ev.killerId);
+        break;
+      }
+      case 'nuked': {
+        this.sound.playEvent('busted', 1.0);
+        this._triggerHaptic([70, 40, 100, 40, 140]);
+        this._onLocalPlayerEliminated('nuked', ev.killerName, ev.killerId);
         break;
       }
       default:
@@ -4455,7 +4721,7 @@ class SmashyKartApp {
     }
   }
 
-  _onLocalPlayerEliminated(reason, killerName) {
+  _onLocalPlayerEliminated(reason, killerName, killerId = null) {
     if (this.eliminatedSent) return;
     this.eliminatedSent = true;
     this.sound.updateLoopSounds(0, false, 1, false, true);
@@ -4473,7 +4739,7 @@ class SmashyKartApp {
 
     if (this.net.roomCode && (this.mode === 'playing_party' || this.mode === 'spectating')) {
       this.net.sendPlayerState(lp, true);
-      this.net.sendPlayerEliminated(reason, killerName, survived, score, copsWrecked);
+      this.net.sendPlayerEliminated(reason, killerName, survived, score, copsWrecked, killerId);
       this._clearTouchState();
       document.getElementById('touch-controls').classList.add('hidden');
 
@@ -4498,6 +4764,7 @@ class SmashyKartApp {
   _showGameOverModal({ isParty, winnerId, winnerName, winnerTeam, standings, reason }) {
     this.mode = 'gameover';
     this.sound.updateLoopSounds(0, false, 1, false, true);
+    this._hideNukeOverlays();
     document.getElementById('spectator-bar').classList.add('hidden');
     document.getElementById('danger-vignette').classList.add('hidden');
     document.getElementById('speed-lines').classList.add('hidden');
@@ -4559,7 +4826,14 @@ class SmashyKartApp {
       backLobbyBtn.classList.remove('hidden');
       playAgainBtn.textContent = this.net.isHost ? 'START REMATCH!' : 'BACK TO LOBBY';
     } else {
-      badge.textContent = reason === 'drowned' ? 'SPLASHED!' : reason === 'wrecked' ? 'WRECKED!' : 'BUSTED!';
+      badge.textContent =
+        reason === 'nuked'
+          ? '☢️ NUKED!'
+          : reason === 'drowned'
+            ? 'SPLASHED!'
+            : reason === 'wrecked'
+              ? 'WRECKED!'
+              : 'BUSTED!';
       title.textContent = lp?.eliminatedText || 'BUSTED!';
       reasonEl.textContent = `Best Survival: ${this.best.bestTime.toFixed(1)}s · High Score: ${Math.round(this.best.bestScore)}`;
       standingsWrap.classList.add('hidden');
@@ -4626,7 +4900,7 @@ class SmashyKartApp {
     if (useBtn && useIcon && useLabel && useCharges) {
       if (isCopMissileUnit) {
         const cd = Math.max(0, Number(lp.copMissileCooldown) || 0);
-        useBtn.classList.remove('spinning', 'sugar-glow');
+        useBtn.classList.remove('spinning', 'sugar-glow', 'nuke-glow');
         useCharges.classList.add('hidden');
         if (cd <= 0) {
           useBtn.classList.remove('disabled');
@@ -4641,7 +4915,7 @@ class SmashyKartApp {
         }
       } else if (items.rouletteTimer > 0) {
         const disp = ABILITIES.find((a) => a.id === items.rouletteDisplayId) || ABILITIES[0];
-        useBtn.classList.remove('disabled', 'sugar-glow', 'cop-weapon-ready');
+        useBtn.classList.remove('disabled', 'sugar-glow', 'nuke-glow', 'cop-weapon-ready');
         useBtn.classList.add('spinning');
         useIcon.textContent = disp.icon;
         useLabel.textContent = 'SPIN...';
@@ -4650,6 +4924,7 @@ class SmashyKartApp {
         const held = ABILITIES.find((a) => a.id === items.heldItem) || ABILITIES[0];
         useBtn.classList.remove('disabled', 'spinning', 'cop-weapon-ready');
         useBtn.classList.toggle('sugar-glow', items.heldItem === 'sugar_rush');
+        useBtn.classList.toggle('nuke-glow', items.heldItem === 'tactical_nuke');
         useIcon.textContent = held.icon;
         useLabel.textContent = held.shortName;
         if (items.charges > 1) {
@@ -4660,7 +4935,7 @@ class SmashyKartApp {
         }
       } else if (lp.playerRole === 'cop') {
         const cd = Math.max(0, Number(lp.copMissileCooldown) || 0);
-        useBtn.classList.remove('spinning', 'sugar-glow');
+        useBtn.classList.remove('spinning', 'sugar-glow', 'nuke-glow');
         useCharges.classList.add('hidden');
         if (cd <= 0) {
           useBtn.classList.remove('disabled');
@@ -4675,16 +4950,57 @@ class SmashyKartApp {
         }
       } else {
         useBtn.classList.add('disabled');
-        useBtn.classList.remove('spinning', 'sugar-glow', 'locked-pop', 'cop-weapon-ready');
+        useBtn.classList.remove('spinning', 'sugar-glow', 'nuke-glow', 'locked-pop', 'cop-weapon-ready');
         useIcon.textContent = '?';
         useLabel.textContent = 'ITEM';
         useCharges.classList.add('hidden');
       }
     }
 
+    // Tactical Nuke Tap-to-Target Hint Overlay
+    const nukeHintEl = document.getElementById('nuke-target-hint');
+    const holdingNuke = Boolean(
+      (this.mode === 'playing_solo' || this.mode === 'playing_party') &&
+        lp.alive &&
+        items.heldItem === 'tactical_nuke'
+    );
+    if (nukeHintEl) {
+      nukeHintEl.classList.toggle('hidden', !holdingNuke);
+      if (holdingNuke) {
+        const isParty = Boolean(this.net.roomCode || this.mode === 'playing_party');
+        nukeHintEl.textContent = isParty
+          ? "☢️ TAP ANY PLAYER'S NAME OR CAR TO NUKE (100% HIT)!"
+          : '☢️ TAP ANY COP/CAR OR PRESS NUKE TO LAUNCH (100% HIT)!';
+      }
+    }
+
+    // Tactical Nuke Live 5-Second Countdown Banner
+    const nukeBannerEl = document.getElementById('nuke-countdown-banner');
+    if (nukeBannerEl) {
+      const activeNuke = (this.abilities.getProjectiles?.() || []).find(
+        (p) => p && p.type === 'tactical_nuke'
+      );
+      if (activeNuke) {
+        const cd = Math.max(0, Number(activeNuke.countdown) || 0).toFixed(1);
+        const lockedOnMe = Boolean(activeNuke.targetId && activeNuke.targetId === lp.id);
+        nukeBannerEl.classList.remove('hidden');
+        nukeBannerEl.classList.toggle('targeted-self', lockedOnMe);
+        nukeBannerEl.textContent = lockedOnMe
+          ? `☢️ NUKE LOCKED ON YOU! — ${cd}s`
+          : `☢️ NUKE INBOUND ON ${activeNuke.targetName || 'TARGET'} — ${cd}s`;
+      } else {
+        nukeBannerEl.classList.add('hidden');
+        nukeBannerEl.classList.remove('targeted-self');
+      }
+    }
+
     // Active buffs chips (under .hud-left-stack so top-center is 100% open!)
     const buffsEl = document.getElementById('active-buffs');
     const chips = [];
+    if ((lp.playerKills || 0) > 0 && this.settings.nukeKillDoubleOdds !== false) {
+      const nukeMult = Math.pow(2, Math.min(8, lp.playerKills));
+      chips.push({ text: `☢️ NUKE x${nukeMult}`, cls: 'buff-chip nuke' });
+    }
     if (items.sugarTimer > 0) {
       chips.push({ text: `🍭 ${items.sugarTimer.toFixed(1)}s`, cls: 'buff-chip sugar' });
     }
@@ -5043,7 +5359,17 @@ class SmashyKartApp {
 
   _renderFloatingNametags(focusEntity) {
     const container = document.getElementById('world-labels');
-    if (this.mode === 'attract' || this.sim.remotePlayers.length === 0) {
+    if (!container) return;
+
+    const holdingNuke = Boolean(
+      (this.mode === 'playing_solo' || this.mode === 'playing_party') &&
+        this.sim.localPlayer?.alive &&
+        this.sim.localPlayer?.items?.heldItem === 'tactical_nuke'
+    );
+    const isSoloNukeMode = this.mode === 'playing_solo' && !this.net.roomCode && holdingNuke;
+    container.classList.toggle('nuke-targeting', holdingNuke);
+
+    if (this.mode === 'attract' || (!isSoloNukeMode && this.sim.remotePlayers.length === 0)) {
       if (container.innerHTML !== '') container.innerHTML = '';
       return;
     }
@@ -5080,11 +5406,16 @@ class SmashyKartApp {
         : /^#[0-9a-fA-F]{3,8}$/.test(rp.primaryColor || '')
           ? rp.primaryColor
           : '#facc15';
+      const safeTargetId = this._escapeHtml(rp.id);
+      const nukeAttrs = holdingNuke
+        ? ` data-nuke-target-id="${safeTargetId}" data-nuke-target-kind="player"`
+        : '';
+      const nukeBadge = holdingNuke ? '<span class="nuke-target-badge" aria-hidden="true">☢️</span>' : '';
 
       if (wp.onScreen) {
         html += `
-          <div class="player-tag" style="left:${wp.x.toFixed(1)}px;top:${wp.y.toFixed(1)}px;border-color:${borderCol}">
-            <span>${displayLabel}</span>
+          <div class="player-tag${holdingNuke ? ' nuke-targetable' : ''}"${nukeAttrs} style="left:${wp.x.toFixed(1)}px;top:${wp.y.toFixed(1)}px;border-color:${borderCol}">
+            ${nukeBadge}<span>${displayLabel}</span>
           </div>
         `;
       } else {
@@ -5108,13 +5439,64 @@ class SmashyKartApp {
         const ryPct = Math.round(((ty - pad.top) / Math.max(1, vh - pad.top - pad.bottom)) * 100);
         const deg = Math.round((wp.angleRad * 180) / Math.PI);
         html += `
-          <div class="player-tag offscreen" style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;transform:translate(-${rxPct}%, -${ryPct}%);border-color:${borderCol}">
-            <span class="tag-arrow" style="transform:rotate(${deg}deg)">➤</span>
+          <div class="player-tag offscreen${holdingNuke ? ' nuke-targetable' : ''}"${nukeAttrs} style="left:${tx.toFixed(1)}px;top:${ty.toFixed(1)}px;transform:translate(-${rxPct}%, -${ryPct}%);border-color:${borderCol}">
+            ${nukeBadge}<span class="tag-arrow" style="transform:rotate(${deg}deg)">➤</span>
             <span>${displayLabel}</span>
           </div>
         `;
       }
     }
+
+    // Solo mode ONLY: show clickable Tactical Nuke tags over up to 6 nearest on-screen alive AI cops (or traffic if AI cops OFF)
+    if (isSoloNukeMode) {
+      const lp = this.sim.localPlayer;
+      const fx = lp?.x || 0;
+      const fz = lp?.z || 0;
+      const COP_LABELS = {
+        heli: '🚁 Cop Heli',
+        tank: '🪖 Cop Tank',
+        swat: '🛡️ SWAT',
+        army: '🪖 Army',
+        suv: '🚓 Police SUV',
+        cruiser: '🚔 Police',
+      };
+
+      const collectVisibleTargets = (list, kind) => {
+        const hits = [];
+        for (let i = 0; i < list.length; i++) {
+          const ent = list[i];
+          if (!ent || ent.wrecked || ent.alive === false) continue;
+          const proj = this.renderer.projectToScreen(ent.x, (ent.y || 0) + 3.6 * (ent.scale || 1), ent.z);
+          if (!proj || !proj.visible) continue;
+          if (proj.x < 18 || proj.x > vw - 18 || proj.y < 54 || proj.y > vh - 18) continue;
+          const dist = Math.hypot(ent.x - fx, ent.z - fz);
+          const label =
+            kind === 'cop'
+              ? COP_LABELS[ent.type] || '🚔 Police'
+              : ent.isOutlaw
+                ? '🏎️ Outlaw'
+                : '🚗 Traffic';
+          hits.push({ id: ent.id, kind, x: proj.x, y: proj.y, dist, label });
+        }
+        hits.sort((a, b) => a.dist - b.dist);
+        return hits.slice(0, 6);
+      };
+
+      let npcTargets = collectVisibleTargets(this.sim.cops, 'cop');
+      if (npcTargets.length === 0) {
+        npcTargets = collectVisibleTargets(this.sim.traffic, 'traffic');
+      }
+
+      for (const t of npcTargets) {
+        html += `
+          <div class="player-tag nuke-targetable" data-nuke-target-id="${this._escapeHtml(t.id)}" data-nuke-target-kind="${t.kind}" style="left:${t.x.toFixed(1)}px;top:${t.y.toFixed(1)}px">
+            <span class="nuke-target-badge" aria-hidden="true">☢️</span>
+            <span>${t.label}</span>
+          </div>
+        `;
+      }
+    }
+
     container.innerHTML = html;
   }
 

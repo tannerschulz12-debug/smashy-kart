@@ -58,6 +58,9 @@ export class Simulation {
       : [];
 
     this.nextEntityId = 1;
+    this._nextCopId = 1;
+    this._nextTrafficId = 1;
+    this.isPartyMode = Boolean(this.settings.isParty);
     this.runTime = 0;
     const initAiCopsOn = this.settings.aiCopsEnabled !== false;
     this.wantedStars = initAiCopsOn ? this.settings.startStars || 1 : 0;
@@ -78,6 +81,9 @@ export class Simulation {
 
   updateSettings(settings = {}) {
     this.settings = { ...this.settings, ...(settings || {}) };
+    if (settings?.isParty !== undefined) {
+      this.isPartyMode = Boolean(settings.isParty);
+    }
     if (Array.isArray(settings.copAvatarPool)) {
       this.setCopAvatarPool(settings.copAvatarPool);
     }
@@ -122,6 +128,17 @@ export class Simulation {
     this.events = [];
 
     this.runTime = 0;
+    this._nextCopId = 1;
+    this._nextTrafficId = 1;
+    this.isPartyMode =
+      settings?.isParty !== undefined
+        ? Boolean(settings.isParty)
+        : Array.isArray(rosterPlayers) && rosterPlayers.length > 0;
+    if (settings?.isParty !== undefined) {
+      this.settings.isParty = Boolean(settings.isParty);
+    } else {
+      delete this.settings.isParty;
+    }
     this.comboCount = 0;
     this.comboTimer = 0;
     this._copSpawnCooldown = 0.85;
@@ -281,6 +298,7 @@ export class Simulation {
           shrunkTimer: 0,
           shockwaveVisualTimer: 0,
           copMissileCooldown: 0,
+          nukeSafeTimer: 0,
         };
 
     return {
@@ -345,10 +363,13 @@ export class Simulation {
       eliminatedReason: null,
       eliminatedText: null,
       killerName: null,
+      killerId: null,
+      nukedBy: null,
       bustedProgress: 0,
       score: 0,
       survivalTime: 0,
       copsWrecked: 0,
+      playerKills: 0,
       propsSmashed: 0,
       stars: Math.max(1, Math.min(5, Math.round(settings.startStars || 1))),
       items,
@@ -553,6 +574,9 @@ export class Simulation {
     }
 
     this.remotePlayers = Array.from(this._remoteById.values());
+    if (this.remotePlayers.length > 0 && this.settings?.isParty !== false) {
+      this.isPartyMode = true;
+    }
     return this.remotePlayers;
   }
 
@@ -733,21 +757,33 @@ export class Simulation {
     });
   }
 
-  _getRecentKillerName(player) {
-    if (!player?.lastBumpedBy) return null;
+  _getRecentKillerInfo(player) {
+    if (!player?.lastBumpedBy) return { killerId: null, killerName: null, reason: null };
     if (this.runTime - player.lastBumpedBy.time <= 6.5) {
-      return player.lastBumpedBy.name || null;
+      return {
+        killerId: player.lastBumpedBy.id || null,
+        killerName: player.lastBumpedBy.name || null,
+        reason: player.lastBumpedBy.reason || null,
+      };
     }
-    return null;
+    return { killerId: null, killerName: null, reason: null };
+  }
+
+  _getRecentKillerName(player) {
+    return this._getRecentKillerInfo(player).killerName;
   }
 
   _eliminateLocalPlayer(reason) {
     const lp = this.localPlayer;
     if (!lp || !lp.alive) return;
     lp.alive = false;
-    lp.eliminatedReason = reason;
-    const killerName = this._getRecentKillerName(lp);
+    const recent = this._getRecentKillerInfo(lp);
+    const isNuke = Boolean(lp.nukedBy || recent.reason === 'nuked');
+    const killerName = recent.killerName || lp.nukedBy || (isNuke ? lp.lastBumpedBy?.name || 'Rival' : null);
+    const killerId = recent.killerId || (isNuke ? lp.lastBumpedBy?.id || null : null);
+    lp.eliminatedReason = isNuke && reason === 'wrecked' ? 'nuked' : reason;
     lp.killerName = killerName;
+    lp.killerId = killerId;
 
     if (reason === 'drowned') {
       lp.eliminatedText = killerName
@@ -760,6 +796,8 @@ export class Simulation {
         z: lp.z,
         eliminated: true,
         reason: 'drowned',
+        isNuke,
+        killerId,
         killerName,
         survivalTime: lp.survivalTime,
         score: Math.round(lp.score),
@@ -775,14 +813,18 @@ export class Simulation {
         z: lp.z,
         eliminated: true,
         reason: 'busted',
+        isNuke,
+        killerId,
         killerName,
         survivalTime: lp.survivalTime,
         score: Math.round(lp.score),
       });
     } else {
-      lp.eliminatedText = killerName
-        ? `WRECKED BY ${killerName}!`
-        : 'WRECKED!';
+      lp.eliminatedText = isNuke
+        ? `☢️ NUKED BY ${killerName || 'Rival'}!`
+        : killerName
+          ? `WRECKED BY ${killerName}!`
+          : 'WRECKED!';
       this._emit({
         type: 'explosion',
         x: lp.x,
@@ -797,12 +839,68 @@ export class Simulation {
         y: lp.y,
         z: lp.z,
         eliminated: true,
-        reason: 'wrecked',
+        reason: isNuke ? 'nuked' : 'wrecked',
+        isNuke,
+        nuked: isNuke,
+        killerId,
         killerName,
         survivalTime: lp.survivalTime,
         score: Math.round(lp.score),
       });
     }
+  }
+
+  _isPartyActive() {
+    if (this.settings?.isParty === false) return false;
+    return Boolean(this.isPartyMode || this.remotePlayers.length > 0);
+  }
+
+  _buildAbilityContext(time = 0, extra = null) {
+    const base = {
+      world: this.world,
+      cops: this.cops,
+      traffic: this.traffic,
+      localPlayer: this.localPlayer,
+      remotePlayers: this.remotePlayers,
+      isParty: this._isPartyActive(),
+      time: this.runTime || time || 0,
+      onEvent: (ev) => this._emit(ev),
+    };
+    return extra ? { ...base, ...extra } : base;
+  }
+
+  fireTargetedNuke(targetId, targetKind = null) {
+    const lp = this.localPlayer;
+    if (!lp || !lp.alive || !this.abilitySystem) {
+      return { used: false, reason: 'unavailable', events: [] };
+    }
+    if (lp.items?.heldItem !== 'tactical_nuke') {
+      return { used: false, reason: 'not_holding_nuke', events: [] };
+    }
+    const captured = [];
+    const ctx = this._buildAbilityContext(this.runTime, {
+      targetId: targetId || null,
+      targetKind: targetKind || null,
+      isParty: this._isPartyActive(),
+      onEvent: (ev) => {
+        captured.push(ev);
+        this._emit(ev);
+      },
+    });
+    const res = this.abilitySystem.useHeldItem(lp, ctx) || { used: false };
+    return {
+      used: Boolean(res.used),
+      reason: res.reason || null,
+      abilityId: res.abilityId || 'tactical_nuke',
+      chargesLeft: res.chargesLeft ?? lp.items?.charges ?? 0,
+      netEvent: res.netEvent || null,
+      events: captured,
+    };
+  }
+
+  spawnNetworkAbilityEvent(event) {
+    if (!this.abilitySystem) return;
+    this.abilitySystem.spawnNetworkAbilityEvent(event, this._buildAbilityContext(this.runTime));
   }
 
   _emit(ev) {
@@ -837,15 +935,7 @@ export class Simulation {
       if (this.comboTimer === 0) this.comboCount = 0;
     }
 
-    const context = {
-      world: this.world,
-      cops: this.cops,
-      traffic: this.traffic,
-      localPlayer: lp,
-      remotePlayers: this.remotePlayers,
-      time: time || this.runTime,
-      onEvent: (ev) => this._emit(ev),
-    };
+    const context = this._buildAbilityContext(time);
 
     // 1. Update Ability timers & contact knockouts
     if (this.abilitySystem) {
@@ -1526,7 +1616,7 @@ export class Simulation {
 
     const flankOptions = [-1, 0, 1];
     const cop = {
-      id: `cop_${this.nextEntityId++}`,
+      id: `cop_${this._nextCopId++}`,
       type,
       avatarId,
       x: spawn.x,
@@ -1929,7 +2019,7 @@ export class Simulation {
     const cruiseSpeed = soloCopOutlaw ? 36 + this._rng() * 8 : spec.speed;
 
     const car = {
-      id: `traffic_${this.nextEntityId++}`,
+      id: `npc_${this._nextTrafficId++}`,
       type: soloCopOutlaw ? 'sedan' : spec.type,
       kind: soloCopOutlaw ? 'sedan' : spec.type,
       isOutlaw: soloCopOutlaw,

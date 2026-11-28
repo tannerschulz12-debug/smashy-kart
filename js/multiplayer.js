@@ -437,7 +437,7 @@ const CLOUD_MQTT_BROKERS = [
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SAFE_AVATAR_RE = /^data:image\/(?:png|webp|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/;
-const VALID_CLOUD_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted']);
+const VALID_CLOUD_SOUND_SLOTS = new Set(['boost', 'crash', 'item', 'horn', 'busted', 'nuke']);
 const SAFE_AUDIO_DATA_URL_RE = /^data:audio\/(?:wav|mpeg|mp3|ogg|webm|mp4);base64,[A-Za-z0-9+/=]+$/;
 const MAX_SOUND_DATA_URL_LEN = 190000;
 const textEncoder = new TextEncoder();
@@ -521,6 +521,7 @@ function defaultCloudRoomSettings() {
     trafficDensity: 1.0,
     itemBoxDensity: 1.2,
     sugarBoxRate: 1.0,
+    nukeKillDoubleOdds: true,
     gravityMult: 1.0,
     worldSeed: Math.floor(100000 + Math.random() * 900000),
     enabledItems,
@@ -572,6 +573,11 @@ function sanitizeCloudRoomSettings(current = {}, patch = {}) {
     next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(patch.sugarBoxRate))) * 100) / 100;
   } else {
     next.sugarBoxRate = Math.round(Math.max(0.0, Math.min(5.0, Number(next.sugarBoxRate ?? 1.0))) * 100) / 100;
+  }
+  if (patch.nukeKillDoubleOdds !== undefined) {
+    next.nukeKillDoubleOdds = Boolean(patch.nukeKillDoubleOdds);
+  } else {
+    next.nukeKillDoubleOdds = next.nukeKillDoubleOdds !== false;
   }
   if (patch.gravityMult !== undefined && patch.gravityMult !== null && Number.isFinite(Number(patch.gravityMult))) {
     next.gravityMult = Math.max(0.4, Math.min(1.6, Number(patch.gravityMult)));
@@ -1348,6 +1354,7 @@ export class MultiplayerClient {
       copsWrecked: p.copsWrecked || 0,
       eliminatedReason: p.eliminatedReason,
       killerName: p.killerName,
+      killerId: p.killerId || null,
     }));
   }
 
@@ -1515,6 +1522,7 @@ export class MultiplayerClient {
             copsWrecked: 0,
             eliminatedReason: null,
             killerName: null,
+            killerId: null,
           });
         }
 
@@ -1697,18 +1705,29 @@ export class MultiplayerClient {
     part.survivalTime = Number((Number(cmd.survivalTime) || 0).toFixed(2));
     part.score = Math.round(Number(cmd.score) || part.score || 0);
     part.copsWrecked = Number(cmd.copsWrecked) || part.copsWrecked || 0;
-    part.eliminatedReason = cmd.reason || 'busted';
+    part.eliminatedReason = cmd.isNuke ? 'nuked' : cmd.reason || 'busted';
     part.killerName = cmd.killerName || null;
+    part.killerId =
+      typeof cmd.killerId === 'string' && cmd.killerId.trim()
+        ? cmd.killerId.trim().slice(0, 48)
+        : null;
 
-    const announcement = part.killerName
-      ? part.eliminatedReason === 'drowned'
-        ? `${part.killerName} slammed ${part.name} into the river!`
-        : `${part.killerName} wrecked ${part.name}!`
-      : part.eliminatedReason === 'drowned'
-        ? `${part.name} drowned in the river!`
-        : part.eliminatedReason === 'busted'
-          ? `${part.name} got BUSTED by the police!`
-          : `${part.name} WRECKED out!`;
+    const announcement =
+      part.eliminatedReason === 'nuked'
+        ? part.killerName
+          ? `☢️ ${part.killerName} NUKED ${part.name}!`
+          : `☢️ ${part.name} was NUKED!`
+        : part.killerName
+          ? part.eliminatedReason === 'drowned'
+            ? `${part.killerName} slammed ${part.name} into the river!`
+            : part.eliminatedReason === 'busted'
+              ? `${part.killerName} boxed ${part.name} into the cops — BUSTED!`
+              : `${part.killerName} wrecked ${part.name}!`
+          : part.eliminatedReason === 'drowned'
+            ? `${part.name} drowned in the river!`
+            : part.eliminatedReason === 'busted'
+              ? `${part.name} got BUSTED by the police!`
+              : `${part.name} WRECKED out!`;
 
     this._broadcastCloudFromHost(room, {
       type: 'player_eliminated',
@@ -1716,6 +1735,7 @@ export class MultiplayerClient {
       playerName: part.name,
       reason: part.eliminatedReason,
       killerName: part.killerName,
+      killerId: part.killerId,
       announcement,
       survivalTime: part.survivalTime,
       standings: this._computeCloudStandings(room),
@@ -2329,12 +2349,13 @@ export class MultiplayerClient {
     });
   }
 
-  sendPlayerEliminated(reason, killerName = null, survivalTime = 0, score = 0, copsWrecked = 0) {
+  sendPlayerEliminated(reason, killerName = null, survivalTime = 0, score = 0, copsWrecked = 0, killerId = null) {
     if (!this.roomCode) return;
     this._sendRaw({
       type: 'player_eliminated',
       reason,
       killerName,
+      killerId,
       survivalTime,
       score,
       copsWrecked,
